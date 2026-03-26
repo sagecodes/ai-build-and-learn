@@ -1,10 +1,12 @@
 # AI Engineering - Build and Learn
 
+Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new topic and learn by building together.
 
-Gradio
-Pydantic AI
+> **Up next: MCP with FastMCP** (2026-03-27)
+> Build an MCP server and connect it to both OpenAI and Claude clients.
+> [RSVP](https://luma.com/am32zwgx) | [Join the Slack](https://slack.flyte.org/)
 
-## Tutorial list
+## Upcoming:
 
 <table>
 <thead>
@@ -17,32 +19,32 @@ Pydantic AI
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>MCP with FastMCP</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">YYYY-MM-DD</div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-03-27</div>
         <div style="font-size: 13px; color: #666;">
-          <a href="topics/mcp">code</a> • <a href="https://luma.com/ai-builders-and-learners">register</a>
+          <a href="topics/mcp">code</a> • <a href="https://luma.com/am32zwgx">register</a>
         </div>
       </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Build a simple MCP server using FastMCP and connect to it with the OpenAI Agents SDK. Covers pure computation tools, external state tools, and context-aware tools.
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Learn what MCP (Model Context Protocol) is and how to build an MCP server using FastMCP.
 </div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Tavily</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">YYYY-MM-DD</div>
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Agentic Search with Tavily</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-04-03</div>
         <div style="font-size: 13px; color: #666;">
-          <a href="topics/tavily">code</a> • <a href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/flyte2-quickstarts/00_flyte2-starter.ipynb">colab</a> • <a href="https://luma.com/ai-builders-and-learners">register</a>
+          <a href="topics/tavily">code</a> • <a href="https://luma.com/jylkp8gd">register</a>
         </div>
       </div>
     </td><td><div style="padding: 8px 0; line-height: 1.5;">Tavily is a search API often used by AI agents. Learn how to integrate Tavily search into your AI applications.
 </div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Planner Multi-Agent System</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">YYYY-MM-DD</div>
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Reinforcment Learnig with OpenEnv</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-04-10</div>
         <div style="font-size: 13px; color: #666;">
-          <a href="topics/planner-multi-agent">code</a> • <a href="https://colab.research.google.com/github/unionai/workshops/blob/main/tutorials/flyte2-quickstarts/00_flyte2-starter.ipynb">colab</a> • <a href="https://luma.com/ai-builders-and-learners">register</a>
+          <a href="topics/openenv">code</a> • <a href="https://luma.com/viuebg7e">register</a>
         </div>
       </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Create a scalable planner multi-agent system using Flyte.
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">An e2e framework for creating, deploying and using isolated execution environments for agentic RL training, built using Gymnasium style simple APIs
 </div></td></tr>
 </tbody>
 </table>

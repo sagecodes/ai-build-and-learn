@@ -185,8 +185,8 @@ If you only have one agent using one set of tools, MCP adds complexity for no be
 
 ## Next steps
 
-- Add a Claude/Anthropic client example
 - Add a Claude Code MCP integration example
+- Specialized MCP agent
 - Gradio example
 - Host on HF spaces
 - Flyte app hosting
