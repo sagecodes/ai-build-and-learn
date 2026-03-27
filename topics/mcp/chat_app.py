@@ -2,6 +2,7 @@
 Gradio chat interface for the Data Analysis MCP server.
 Lets you interactively ask questions and see charts inline.
 """
+import argparse
 import os
 import base64
 import tempfile
@@ -14,7 +15,14 @@ import gradio as gr
 
 load_dotenv()
 
-DATA_SERVER_URL = os.getenv("DATA_SERVER_URL", "http://localhost:8001/sse")
+LOCAL_URL = "http://localhost:8001/sse"
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--remote", type=str, help="Use a remote server URL")
+args = parser.parse_args()
+
+DATA_SERVER_URL = args.remote or os.getenv("DATA_SERVER_URL", LOCAL_URL)
+print(f"Connecting to: {DATA_SERVER_URL}")
 
 anthropic_client = Anthropic()
 anthropic_tools = []

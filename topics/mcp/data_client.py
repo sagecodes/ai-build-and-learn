@@ -2,6 +2,7 @@
 Claude client for the Data Analysis MCP server.
 Demonstrates stateful tool chaining: load → filter → aggregate → chart.
 """
+import argparse
 import asyncio
 import os
 import json
@@ -12,7 +13,14 @@ from fastmcp import Client
 
 load_dotenv()
 
-DATA_SERVER_URL = os.getenv("DATA_SERVER_URL", "http://localhost:8001/sse")
+LOCAL_URL = "http://localhost:8001/sse"
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--remote", type=str, help="Use a remote server URL")
+args = parser.parse_args()
+
+DATA_SERVER_URL = args.remote or os.getenv("DATA_SERVER_URL", LOCAL_URL)
+print(f"Connecting to: {DATA_SERVER_URL}")
 
 
 async def main():

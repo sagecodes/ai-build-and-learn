@@ -2,17 +2,16 @@
 Simple Agent using MCP server OpenAI
 """
 import asyncio
+import os
 from dotenv import load_dotenv
 from agents import Agent, Runner
 from agents.mcp import MCPServerSse
 
 load_dotenv()
 
-import os
-
-# Local: http://localhost:8000/sse
-# Remote: https://rapid-grass-86f44.apps.demo.hosted.unionai.cloud/mcp
+# Note: OpenAI Agents SDK uses SSE transport, so this only works with the local server
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000/sse")
+print(f"Connecting to: {MCP_SERVER_URL}")
 
 
 async def main():
