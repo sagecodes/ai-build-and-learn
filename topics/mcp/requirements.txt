@@ -2,7 +2,9 @@ anthropic
 beautifulsoup4
 ddgs
 fastmcp
+gradio
 httpx
+matplotlib
 openai-agents
 python-dotenv
 flyte[tui]>=2.0

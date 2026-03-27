@@ -69,7 +69,24 @@ A persistent FastMCP server (over SSE) with several tool types:
 | `fetch_webpage` | Web scraping | Fetch and extract text from a URL |
 | `greet` | Context-aware | Greet a user with MCP Context logging |
 
-Then a client using the OpenAI Agents SDK that connects to the running server and uses the tools.
+Then clients using the OpenAI Agents SDK and Anthropic SDK that connect to the running server and use the tools.
+
+### Data Analysis Server
+
+A second, specialized MCP server (`data_server.py`) that demonstrates stateful tools, chaining, and chart generation:
+
+| Tool | Description |
+|------|-------------|
+| `load_sample_data` | Load a built-in cities dataset into memory |
+| `load_csv` | Load custom CSV data |
+| `list_datasets` | See what's loaded |
+| `describe` | Summary stats (min/max/mean/sum) for numeric columns |
+| `filter_rows` | Filter with operators (==, >, <, contains, etc.) |
+| `aggregate` | Sum/avg/min/max/count on a column |
+| `top_n` | Get top N rows sorted by a column |
+| `create_chart` | Generate bar/line/scatter/pie chart as a PNG image |
+
+Tools are **stateful** - datasets persist across calls, so the model can load → filter → chart in sequence.
 
 ## Setup
 
@@ -116,6 +133,29 @@ python claude_client.py
 ```
 
 Both clients connect to the same running server, discover the available tools, and let the model decide which ones to call. This demonstrates MCP's portability - same server, different model providers.
+
+### Data Analysis Server
+
+```bash
+# Terminal: Start the data server (port 8001)
+python data_server.py
+
+# Another terminal: Run the data client
+python data_client.py
+```
+
+The client asks Claude to load data, find top cities, compute averages, and generate a chart. The chart is saved as `chart.png`.
+
+### Chat Interface
+
+A Gradio chat app (`chat_app.py`) that connects to the data analysis server. Ask questions interactively and see charts rendered inline.
+
+```bash
+# Make sure data_server.py is running, then:
+python chat_app.py
+```
+
+Opens at `http://localhost:7860` with example prompts to get started.
 
 ### Deploying with Flyte
 
@@ -225,7 +265,6 @@ Built something with MCP this week? Share it in [Slack](https://slack.flyte.org/
 - Specialized MCP agent
 - Gradio example
 - Host on HF spaces
-- Flyte app hosting
 - Chat interface example
 - Agent run from interface / CLI
 - Specialize servers
