@@ -1,19 +1,25 @@
 """
 Simple Agent using MCP server with Claude (Anthropic SDK)
 """
+import argparse
 import asyncio
 import json
+import os
 from dotenv import load_dotenv
 from anthropic import Anthropic
 from fastmcp import Client
 
 load_dotenv()
 
-import os
+LOCAL_URL = "http://localhost:8000/sse"
+REMOTE_URL = "https://rapid-grass-86f44.apps.demo.hosted.unionai.cloud/mcp"
 
-# Local: http://localhost:8000/sse
-# Remote: https://rapid-grass-86f44.apps.demo.hosted.unionai.cloud/mcp
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000/sse")
+parser = argparse.ArgumentParser()
+parser.add_argument("--remote", action="store_true", help="Use the deployed remote server")
+args = parser.parse_args()
+
+MCP_SERVER_URL = REMOTE_URL if args.remote else os.getenv("MCP_SERVER_URL", LOCAL_URL)
+print(f"Connecting to: {MCP_SERVER_URL}")
 
 
 async def main():

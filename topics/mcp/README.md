@@ -180,6 +180,10 @@ MCP_SERVER_URL=https://your-app-url.hosted.unionai.cloud/mcp
 
 Both clients read from `MCP_SERVER_URL`, so they work against local or remote servers without code changes.
 
+## FastMCP vs mcp (official SDK)
+
+There are two main Python packages for building MCP servers: `fastmcp` and `mcp[cli]`. FastMCP 1.0 was originally merged into the official `mcp` SDK as its high-level API, then FastMCP 2.0+ continued as its own package with additional features. `fastmcp` is more concise and opinionated with its decorator pattern. `mcp[cli]` is closer to the spec and gives more protocol-level control. This tutorial uses `fastmcp` for its simplicity.
+
 ## How it works
 
 FastMCP turns Python functions into MCP tools automatically:
