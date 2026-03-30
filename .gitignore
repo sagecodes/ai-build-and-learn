@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 .env
+.flyte
+.claude
