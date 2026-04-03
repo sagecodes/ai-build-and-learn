@@ -1,0 +1,9 @@
+langgraph>=1.0.7
+langchain-openai
+tavily-python
+flyte[tui]>=2.0
+markdown
+python-dotenv
+ipython
+unionai-reuse
+gradio
