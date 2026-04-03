@@ -2,9 +2,9 @@
 
 Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new topic and learn by building together.
 
-> **Up next: MCP with FastMCP** (2026-03-27)
-> Build an MCP server and connect it to both OpenAI and Claude clients.
-> [RSVP](https://luma.com/am32zwgx) | [Join the Slack](https://slack.flyte.org/)
+> **Up next: Agentic Search with Tavily** (2026-04-03)
+> Learn how to integrate Tavily search into a research agent pipeline.
+> [RSVP](https://luma.com/jylkp8gd) | [Join the Slack](https://slack.flyte.org/)
 
 ## Upcoming:
 
@@ -16,16 +16,6 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
-<tr><td>
-      <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>MCP with FastMCP</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-03-27</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/mcp">code</a> • <a href="https://luma.com/am32zwgx">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Learn what MCP (Model Context Protocol) is and how to build an MCP server using FastMCP.
-</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Agentic Search with Tavily</strong></div>
@@ -45,6 +35,39 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
         </div>
       </div>
     </td><td><div style="padding: 8px 0; line-height: 1.5;">An e2e framework for creating, deploying and using isolated execution environments for agentic RL training, built using Gymnasium style simple APIs
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>AutoResearch</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-04-17</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="https://luma.com/sprsr7vv">register</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Andrej Karpathy's AutoResearch concept — give an AI agent a small but real LLM training setup and let it experiment autonomously overnight.
+</div></td></tr>
+</tbody>
+</table>
+
+## Past:
+
+<table>
+<thead>
+<tr>
+<th align="left" width="40%">🔨 <strong>Topic</strong></th>
+<th align="left" width="60%">📝 <strong>Description</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>MCP with FastMCP</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-03-27</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/mcp">code</a> • <a href="https://www.youtube.com/watch?v=0T2Gmv0Wwqc">watch</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Learn what MCP (Model Context Protocol) is and how to build an MCP server using FastMCP.
 </div></td></tr>
 </tbody>
 </table>
