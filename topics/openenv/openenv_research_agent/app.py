@@ -45,8 +45,7 @@ serving_env = flyte.app.AppEnvironment(
     name="openenv-research-agent-ui",
     image=flyte.Image.from_debian_base(python_version=(3, 11)).with_pip_packages(
         "flyte>=2.1.2", "openenv-core>=0.2.3", "anthropic",
-        "tavily-python", "gradio", "plotly", "python-dotenv",
-        "markdown", "unionai-reuse",
+        "tavily-python", "gradio", "plotly", "python-dotenv", "markdown",
     ),
     resources=flyte.Resources(cpu=2, memory="2Gi"),
     secrets=[

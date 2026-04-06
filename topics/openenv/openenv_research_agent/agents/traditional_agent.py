@@ -57,9 +57,10 @@ class TraditionalAgent:
     the agent optimizes the metric, not the actual research goal.
     """
 
-    def __init__(self, query: str, max_steps: int = 8):
+    def __init__(self, query: str, max_steps: int = 8, env_url: str = None):
         self.query = query
         self.max_steps = max_steps
+        self._env_url = env_url or os.getenv("ENV_URL", "http://localhost:8000")
         self._keywords = self._extract_keywords(query)
 
     def _extract_keywords(self, query: str) -> str:
@@ -95,7 +96,7 @@ class TraditionalAgent:
         accumulated_results = []
         kw_scores = []
 
-        with GenericEnvClient(base_url=ENV_URL).sync() as client:
+        with GenericEnvClient(base_url=self._env_url).sync() as client:
             client.reset(query=self.query)
 
             for step in range(self.max_steps):

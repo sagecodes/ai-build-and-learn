@@ -22,7 +22,6 @@ base_env = flyte.TaskEnvironment(
         "gradio",
         "plotly",
         "markdown",
-        "unionai-reuse",
     ),
     resources=flyte.Resources(cpu=2, memory="2Gi"),
     secrets=[

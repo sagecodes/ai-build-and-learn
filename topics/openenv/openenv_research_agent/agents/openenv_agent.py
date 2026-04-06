@@ -113,10 +113,12 @@ class OpenEnvAgent:
         query: str,
         agent_id: int = 0,
         max_steps: int = 10,
+        env_url: str = None,
     ):
         self.query = query
         self.agent_id = agent_id
         self.max_steps = max_steps
+        self._env_url = env_url or os.getenv("ENV_URL", "http://localhost:8000")
         self._client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     def run(self) -> Generator[dict, None, None]:
@@ -129,7 +131,7 @@ class OpenEnvAgent:
         messages = [{"role": "user", "content": self.query}]
         accumulated_results = []
 
-        with GenericEnvClient(base_url=ENV_URL).sync() as client:
+        with GenericEnvClient(base_url=self._env_url).sync() as client:
             client.reset(query=self.query)
 
             for _ in range(self.max_steps):

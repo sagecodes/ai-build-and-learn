@@ -5,32 +5,33 @@ Two Flyte tasks are defined:
 
 1. run_research_episode(query, agent_type, max_steps) -> str (JSON)
    Runs a single research episode — either the OpenEnv agent or the
-   traditional agent — inside a Flyte task container. Returns the
-   full episode result as JSON including step log, reward history,
-   tool usage, and final scores.
+   traditional agent — inside a Flyte task pod. Each pod starts its own
+   local OpenEnv HTTP server on a random port, then the agent connects
+   to it via GenericEnvClient — same code path as local Docker development.
+   Returns the full episode result as JSON including step log and scores.
 
 2. run_research_comparison(queries, max_steps) -> str (JSON)
    The main pipeline. Takes a list of research questions and fans them
-   out as parallel Flyte tasks using Send — each question runs both
-   agents simultaneously. Returns a comparison report.
+   out as parallel Flyte tasks — each question runs both agents
+   simultaneously. Returns a comparison report.
 
    Fan-out diagram:
-       START → fan_out ──Send──→ run_research_episode (openenv, q1)
-                        ──Send──→ run_research_episode (traditional, q1)
-                        ──Send──→ run_research_episode (openenv, q2)
-                        ──Send──→ run_research_episode (traditional, q2)
-                             ...
-                        → collect_results → END
+       START → run_research_comparison
+                 ├─asyncio.gather──→ run_research_episode (openenv, q1)
+                 ├─asyncio.gather──→ run_research_episode (traditional, q1)
+                 ├─asyncio.gather──→ run_research_episode (openenv, q2)
+                 └─asyncio.gather──→ run_research_episode (traditional, q2)
+                 → collect results → END
 
 Flyte features demonstrated:
-  - Parallel fan-out via Send (visual in TUI)
-  - Per-task HTML reports with reward charts
+  - Parallel fan-out via asyncio.gather across the cluster
+  - Per-task HTML reports with step logs and reward scores
   - Result caching (same query + agent_type = instant replay)
   - Run links returned to Gradio UI
 
 Usage:
     # Local
-    flyte run --local --tui workflow.py run_research_comparison \
+    flyte run --local workflow.py run_research_comparison \
         --queries '["What is MCP?", "How does RAG work?"]'
 
     # Remote
@@ -38,19 +39,23 @@ Usage:
         --queries '["What is MCP?", "How does RAG work?"]'
 """
 
+import asyncio
 import json
-import base64
 import logging
-import operator
-from typing import Annotated
+import socket
+import threading
+import time
 
 import flyte
 import flyte.report
 import markdown as md_lib
+import uvicorn
 
-from config import base_env, ANTHROPIC_API_KEY, TAVILY_API_KEY
+from config import base_env
 from reward import keyword_reward, llm_judge_final_reward
+from env.models import ResearchAction, ResearchObservation
 from env.research_env import ResearchEnvironment
+from openenv.core.env_server.http_server import create_app
 from agents.openenv_agent import OpenEnvAgent
 from agents.traditional_agent import TraditionalAgent
 
@@ -63,6 +68,53 @@ env = base_env
 
 def _md_to_html(text: str) -> str:
     return md_lib.markdown(text, extensions=["tables", "fenced_code"])
+
+
+# ---------------------------------------------------------------------------
+# Local OpenEnv server helpers
+# ---------------------------------------------------------------------------
+# Each Flyte task pod starts its own OpenEnv HTTP server on a random port.
+# The agent connects to it via GenericEnvClient — same code path as local
+# Docker dev. The server thread is a daemon, so it dies when the task exits.
+
+def _free_port() -> int:
+    """Find a free TCP port on localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _start_env_server(port: int) -> None:
+    """
+    Start the OpenEnv HTTP server in a background daemon thread.
+
+    The server uses keyword_reward as the per-step reward function.
+    llm_judge_final_reward is called separately by agents at episode end.
+    """
+    app = create_app(
+        env=lambda: ResearchEnvironment(reward_fn=keyword_reward),
+        action_cls=ResearchAction,
+        observation_cls=ResearchObservation,
+        max_concurrent_envs=5,
+    )
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    # Poll /health until ready (max 30s)
+    import requests
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"http://127.0.0.1:{port}/health", timeout=1,
+                             proxies={"http": None, "https": None})
+            if r.status_code == 200:
+                return
+        except Exception:
+            pass
+        time.sleep(0.5)
+    raise TimeoutError(f"Local OpenEnv server on port {port} did not start within 30s")
 
 
 # ---------------------------------------------------------------------------
@@ -87,55 +139,66 @@ async def run_research_episode(
     )
     await flyte.report.flush.aio()
 
-    # Build environment with the appropriate reward function
-    reward_fn = keyword_reward
-    environment = ResearchEnvironment(reward_fn=reward_fn, max_steps=max_steps)
+    # Start a local OpenEnv HTTP server for this task pod
+    port = _free_port()
+    _start_env_server(port)
+    env_url = f"http://127.0.0.1:{port}"
+    log.info(f"[Episode] Local OpenEnv server ready at {env_url}")
 
     steps = []
     keyword_scores = []
-    llm_scores = []
+    llm_final_score = None
+    tool_usage: dict[str, int] = {}
 
     if agent_type == "openenv":
-        agent = OpenEnvAgent(query=query, max_steps=max_steps)
-        for step_data in agent.run(environment):
+        agent = OpenEnvAgent(query=query, max_steps=max_steps, env_url=env_url)
+        for step_data in agent.run():
             steps.append(step_data)
-            llm_scores.append(step_data.get("llm_score", 0.0))
-            log.info(f"[Episode] Step {step_data['step']}: {step_data['tool_name']} score={step_data.get('llm_score', 0):.2f}")
+            if step_data["tool_name"] == "final_judgment":
+                llm_final_score = step_data.get("llm_final_score", 0.0)
+            else:
+                tool = step_data.get("tool_name", "")
+                tool_usage[tool] = tool_usage.get(tool, 0) + 1
+                log.info(f"[Episode] Step {step_data['step']}: {tool}")
     else:
-        agent = TraditionalAgent(query=query, max_steps=max_steps)
-        for step_data in agent.run(environment):
+        agent = TraditionalAgent(query=query, max_steps=max_steps, env_url=env_url)
+        for step_data in agent.run():
             steps.append(step_data)
-            keyword_scores.append(step_data.get("keyword_score", 0.0))
-            llm_scores.append(step_data.get("llm_score", 0.0))
-            log.info(f"[Episode] Step {step_data['step']}: kw={step_data.get('keyword_score', 0):.2f} llm={step_data.get('llm_score', 0):.2f}")
+            if step_data["tool_name"] == "final_judgment":
+                llm_final_score = step_data.get("llm_final_score", 0.0)
+                keyword_scores.append(step_data.get("keyword_score", 0.0))
+            else:
+                kw = step_data.get("keyword_score", 0.0)
+                keyword_scores.append(kw)
+                tool = step_data.get("tool_name", "")
+                tool_usage[tool] = tool_usage.get(tool, 0) + 1
+                log.info(f"[Episode] Step {step_data['step']}: kw={kw:.2f}")
 
-    final_state = environment.state
-    avg_llm = sum(llm_scores) / max(len(llm_scores), 1)
+    total_steps = len([s for s in steps if s["tool_name"] != "final_judgment"])
     avg_kw = sum(keyword_scores) / max(len(keyword_scores), 1) if keyword_scores else None
 
     # Build Flyte HTML report
     step_rows = "".join(
         f"<tr><td>{s['step']}</td><td>{s['tool_name']}</td>"
         f"<td>{s.get('keyword_score', 'N/A')}</td>"
-        f"<td>{s.get('llm_score', 'N/A')}</td></tr>"
+        f"<td>{s.get('llm_final_score', 'N/A')}</td></tr>"
         for s in steps
     )
-
     tool_usage_html = "".join(
         f"<li>{tool}: {count} calls</li>"
-        for tool, count in final_state.tool_usage.items()
+        for tool, count in tool_usage.items()
     )
 
     report_html = f"""
 <h2>{agent_type.title()} Agent Episode Report</h2>
 <p><b>Query:</b> {query}</p>
-<p><b>Steps taken:</b> {final_state.step} / {final_state.max_steps}</p>
-<p><b>Avg LLM-judge score:</b> {avg_llm:.2f}</p>
+<p><b>Steps taken:</b> {total_steps} / {max_steps}</p>
+<p><b>Final LLM-judge score:</b> {llm_final_score:.2f}</p>
 {"<p><b>Avg keyword score:</b> " + f"{avg_kw:.2f}</p>" if avg_kw is not None else ""}
 <h3>Tool Usage</h3><ul>{tool_usage_html}</ul>
 <h3>Step Log</h3>
 <table border="1" cellpadding="4">
-  <tr><th>Step</th><th>Tool</th><th>Keyword Score</th><th>LLM Score</th></tr>
+  <tr><th>Step</th><th>Tool</th><th>Keyword Score</th><th>LLM Final Score</th></tr>
   {step_rows}
 </table>
 """
@@ -147,13 +210,12 @@ async def run_research_episode(
         "query": query,
         "agent_type": agent_type,
         "steps": steps,
-        "total_steps": final_state.step,
-        "tool_usage": final_state.tool_usage,
-        "avg_llm_score": round(avg_llm, 3),
+        "total_steps": total_steps,
+        "tool_usage": tool_usage,
+        "llm_final_score": round(llm_final_score, 3) if llm_final_score is not None else None,
         "avg_keyword_score": round(avg_kw, 3) if avg_kw is not None else None,
-        "total_reward": round(final_state.total_reward, 3),
     }
-    log.info(f"[Episode] Done: agent={agent_type} avg_llm={avg_llm:.2f}")
+    log.info(f"[Episode] Done: agent={agent_type} llm_final={llm_final_score:.2f}")
     return json.dumps(result)
 
 
@@ -172,45 +234,41 @@ async def run_research_comparison(
     Each combination (query, agent_type) becomes one run_research_episode
     task running in parallel on the cluster.
     """
-    from langgraph.types import Send  # noqa: deferred import
-
     log.info(f"[Comparison] Starting {len(queries)} queries × 2 agents")
 
     await flyte.report.replace.aio(
         f"<h2>Research Comparison Pipeline</h2>"
-        f"<p>Running {len(queries)} queries × 2 agents = {len(queries) * 2} parallel tasks</p>"
+        f"<p>Running {len(queries)} queries × 2 agents"
+        f" = {len(queries) * 2} parallel tasks</p>"
     )
     await flyte.report.flush.aio()
 
     # Fan out — each task runs independently on the cluster
-    results_json = []
-    import asyncio
     tasks = [
         run_research_episode(query=q, agent_type=agent, max_steps=max_steps)
         for q in queries
         for agent in ["openenv", "traditional"]
     ]
     results_json = await asyncio.gather(*tasks)
-
     results = [json.loads(r) for r in results_json]
 
     # Build summary comparison table
     rows = ""
     for r in results:
         kw = f"{r['avg_keyword_score']:.2f}" if r["avg_keyword_score"] is not None else "N/A"
+        llm = f"{r['llm_final_score']:.2f}" if r["llm_final_score"] is not None else "N/A"
         rows += (
             f"<tr><td>{r['query'][:50]}</td><td>{r['agent_type']}</td>"
-            f"<td>{r['total_steps']}</td><td>{kw}</td>"
-            f"<td>{r['avg_llm_score']:.2f}</td></tr>"
+            f"<td>{r['total_steps']}</td><td>{kw}</td><td>{llm}</td></tr>"
         )
 
     summary_html = f"""
 <h2>Comparison Results</h2>
 <table border="1" cellpadding="4">
-  <tr><th>Query</th><th>Agent</th><th>Steps</th><th>Keyword Score</th><th>LLM Score</th></tr>
+  <tr><th>Query</th><th>Agent</th><th>Steps</th><th>Keyword Score</th><th>LLM Final Score</th></tr>
   {rows}
 </table>
-<p><i>Notice: Traditional agent scores high on keyword metric but low on LLM judge.
+<p><i>Traditional agent scores high on keyword metric but low on LLM judge.
 OpenEnv agent scores consistently high on the LLM judge — the meaningful signal.</i></p>
 """
 
