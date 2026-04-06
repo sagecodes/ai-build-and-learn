@@ -98,9 +98,7 @@ def llm_judge_final_reward(
 
     Returns 0.0-1.0.
     """
-    print(f"[llm_judge_final_reward] accumulated_results count: {len(accumulated_results)}")
     if not accumulated_results:
-        print("[llm_judge_final_reward] ERROR: empty accumulated_results, returning 0.0")
         return 0.0
 
     # Combine all results into one research summary for the judge
@@ -110,9 +108,7 @@ def llm_judge_final_reward(
         if text.strip():
             combined += f"\n--- Result {i+1} ---\n{text}\n"
 
-    print(f"[llm_judge_final_reward] combined text length: {len(combined)}")
     if not combined.strip():
-        print("[llm_judge_final_reward] ERROR: combined text empty, returning 0.0")
         return 0.0
 
     # Truncate total to stay within token limits
@@ -149,8 +145,7 @@ Respond with ONLY a single integer from 1 to 10.
         score = int(re.search(r'\d+', score_text).group())
         score = max(1, min(10, score))
         return round(score / 10.0, 2)
-    except Exception as e:
-        print(f"[llm_judge_final_reward] ERROR: {e}")
+    except Exception:
         return 0.0
 
 

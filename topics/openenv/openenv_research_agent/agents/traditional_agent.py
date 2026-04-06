@@ -26,12 +26,14 @@ Usage:
         print(step_result)
 """
 
+import os
 import re
 from typing import Generator
+from openenv import GenericEnvClient
 from env.models import ResearchAction
-from env.research_env import ResearchEnvironment
 from reward import keyword_reward, llm_judge_final_reward
 
+ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
 # Fixed action templates — the traditional agent's entire "policy"
 # Each template stuffs the query keywords in different positions.
@@ -83,44 +85,51 @@ class TraditionalAgent:
             tool_args={"query": stuffed_query, "max_results": 5},
         )
 
-    def run(self, env: ResearchEnvironment) -> Generator[dict, None, None]:
+    def run(self) -> Generator[dict, None, None]:
         """
-        Run one episode, yielding a status dict after each step.
+        Run one episode via Docker EnvClient, yielding a status dict after each step.
 
         Per-step: yields keyword_score so the chart shows it climbing.
         Final step: yields llm_final_score showing the true quality gap.
         """
-        env.reset(query=self.query)
-
         accumulated_results = []
         kw_scores = []
 
-        for step in range(self.max_steps):
-            action = self._choose_action(step)
-            obs = env.step(action)
+        with GenericEnvClient(base_url=ENV_URL).sync() as client:
+            client.reset(query=self.query)
 
-            # Per-step keyword score — this is what the agent optimizes
-            kw_score = keyword_reward(
-                query=self.query,
-                tool_name=obs.tool_name,
-                result=obs.result,
-                step=obs.step,
-            )
-            kw_scores.append(kw_score)
-            accumulated_results.append(obs.result)
+            for step in range(self.max_steps):
+                action = self._choose_action(step)
+                step_result = client.step(action)
 
-            yield {
-                "step": obs.step,
-                "tool_name": obs.tool_name,
-                "query_used": action.tool_args.get("query", ""),
-                "keyword_score": kw_score,
-                "llm_final_score": None,  # not computed yet
-                "done": obs.done,
-                "agent": "traditional",
-            }
+                obs = step_result.observation  # dict from ResearchObservation
+                tool_result = obs.get("result", {})
+                tool_name = obs.get("tool_name", action.tool_name)
+                step_num = obs.get("step", step + 1)
+                done = step_result.done
 
-            if obs.done:
-                break
+                # Per-step keyword score — this is what the agent optimizes
+                kw_score = keyword_reward(
+                    query=self.query,
+                    tool_name=tool_name,
+                    result=tool_result,
+                    step=step_num,
+                )
+                kw_scores.append(kw_score)
+                accumulated_results.append(tool_result)
+
+                yield {
+                    "step": step_num,
+                    "tool_name": tool_name,
+                    "query_used": action.tool_args.get("query", ""),
+                    "keyword_score": kw_score,
+                    "llm_final_score": None,  # not computed yet
+                    "done": done,
+                    "agent": "traditional",
+                }
+
+                if done:
+                    break
 
         # Final LLM judge — evaluates ALL accumulated research at once
         llm_final = llm_judge_final_reward(

@@ -4,8 +4,8 @@
 # Each episode (agent run) gets its own isolated container instance,
 # which is OpenEnv's core isolation guarantee.
 #
-# Build:
-#   docker build -t research-env:latest ./env
+# Build (from project root):
+#   docker build -t research-env:latest -f env/Dockerfile .
 #
 # Run locally (for development):
 #   docker run -p 8000:8000 --env-file ../.env research-env:latest

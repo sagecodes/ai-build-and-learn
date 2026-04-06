@@ -14,18 +14,19 @@ from openenv.core.env_server.http_server import create_app
 
 from env.models import ResearchAction, ResearchObservation
 from env.research_env import ResearchEnvironment
-from reward import llm_judge_reward
+from reward import keyword_reward
 
 
 def env_factory() -> ResearchEnvironment:
     """Factory function — OpenEnv calls this to create a fresh environment per session."""
-    return ResearchEnvironment(reward_fn=llm_judge_reward)
+    return ResearchEnvironment(reward_fn=keyword_reward)
 
 
 app = create_app(
     env=env_factory,
     action_cls=ResearchAction,
     observation_cls=ResearchObservation,
+    max_concurrent_envs=10,
 )
 
 if __name__ == "__main__":

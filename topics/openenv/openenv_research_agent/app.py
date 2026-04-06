@@ -34,8 +34,6 @@ import plotly.graph_objects as go
 from dotenv import load_dotenv
 
 from workflow import run_research_episode, run_research_comparison
-from reward import keyword_reward
-from env.research_env import ResearchEnvironment
 from agents.openenv_agent import OpenEnvAgent
 from agents.traditional_agent import TraditionalAgent
 
@@ -185,15 +183,11 @@ def run_comparison(query: str, max_steps: int):
     trad_final_llm = None
     oe_final_llm = None
 
-    # Build environments
-    trad_env = ResearchEnvironment(reward_fn=keyword_reward, max_steps=max_steps)
-    oe_env = ResearchEnvironment(reward_fn=keyword_reward, max_steps=max_steps)  # reward_fn unused for final scoring
-
     trad_agent = TraditionalAgent(query=query, max_steps=max_steps)
     oe_agent = OpenEnvAgent(query=query, max_steps=max_steps)
 
-    trad_gen = trad_agent.run(trad_env)
-    oe_gen = oe_agent.run(oe_env)
+    trad_gen = trad_agent.run()
+    oe_gen = oe_agent.run()
 
     trad_done = False
     oe_done = False
@@ -289,8 +283,7 @@ def run_race(query: str, max_steps: int):
 
     num_agents = 3
     agents = [OpenEnvAgent(query=query, agent_id=i, max_steps=max_steps) for i in range(num_agents)]
-    envs = [ResearchEnvironment(reward_fn=llm_judge_reward, max_steps=max_steps) for _ in range(num_agents)]
-    gens = [agent.run(env) for agent, env in zip(agents, envs)]
+    gens = [agent.run() for agent in agents]
 
     scores = {i: [] for i in range(num_agents)}
     done = {i: False for i in range(num_agents)}
@@ -302,8 +295,12 @@ def run_race(query: str, max_steps: int):
                 continue
             try:
                 step = next(gen)
-                scores[i].append(step.get("llm_score", 0.0))
-                if step["done"]:
+                if step["tool_name"] == "final_judgment":
+                    scores[i].append(step.get("llm_final_score", 0.0))
+                    done[i] = True
+                    if winner is None:
+                        winner = i
+                elif step["done"]:
                     done[i] = True
                     if winner is None:
                         winner = i
