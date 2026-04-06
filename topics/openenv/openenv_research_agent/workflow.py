@@ -49,7 +49,7 @@ import flyte.report
 import markdown as md_lib
 
 from config import base_env, ANTHROPIC_API_KEY, TAVILY_API_KEY
-from reward import keyword_reward, llm_judge_reward
+from reward import keyword_reward, llm_judge_final_reward
 from env.research_env import ResearchEnvironment
 from agents.openenv_agent import OpenEnvAgent
 from agents.traditional_agent import TraditionalAgent
@@ -88,7 +88,7 @@ async def run_research_episode(
     await flyte.report.flush.aio()
 
     # Build environment with the appropriate reward function
-    reward_fn = llm_judge_reward if agent_type == "openenv" else keyword_reward
+    reward_fn = keyword_reward
     environment = ResearchEnvironment(reward_fn=reward_fn, max_steps=max_steps)
 
     steps = []

@@ -141,7 +141,14 @@ class OpenEnvAgent:
             if response.stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": response.content})
 
+                # First pass: execute ALL tool calls and collect results.
+                # We must provide a tool_result for every tool_use block —
+                # breaking mid-loop causes Anthropic API 400 errors.
                 tool_results = []
+                step_yields = []
+                episode_done = False
+                finish_requested = False
+
                 for block in response.content:
                     if block.type != "tool_use":
                         continue
@@ -149,39 +156,29 @@ class OpenEnvAgent:
                     tool_name = block.name
                     tool_args = block.input
 
-                    # finish action — compute final reward and end episode
                     if tool_name == "finish":
-                        env.step(ResearchAction(tool_name="finish", tool_args=tool_args))
-                        llm_final = llm_judge_final_reward(
-                            query=self.query,
-                            accumulated_results=accumulated_results,
-                        )
-                        yield {
-                            "step": -1,
-                            "tool_name": "final_judgment",
-                            "tool_args": tool_args,
-                            "llm_final_score": llm_final,
-                            "done": True,
-                            "agent_id": self.agent_id,
-                            "agent": "openenv",
-                        }
-                        return
+                        finish_requested = True
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": "Episode finished.",
+                        })
+                        continue
 
-                    # Execute the tool
                     action = ResearchAction(tool_name=tool_name, tool_args=tool_args)
                     obs = env.step(action)
                     accumulated_results.append(obs.result)
 
-                    yield {
+                    step_yields.append({
                         "step": obs.step,
                         "tool_name": tool_name,
                         "tool_args": tool_args,
-                        "llm_final_score": None,  # not computed yet
+                        "llm_final_score": None,
                         "result_preview": _preview(obs.result),
                         "done": obs.done,
                         "agent_id": self.agent_id,
                         "agent": "openenv",
-                    }
+                    })
 
                     tool_results.append({
                         "type": "tool_result",
@@ -190,9 +187,30 @@ class OpenEnvAgent:
                     })
 
                     if obs.done:
-                        break
+                        episode_done = True
+
+                # Yield step updates
+                for s in step_yields:
+                    yield s
 
                 messages.append({"role": "user", "content": tool_results})
+
+                # Handle finish or episode done after feeding all results back
+                if finish_requested or episode_done:
+                    llm_final = llm_judge_final_reward(
+                        query=self.query,
+                        accumulated_results=accumulated_results,
+                    )
+                    yield {
+                        "step": -1,
+                        "tool_name": "final_judgment",
+                        "tool_args": {},
+                        "llm_final_score": llm_final,
+                        "done": True,
+                        "agent_id": self.agent_id,
+                        "agent": "openenv",
+                    }
+                    return
 
             else:
                 # Claude finished without calling finish — compute final reward anyway

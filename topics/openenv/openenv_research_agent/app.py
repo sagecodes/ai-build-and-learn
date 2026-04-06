@@ -212,8 +212,6 @@ def run_comparison(query: str, max_steps: int):
                     trad_log.append(
                         f"Step {step['step']}: {step['tool_name']} | KW={kw:.2f}"
                     )
-                if step["done"]:
-                    trad_done = True
             except StopIteration:
                 trad_done = True
 
@@ -228,8 +226,6 @@ def run_comparison(query: str, max_steps: int):
                     oe_log.append(
                         f"Step {step['step']}: {step['tool_name']}"
                     )
-                if step["done"]:
-                    oe_done = True
             except StopIteration:
                 oe_done = True
 
@@ -253,18 +249,20 @@ def run_comparison(query: str, max_steps: int):
 
     # Final summary
     avg_kw = sum(trad_kw) / max(len(trad_kw), 1)
-    gap = avg_kw - (trad_final_llm or 0)
-    oe_advantage = (oe_final_llm or 0) - (trad_final_llm or 0)
+    trad_llm_val = trad_final_llm if trad_final_llm is not None else 0.0
+    oe_llm_val = oe_final_llm if oe_final_llm is not None else 0.0
+    gap = avg_kw - trad_llm_val
+    oe_advantage = oe_llm_val - trad_llm_val
 
     trad_log.append(
         f"\n--- SUMMARY ---\n"
-        f"Avg Keyword Score:        {avg_kw:.2f}  ← what the agent optimized\n"
-        f"Final LLM Judge Score:    {trad_final_llm:.2f}  ← actual quality\n"
-        f"Overestimation gap:       {gap:.2f}  ← this is reward hacking"
+        f"Avg Keyword Score:        {avg_kw:.2f}  <- what the agent optimized\n"
+        f"Final LLM Judge Score:    {trad_llm_val:.2f}  <- actual quality\n"
+        f"Overestimation gap:       {gap:.2f}  <- this is reward hacking"
     )
     oe_log.append(
         f"\n--- SUMMARY ---\n"
-        f"Final LLM Judge Score:    {oe_final_llm:.2f}\n"
+        f"Final LLM Judge Score:    {oe_llm_val:.2f}\n"
         f"OpenEnv advantage:        +{oe_advantage:.2f} over traditional"
     )
 
