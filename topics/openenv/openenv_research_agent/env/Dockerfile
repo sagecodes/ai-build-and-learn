@@ -24,9 +24,6 @@ RUN pip install --no-cache-dir -r requirements_env.txt
 COPY env/ ./env/
 COPY reward.py .
 
-# OpenEnv server entrypoint — starts the FastAPI/WebSocket server
-# that the EnvClient connects to via HTTP on port 8000
-CMD ["python", "-m", "openenv.core.env_server.http_server", \
-     "--env-class", "env.research_env:ResearchEnvironment", \
-     "--host", "0.0.0.0", \
-     "--port", "8000"]
+# OpenEnv server entrypoint — creates a FastAPI app via create_app() and
+# runs it with uvicorn. See env/server.py for the full setup.
+CMD ["python", "env/server.py"]

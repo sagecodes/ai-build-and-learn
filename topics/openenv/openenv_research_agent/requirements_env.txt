@@ -5,3 +5,5 @@ openenv-core>=0.2.3
 anthropic
 tavily-python
 python-dotenv
+uvicorn
+fastapi
