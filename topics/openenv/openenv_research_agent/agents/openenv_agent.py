@@ -7,23 +7,32 @@ agent, this agent:
   1. Discovers available tools dynamically at runtime (no fixed action space)
   2. Reasons about which tool to use based on prior observations
   3. Chains tools in sequence: search → extract → crawl as needed
-  4. Earns high llm_judge_reward scores because it actually researches well
+  4. Earns high llm_judge_final_reward scores because it actually researches well
 
-The ReAct loop is handled by OpenEnv's AnthropicClient.complete_with_tools()
-rather than being written manually (unlike fastmcp_agent_tavily/agent.py).
+The ReAct loop is written manually using the Anthropic SDK — explicit and
+inspectable for demo purposes.
 
-This agent can also be run in "race mode" — multiple instances of this
-class run concurrently against the same ResearchEnvironment, which supports
-concurrent sessions via SUPPORTS_CONCURRENT_SESSIONS = True.
+Agents connect to the OpenEnv HTTP server via GenericEnvClient. The server
+URL defaults to ENV_URL env var (http://localhost:8000 for local Docker),
+or can be passed explicitly as env_url for Flyte task pods.
 
-Usage (single agent):
+This agent can also be run in "race mode" — multiple instances connect to
+the same server, each getting its own isolated session via
+SUPPORTS_CONCURRENT_SESSIONS = True.
+
+Usage (single agent — local Docker):
     agent = OpenEnvAgent(query="What is MCP?")
-    for step_result in agent.run(env):
+    for step_result in agent.run():
         print(step_result)
 
 Usage (race — 3 agents, see app.py):
     agents = [OpenEnvAgent(query, agent_id=i) for i in range(3)]
-    # run concurrently via asyncio
+    # each connects to the same Docker server, separate sessions
+
+Usage (Flyte task — local server):
+    agent = OpenEnvAgent(query="What is MCP?", env_url="http://127.0.0.1:PORT")
+    for step_result in agent.run():
+        print(step_result)
 """
 
 import os

@@ -81,7 +81,7 @@ topics/openenv/openenv_research_agent/
 ├── agents/
 │   ├── openenv_agent.py     # Claude agent via Anthropic SDK
 │   └── traditional_agent.py # Fixed-policy keyword-stuffing agent
-├── reward.py                # keyword_reward + llm_judge_reward
+├── reward.py                # keyword_reward + llm_judge_final_reward
 ├── system_prompt.py         # Claude's research instructions
 ├── workflow.py              # Flyte tasks + parallel pipeline
 ├── config.py                # Flyte TaskEnvironment + secrets
@@ -176,6 +176,8 @@ Three OpenEnv agents race on the same question using OpenEnv's `SUPPORTS_CONCURR
 ### Tab 3 — Parallel Flyte Fan-out
 
 Enter multiple research questions (one per line). Each dispatches as a parallel Flyte task — both agents run per question. A Flyte run link appears immediately. Results stream in as tasks complete. Run the same question twice to see Flyte's **result cache** return instantly.
+
+Each Flyte task pod starts its own local OpenEnv HTTP server on a random port, then agents connect to it via `GenericEnvClient` — the same code path used in local Docker development. Flyte provides the task isolation; OpenEnv provides the HTTP interface inside each pod.
 
 ---
 

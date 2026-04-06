@@ -20,9 +20,14 @@ This agent deliberately mimics the limitations of classic RL approaches:
 The result: high per-step keyword_reward scores (0.8-1.0), low final
 llm_judge_final_reward score (0.2-0.4). This gap is the central demo moment.
 
-Usage:
+Usage (local Docker):
     agent = TraditionalAgent(query="What is MCP?")
-    for step_result in agent.run(env):
+    for step_result in agent.run():
+        print(step_result)
+
+Usage (Flyte task — local server):
+    agent = TraditionalAgent(query="What is MCP?", env_url="http://127.0.0.1:PORT")
+    for step_result in agent.run():
         print(step_result)
 """
 
