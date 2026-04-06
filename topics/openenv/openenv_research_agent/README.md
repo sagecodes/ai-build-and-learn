@@ -81,7 +81,7 @@ topics/openenv/openenv_research_agent/
 ├── agents/
 │   ├── openenv_agent.py     # Claude agent via Anthropic SDK
 │   └── traditional_agent.py # Fixed-policy keyword-stuffing agent
-├── reward.py                # keyword_reward + llm_judge_final_reward
+├── reward.py                # keyword_reward, keyword_reward_with_detail, llm_judge_final_reward
 ├── system_prompt.py         # Claude's research instructions
 ├── workflow.py              # Flyte tasks + parallel pipeline
 ├── config.py                # Flyte TaskEnvironment + secrets

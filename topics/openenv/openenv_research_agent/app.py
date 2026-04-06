@@ -378,13 +378,14 @@ def run_flyte_fanout(queries_text: str, max_steps: int):
     results = output.get("results", [])
 
     # Build comparison table
-    lines = [f"{'Query':<50} {'Agent':<12} {'Steps':<8} {'KW Score':<10} {'LLM Score'}"]
-    lines.append("-" * 100)
+    lines = [f"{'Query':<50} {'Agent':<12} {'Steps':<8} {'Keyword Score':<15} {'Final LLM Score'}"]
+    lines.append("-" * 105)
     for r in results:
         kw = f"{r['avg_keyword_score']:.2f}" if r["avg_keyword_score"] is not None else "N/A"
+        llm = f"{r['llm_final_score']:.2f}" if r["llm_final_score"] is not None else "N/A"
         lines.append(
             f"{r['query'][:48]:<50} {r['agent_type']:<12} "
-            f"{r['total_steps']:<8} {kw:<10} {r['avg_llm_score']:.2f}"
+            f"{r['total_steps']:<8} {kw:<15} {llm}"
         )
 
     yield "\n".join(lines), link_html

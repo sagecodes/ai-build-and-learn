@@ -17,8 +17,8 @@ This agent deliberately mimics the limitations of classic RL approaches:
   4. No tool chaining — it never calls tavily_extract or tavily_crawl
      because its fixed policy doesn't include them.
 
-The result: high per-step keyword_reward scores (0.8-1.0), low final
-llm_judge_final_reward score (0.2-0.4). This gap is the central demo moment.
+The result: high per-step Keyword Score (~0.95), low final
+llm_judge_final_reward score (0.20-0.30). This gap is the central demo moment.
 
 Usage (local Docker):
     agent = TraditionalAgent(query="What is MCP?")

@@ -1,29 +1,31 @@
 """
 Reward functions for the Research RL Environment.
 
-Two reward strategies are provided and used side-by-side in the demo:
+Three functions are provided:
 
 1. keyword_reward  — Traditional RL style. Counts keyword matches in each
                      tool result per step. Easy to game — an agent that stuffs
                      keywords scores high even with garbage content.
 
-2. llm_judge_final_reward — OpenEnv style. Uses Claude as a judge to evaluate
-                            the FULL accumulated research at episode end, not
-                            each step in isolation. Rewards genuine depth and
-                            breadth of research — much harder to game.
+2. keyword_reward_with_detail — Same as keyword_reward but also returns the
+                     list of matched keywords, used by the UI step log to
+                     show exactly what the traditional agent is gaming.
+
+3. llm_judge_final_reward — OpenEnv style. Uses Claude (Haiku) as a judge
+                     to evaluate the FULL accumulated research at episode end,
+                     not each step in isolation. Rewards genuine depth and
+                     breadth of research — much harder to game.
 
 The demo's "reward hacking" moment:
-  - Traditional agent: high keyword score per step, low final LLM score
-  - OpenEnv agent: lower per-step scores, HIGH final LLM score
-  - The gap proves why per-step keyword rewards fail for language tasks
+  - Traditional agent: Keyword Score ~0.95 per step, Final LLM Score 0.20-0.30
+  - OpenEnv agent: no per-step keyword score, Final LLM Score 0.70
+  - Gap of 0.40-0.50 proves why per-step keyword rewards fail for language tasks
 
-Per-step keyword_reward signature:
+Signatures:
     keyword_reward(query, tool_name, result, step) -> float (0.0 - 1.0)
-
-Final LLM judge signature:
-    llm_judge_final_reward(query, history) -> float (0.0 - 1.0)
-    where history is the list of {tool_name, tool_args, reward} dicts
-    from ResearchState.history
+    keyword_reward_with_detail(query, tool_name, result, step) -> (float, list[str])
+    llm_judge_final_reward(query, accumulated_results) -> float (0.0 - 1.0)
+        where accumulated_results is a list of result dicts from all tool steps
 """
 
 import os
