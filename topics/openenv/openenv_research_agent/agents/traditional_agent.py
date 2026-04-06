@@ -17,8 +17,8 @@ This agent deliberately mimics the limitations of classic RL approaches:
   4. No tool chaining — it never calls tavily_extract or tavily_crawl
      because its fixed policy doesn't include them.
 
-The result: high keyword_reward scores (0.7-0.9), low llm_judge_reward
-scores (0.2-0.4). This gap is the central demo moment.
+The result: high per-step keyword_reward scores (0.8-1.0), low final
+llm_judge_final_reward score (0.2-0.4). This gap is the central demo moment.
 
 Usage:
     agent = TraditionalAgent(query="What is MCP?")
@@ -30,7 +30,7 @@ import re
 from typing import Generator
 from env.models import ResearchAction
 from env.research_env import ResearchEnvironment
-from reward import keyword_reward, llm_judge_reward
+from reward import keyword_reward, llm_judge_final_reward
 
 
 # Fixed action templates — the traditional agent's entire "policy"
@@ -62,7 +62,7 @@ class TraditionalAgent:
 
     def _extract_keywords(self, query: str) -> str:
         """Extract content words from the query for stuffing."""
-        stopwords = {"the", "a", "an", "is", "are", "what", "how", "why", "of", "in", "on"}
+        stopwords = {"the", "a", "an", "is", "are", "what", "how", "why", "of", "in", "on", "vs", "for"}
         words = [w for w in re.findall(r'\w+', query.lower()) if w not in stopwords and len(w) > 2]
         # Repeat keywords to maximize match count — classic reward hacking
         return " ".join(words * 3)
@@ -87,41 +87,55 @@ class TraditionalAgent:
         """
         Run one episode, yielding a status dict after each step.
 
-        Yields dicts with: step, action, keyword_score, llm_score, done
-        so the Gradio UI can update the reward chart in real time.
+        Per-step: yields keyword_score so the chart shows it climbing.
+        Final step: yields llm_final_score showing the true quality gap.
         """
-        step_result = env.reset(query=self.query)
+        env.reset(query=self.query)
+
+        accumulated_results = []
+        kw_scores = []
 
         for step in range(self.max_steps):
             action = self._choose_action(step)
+            obs = env.step(action)
 
-            step_result = env.step(action)
-            obs = step_result.observation
-
-            # Score the same result with BOTH reward functions
-            # This is the moment we show to the audience
+            # Per-step keyword score — this is what the agent optimizes
             kw_score = keyword_reward(
                 query=self.query,
                 tool_name=obs.tool_name,
                 result=obs.result,
                 step=obs.step,
             )
-            llm_score = llm_judge_reward(
-                query=self.query,
-                tool_name=obs.tool_name,
-                result=obs.result,
-                step=obs.step,
-            )
+            kw_scores.append(kw_score)
+            accumulated_results.append(obs.result)
 
             yield {
                 "step": obs.step,
                 "tool_name": obs.tool_name,
                 "query_used": action.tool_args.get("query", ""),
                 "keyword_score": kw_score,
-                "llm_score": llm_score,
+                "llm_final_score": None,  # not computed yet
                 "done": obs.done,
                 "agent": "traditional",
             }
 
             if obs.done:
                 break
+
+        # Final LLM judge — evaluates ALL accumulated research at once
+        llm_final = llm_judge_final_reward(
+            query=self.query,
+            accumulated_results=accumulated_results,
+        )
+        avg_kw = sum(kw_scores) / max(len(kw_scores), 1)
+
+        # Yield a final summary step with both scores for the chart
+        yield {
+            "step": -1,  # sentinel: this is the final summary entry
+            "tool_name": "final_judgment",
+            "query_used": "",
+            "keyword_score": avg_kw,
+            "llm_final_score": llm_final,
+            "done": True,
+            "agent": "traditional",
+        }

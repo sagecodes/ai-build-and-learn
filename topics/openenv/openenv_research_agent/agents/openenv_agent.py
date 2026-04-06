@@ -34,7 +34,7 @@ from anthropic import Anthropic
 
 from env.models import ResearchAction
 from env.research_env import ResearchEnvironment
-from reward import llm_judge_reward
+from reward import llm_judge_final_reward
 from system_prompt import SYSTEM_PROMPT
 
 load_dotenv()
@@ -121,16 +121,15 @@ class OpenEnvAgent:
         """
         Run one research episode, yielding a status dict after each step.
 
-        Yields dicts with: step, tool_name, tool_args, llm_score, done, agent_id
-        so the Gradio UI can update reward charts and step logs in real time.
+        Per-step: yields tool_name so the step log updates live.
+        Final step: yields llm_final_score from the accumulated research judgment.
         """
         env.reset(query=self.query)
 
-        # Conversation history — grows with each tool call and result
         messages = [{"role": "user", "content": self.query}]
+        accumulated_results = []
 
         for _ in range(self.max_steps):
-            # Ask Claude what to do next given the conversation so far
             response = self._client.messages.create(
                 model="claude-opus-4-6",
                 max_tokens=4096,
@@ -140,7 +139,6 @@ class OpenEnvAgent:
             )
 
             if response.stop_reason == "tool_use":
-                # Claude wants to call tools — add its response to history
                 messages.append({"role": "assistant", "content": response.content})
 
                 tool_results = []
@@ -151,73 +149,89 @@ class OpenEnvAgent:
                     tool_name = block.name
                     tool_args = block.input
 
-                    # Special case: finish action ends the episode
+                    # finish action — compute final reward and end episode
                     if tool_name == "finish":
-                        action = ResearchAction(tool_name="finish", tool_args=tool_args)
-                        step_result = env.step(action)
+                        env.step(ResearchAction(tool_name="finish", tool_args=tool_args))
+                        llm_final = llm_judge_final_reward(
+                            query=self.query,
+                            accumulated_results=accumulated_results,
+                        )
                         yield {
-                            "step": step_result.observation.step,
-                            "tool_name": "finish",
+                            "step": -1,
+                            "tool_name": "final_judgment",
                             "tool_args": tool_args,
-                            "llm_score": step_result.observation.reward,
+                            "llm_final_score": llm_final,
                             "done": True,
                             "agent_id": self.agent_id,
                             "agent": "openenv",
                         }
                         return
 
-                    # Execute the tool via the environment
+                    # Execute the tool
                     action = ResearchAction(tool_name=tool_name, tool_args=tool_args)
-                    step_result = env.step(action)
-                    obs = step_result.observation
-
-                    # Score with LLM judge
-                    llm_score = llm_judge_reward(
-                        query=self.query,
-                        tool_name=tool_name,
-                        result=obs.result,
-                        step=obs.step,
-                    )
+                    obs = env.step(action)
+                    accumulated_results.append(obs.result)
 
                     yield {
                         "step": obs.step,
                         "tool_name": tool_name,
                         "tool_args": tool_args,
-                        "llm_score": llm_score,
+                        "llm_final_score": None,  # not computed yet
                         "result_preview": _preview(obs.result),
                         "done": obs.done,
                         "agent_id": self.agent_id,
                         "agent": "openenv",
                     }
 
-                    # Feed the tool result back to Claude
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": json.dumps(obs.result)[:3000],  # truncate for token limits
+                        "content": json.dumps(obs.result)[:3000],
                     })
 
                     if obs.done:
-                        return
+                        break
 
                 messages.append({"role": "user", "content": tool_results})
 
             else:
-                # Claude produced a final text answer — episode complete
+                # Claude finished without calling finish — compute final reward anyway
                 final_text = next(
                     (b.text for b in response.content if hasattr(b, "text")), ""
                 )
+                if final_text:
+                    accumulated_results.append({"text": final_text})
+
+                llm_final = llm_judge_final_reward(
+                    query=self.query,
+                    accumulated_results=accumulated_results,
+                )
                 yield {
-                    "step": env.state.step,
-                    "tool_name": "final_answer",
+                    "step": -1,
+                    "tool_name": "final_judgment",
                     "tool_args": {},
-                    "llm_score": env.state.total_reward / max(env.state.step, 1),
+                    "llm_final_score": llm_final,
                     "result_preview": final_text[:500],
                     "done": True,
                     "agent_id": self.agent_id,
                     "agent": "openenv",
                 }
                 return
+
+        # Hit max steps — compute final reward on what was gathered
+        llm_final = llm_judge_final_reward(
+            query=self.query,
+            accumulated_results=accumulated_results,
+        )
+        yield {
+            "step": -1,
+            "tool_name": "final_judgment",
+            "tool_args": {},
+            "llm_final_score": llm_final,
+            "done": True,
+            "agent_id": self.agent_id,
+            "agent": "openenv",
+        }
 
 
 def _preview(result: dict, max_chars: int = 200) -> str:

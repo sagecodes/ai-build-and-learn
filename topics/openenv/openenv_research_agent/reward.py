@@ -1,25 +1,29 @@
 """
 Reward functions for the Research RL Environment.
 
-Two reward functions are provided and used side-by-side in the demo:
+Two reward strategies are provided and used side-by-side in the demo:
 
-1. keyword_reward  — Traditional RL style. Counts keyword matches in the
-                     tool result. Easy to game — an agent that stuffs
+1. keyword_reward  — Traditional RL style. Counts keyword matches in each
+                     tool result per step. Easy to game — an agent that stuffs
                      keywords scores high even with garbage content.
 
-2. llm_judge_reward — OpenEnv style. Uses Claude as a judge to evaluate
-                      the quality and relevance of the tool result against
-                      the original query. Much harder to game, much more
-                      meaningful as a training signal.
+2. llm_judge_final_reward — OpenEnv style. Uses Claude as a judge to evaluate
+                            the FULL accumulated research at episode end, not
+                            each step in isolation. Rewards genuine depth and
+                            breadth of research — much harder to game.
 
-The demo's "reward hacking" moment works by running the traditional agent
-with keyword_reward (scores 8-9/10), then showing the same output through
-llm_judge_reward (scores 2-3/10). The gap is the story.
+The demo's "reward hacking" moment:
+  - Traditional agent: high keyword score per step, low final LLM score
+  - OpenEnv agent: lower per-step scores, HIGH final LLM score
+  - The gap proves why per-step keyword rewards fail for language tasks
 
-Both functions share the same signature:
-    reward_fn(query, tool_name, result, step) -> float (0.0 - 1.0)
+Per-step keyword_reward signature:
+    keyword_reward(query, tool_name, result, step) -> float (0.0 - 1.0)
 
-so they are interchangeable when injected into ResearchEnvironment.
+Final LLM judge signature:
+    llm_judge_final_reward(query, history) -> float (0.0 - 1.0)
+    where history is the list of {tool_name, tool_args, reward} dicts
+    from ResearchState.history
 """
 
 import os
@@ -27,7 +31,7 @@ import re
 from anthropic import Anthropic
 
 # ---------------------------------------------------------------------------
-# 1. Keyword Match Reward (Traditional RL)
+# 1. Keyword Match Reward (Traditional RL — per step)
 # ---------------------------------------------------------------------------
 # Reward = fraction of query keywords found in the tool result text.
 # Simple, fast, and completely gameable.
@@ -47,11 +51,9 @@ def keyword_reward(
     if not result or "error" in result:
         return 0.0
 
-    # Flatten result dict to a single string for keyword scanning
     result_text = _flatten_result(result).lower()
 
-    # Tokenize query into keywords (strip stopwords crudely)
-    stopwords = {"the", "a", "an", "is", "are", "what", "how", "why", "of", "in", "on"}
+    stopwords = {"the", "a", "an", "is", "are", "what", "how", "why", "of", "in", "on", "vs", "for"}
     keywords = [
         w for w in re.findall(r'\w+', query.lower())
         if w not in stopwords and len(w) > 2
@@ -69,10 +71,10 @@ def keyword_reward(
 
 
 # ---------------------------------------------------------------------------
-# 2. LLM-as-Judge Reward (OpenEnv style)
+# 2. LLM-as-Judge Final Reward (OpenEnv style — end of episode)
 # ---------------------------------------------------------------------------
-# Reward = Claude's quality rating of the tool result vs the research query.
-# Returns a normalized float 0.0-1.0 (Claude rates 1-10, we divide by 10).
+# Judges the FULL accumulated research across all steps, not each step alone.
+# This rewards agents that chain tools intelligently and gather real depth.
 
 _anthropic_client = None
 
@@ -83,57 +85,65 @@ def _get_anthropic_client() -> Anthropic:
     return _anthropic_client
 
 
-def llm_judge_reward(
+def llm_judge_final_reward(
     query: str,
-    tool_name: str,
-    result: dict,
-    step: int,
+    accumulated_results: list[dict],
 ) -> float:
     """
-    OpenEnv-style reward: use Claude to judge the quality of the tool result.
+    OpenEnv-style final reward: judge the full accumulated research at episode end.
 
-    Claude evaluates whether the result genuinely advances the research goal,
-    not just whether it contains the right words. Returns 0.0-1.0.
+    accumulated_results is a list of result dicts gathered across all steps.
+    Claude evaluates the combined research for depth, breadth, and relevance
+    — rewarding genuine understanding, not keyword frequency.
 
-    Falls back to 0.0 on API errors so the episode can continue.
+    Returns 0.0-1.0.
     """
-    if not result or "error" in result:
+    if not accumulated_results:
         return 0.0
 
-    result_text = _flatten_result(result)
-    if not result_text.strip():
+    # Combine all results into one research summary for the judge
+    combined = ""
+    for i, result in enumerate(accumulated_results):
+        text = _flatten_result(result)[:800]  # 800 chars per step
+        if text.strip():
+            combined += f"\n--- Result {i+1} ---\n{text}\n"
+
+    if not combined.strip():
         return 0.0
 
-    # Truncate to avoid token limits — first 2000 chars is enough to judge
-    result_preview = result_text[:2000]
+    # Truncate total to stay within token limits
+    combined = combined[:5000]
 
-    prompt = f"""You are evaluating a web research agent's tool call result.
+    prompt = f"""You are evaluating the complete research output of an AI agent.
 
 Research question: {query}
-Tool used: {tool_name}
-Tool result (truncated):
-{result_preview}
 
-Rate the quality of this result for answering the research question.
-Consider: relevance, information density, source credibility, and whether
-it genuinely advances understanding (not just keyword matches).
+The agent gathered the following information across multiple tool calls:
+{combined}
+
+Rate the OVERALL quality of this accumulated research for answering the question.
+Consider:
+- Does it cover the key aspects of the question?
+- Does it include specific facts, figures, or comparisons (not just keywords)?
+- Does it show evidence of deep research (extracting full pages, following leads)?
+- Would this research actually help someone answer the question thoroughly?
 
 Respond with ONLY a single integer from 1 to 10.
-1 = completely irrelevant or empty
-5 = somewhat relevant but shallow
-10 = highly relevant, rich, directly addresses the question
+1 = superficial keyword matches, no real information
+5 = some relevant facts but incomplete or shallow
+10 = comprehensive, specific, directly answers the question with depth
 """
 
     try:
         client = _get_anthropic_client()
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",   # fast + cheap for reward scoring
+            model="claude-haiku-4-5-20251001",
             max_tokens=10,
             messages=[{"role": "user", "content": prompt}],
         )
         score_text = response.content[0].text.strip()
         score = int(re.search(r'\d+', score_text).group())
-        score = max(1, min(10, score))   # clamp to 1-10
+        score = max(1, min(10, score))
         return round(score / 10.0, 2)
     except Exception:
         return 0.0

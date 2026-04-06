@@ -34,7 +34,7 @@ import plotly.graph_objects as go
 from dotenv import load_dotenv
 
 from workflow import run_research_episode, run_research_comparison
-from reward import keyword_reward, llm_judge_reward
+from reward import keyword_reward
 from env.research_env import ResearchEnvironment
 from agents.openenv_agent import OpenEnvAgent
 from agents.traditional_agent import TraditionalAgent
@@ -109,6 +109,59 @@ def _build_chart(
     return fig
 
 
+def _build_final_chart(
+    kw_scores: list[float],
+    trad_final: float | None,
+    oe_final: float | None,
+    title: str,
+) -> go.Figure:
+    """
+    Bar chart comparing keyword reward vs final LLM judge scores.
+    Makes the reward hacking gap visually obvious.
+    """
+    fig = go.Figure()
+
+    # Per-step keyword scores as a line (traditional only)
+    if kw_scores:
+        steps = list(range(1, len(kw_scores) + 1))
+        fig.add_trace(go.Scatter(
+            x=steps,
+            y=kw_scores,
+            mode="lines+markers",
+            name="Per-step Keyword Score (Traditional)",
+            line=dict(color="orange", dash="dash"),
+        ))
+
+    # Final scores as bars for direct comparison
+    labels, values, colors = [], [], []
+    if trad_final is not None:
+        labels.append("Traditional\nFinal LLM Score")
+        values.append(trad_final)
+        colors.append("tomato")
+    if oe_final is not None:
+        labels.append("OpenEnv\nFinal LLM Score")
+        values.append(oe_final)
+        colors.append("mediumseagreen")
+
+    if labels:
+        fig.add_trace(go.Bar(
+            x=labels,
+            y=values,
+            name="Final LLM Judge Score",
+            marker_color=colors,
+            width=0.4,
+        ))
+
+    fig.update_layout(
+        title=title,
+        yaxis=dict(range=[0, 1], title="Score (0-1)"),
+        height=320,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        barmode="group",
+    )
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Tab 1: Side-by-Side Comparison
 # ---------------------------------------------------------------------------
@@ -127,17 +180,18 @@ def run_comparison(query: str, max_steps: int):
         )
         return
 
-    trad_kw, trad_llm, oe_llm = [], [], []
+    trad_kw = []
     trad_log, oe_log = [], []
+    trad_final_llm = None
+    oe_final_llm = None
 
     # Build environments
     trad_env = ResearchEnvironment(reward_fn=keyword_reward, max_steps=max_steps)
-    oe_env = ResearchEnvironment(reward_fn=llm_judge_reward, max_steps=max_steps)
+    oe_env = ResearchEnvironment(reward_fn=keyword_reward, max_steps=max_steps)  # reward_fn unused for final scoring
 
     trad_agent = TraditionalAgent(query=query, max_steps=max_steps)
     oe_agent = OpenEnvAgent(query=query, max_steps=max_steps)
 
-    # Interleave steps from both agents for side-by-side live updates
     trad_gen = trad_agent.run(trad_env)
     oe_gen = oe_agent.run(oe_env)
 
@@ -148,13 +202,16 @@ def run_comparison(query: str, max_steps: int):
         if not trad_done:
             try:
                 step = next(trad_gen)
-                trad_kw.append(step.get("keyword_score", 0.0))
-                trad_llm.append(step.get("llm_score", 0.0))
-                trad_log.append(
-                    f"Step {step['step']}: {step['tool_name']} | "
-                    f"KW={step.get('keyword_score', 'N/A'):.2f} | "
-                    f"LLM={step.get('llm_score', 'N/A'):.2f}"
-                )
+                if step["tool_name"] == "final_judgment":
+                    trad_final_llm = step.get("llm_final_score", 0.0)
+                    trad_log.append(f"\nFINAL LLM JUDGE SCORE: {trad_final_llm:.2f}")
+                    trad_done = True
+                else:
+                    kw = step.get("keyword_score", 0.0)
+                    trad_kw.append(kw)
+                    trad_log.append(
+                        f"Step {step['step']}: {step['tool_name']} | KW={kw:.2f}"
+                    )
                 if step["done"]:
                     trad_done = True
             except StopIteration:
@@ -163,53 +220,57 @@ def run_comparison(query: str, max_steps: int):
         if not oe_done:
             try:
                 step = next(oe_gen)
-                oe_llm.append(step.get("llm_score", 0.0))
-                oe_log.append(
-                    f"Step {step['step']}: {step['tool_name']} | "
-                    f"LLM={step.get('llm_score', 'N/A'):.2f}"
-                )
+                if step["tool_name"] == "final_judgment":
+                    oe_final_llm = step.get("llm_final_score", 0.0)
+                    oe_log.append(f"\nFINAL LLM JUDGE SCORE: {oe_final_llm:.2f}")
+                    oe_done = True
+                else:
+                    oe_log.append(
+                        f"Step {step['step']}: {step['tool_name']}"
+                    )
                 if step["done"]:
                     oe_done = True
             except StopIteration:
                 oe_done = True
 
-        trad_chart = _build_chart(
-            trad_kw, trad_llm,
-            "Traditional RL — Keyword reward vs LLM judge"
+        # Chart: traditional shows per-step keyword scores as a bar
+        # Final LLM scores shown as horizontal reference lines when available
+        trad_chart = _build_final_chart(
+            trad_kw, trad_final_llm, oe_final_llm,
+            "Traditional RL vs OpenEnv — Reward Comparison"
         )
-        oe_chart = _build_chart(
-            [], oe_llm,
-            "OpenEnv Agent — LLM judge reward"
+        oe_chart = _build_final_chart(
+            [], trad_final_llm, oe_final_llm,
+            "Final LLM Judge Scores"
         )
 
         yield (
             trad_chart,
             oe_chart,
-            "\n".join(trad_log[-10:]),
-            "\n".join(oe_log[-10:]),
+            "\n".join(trad_log[-15:]),
+            "\n".join(oe_log[-15:]),
         )
 
     # Final summary
-    if trad_kw and trad_llm:
-        avg_kw = sum(trad_kw) / len(trad_kw)
-        avg_trad_llm = sum(trad_llm) / len(trad_llm)
-        avg_oe_llm = sum(oe_llm) / len(oe_llm) if oe_llm else 0
+    avg_kw = sum(trad_kw) / max(len(trad_kw), 1)
+    gap = avg_kw - (trad_final_llm or 0)
+    oe_advantage = (oe_final_llm or 0) - (trad_final_llm or 0)
 
-        gap = avg_kw - avg_trad_llm
-        trad_log.append(
-            f"\n--- SUMMARY ---\n"
-            f"Traditional: Keyword={avg_kw:.2f} | LLM={avg_trad_llm:.2f} | GAP={gap:.2f}\n"
-            f"OpenEnv:     LLM={avg_oe_llm:.2f}\n"
-            f"The keyword reward overestimates quality by {gap:.2f} — this is reward hacking."
-        )
-        oe_log.append(
-            f"\n--- SUMMARY ---\n"
-            f"OpenEnv avg LLM score: {avg_oe_llm:.2f}"
-        )
+    trad_log.append(
+        f"\n--- SUMMARY ---\n"
+        f"Avg Keyword Score:        {avg_kw:.2f}  ← what the agent optimized\n"
+        f"Final LLM Judge Score:    {trad_final_llm:.2f}  ← actual quality\n"
+        f"Overestimation gap:       {gap:.2f}  ← this is reward hacking"
+    )
+    oe_log.append(
+        f"\n--- SUMMARY ---\n"
+        f"Final LLM Judge Score:    {oe_final_llm:.2f}\n"
+        f"OpenEnv advantage:        +{oe_advantage:.2f} over traditional"
+    )
 
     yield (
-        _build_chart(trad_kw, trad_llm, "Traditional RL — FINAL"),
-        _build_chart([], oe_llm, "OpenEnv Agent — FINAL"),
+        _build_final_chart(trad_kw, trad_final_llm, oe_final_llm, "FINAL — Traditional RL vs OpenEnv"),
+        _build_final_chart([], trad_final_llm, oe_final_llm, "FINAL — LLM Judge Scores"),
         "\n".join(trad_log),
         "\n".join(oe_log),
     )

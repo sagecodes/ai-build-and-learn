@@ -71,7 +71,7 @@ def _md_to_html(text: str) -> str:
 # Cached by (query, agent_type, max_steps) — second run of the same
 # question returns instantly from Flyte's cache.
 
-@env.task(report=True, cache=True, cache_version="1.0")
+@env.task(report=True, cache=True)
 async def run_research_episode(
     query: str,
     agent_type: str = "openenv",   # "openenv" or "traditional"

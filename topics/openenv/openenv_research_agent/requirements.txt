@@ -13,4 +13,3 @@ plotly
 # Utilities
 python-dotenv
 markdown
-unionai-reuse
