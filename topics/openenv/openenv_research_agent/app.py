@@ -202,9 +202,15 @@ def run_comparison(query: str, max_steps: int):
                 else:
                     kw = step.get("keyword_score", 0.0)
                     trad_kw.append(kw)
+                    query_used = step.get("query_used", "")
+                    matched = step.get("matched_keywords", [])
                     trad_log.append(
-                        f"Step {step['step']}: {step['tool_name']} | KW={kw:.2f}"
+                        f"Step {step['step']}: {step['tool_name']} | Keyword Score={kw:.2f}"
                     )
+                    if query_used:
+                        trad_log.append(f"  Search: \"{query_used[:80]}{'...' if len(query_used) > 80 else ''}\"")
+                    if matched:
+                        trad_log.append(f"  Matched keywords: {', '.join(matched)}")
             except StopIteration:
                 trad_done = True
 
@@ -216,9 +222,28 @@ def run_comparison(query: str, max_steps: int):
                     oe_log.append(f"\nFINAL LLM JUDGE SCORE: {oe_final_llm:.2f}")
                     oe_done = True
                 else:
-                    oe_log.append(
-                        f"Step {step['step']}: {step['tool_name']}"
-                    )
+                    tool_name = step["tool_name"]
+                    tool_args = step.get("tool_args", {})
+                    preview = step.get("result_preview", "")
+                    oe_log.append(f"Step {step['step']}: {tool_name}")
+
+                    if tool_name == "tavily_search":
+                        q = tool_args.get("query", "")
+                        if q:
+                            oe_log.append(f"  Query: \"{q[:80]}{'...' if len(q) > 80 else ''}\"")
+                    elif tool_name == "tavily_extract":
+                        urls = tool_args.get("urls", [])
+                        if urls:
+                            oe_log.append(f"  Extracting: {urls[0]}")
+                            if len(urls) > 1:
+                                oe_log.append(f"  + {len(urls) - 1} more URL(s)")
+                    elif tool_name == "tavily_crawl":
+                        url = tool_args.get("url", "")
+                        if url:
+                            oe_log.append(f"  Crawling: {url}")
+
+                    if preview:
+                        oe_log.append(f"  Found: {preview[:100]}{'...' if len(preview) > 100 else ''}")
             except StopIteration:
                 oe_done = True
 
@@ -249,9 +274,9 @@ def run_comparison(query: str, max_steps: int):
 
     trad_log.append(
         f"\n--- SUMMARY ---\n"
-        f"Avg Keyword Score:        {avg_kw:.2f}  <- what the agent optimized\n"
-        f"Final LLM Judge Score:    {trad_llm_val:.2f}  <- actual quality\n"
-        f"Overestimation gap:       {gap:.2f}  <- this is reward hacking"
+        f"Avg Keyword Score:     {avg_kw:.2f}  <- what the agent optimized\n"
+        f"Final LLM Judge Score: {trad_llm_val:.2f}  <- actual quality\n"
+        f"Overestimation gap:    {gap:.2f}  <- this is reward hacking"
     )
     oe_log.append(
         f"\n--- SUMMARY ---\n"

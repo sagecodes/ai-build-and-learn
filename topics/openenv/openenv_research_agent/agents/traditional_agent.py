@@ -36,7 +36,7 @@ import re
 from typing import Generator
 from openenv import GenericEnvClient
 from env.models import ResearchAction
-from reward import keyword_reward, llm_judge_final_reward
+from reward import keyword_reward_with_detail, llm_judge_final_reward
 
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
@@ -115,7 +115,7 @@ class TraditionalAgent:
                 done = step_result.done
 
                 # Per-step keyword score — this is what the agent optimizes
-                kw_score = keyword_reward(
+                kw_score, matched_keywords = keyword_reward_with_detail(
                     query=self.query,
                     tool_name=tool_name,
                     result=tool_result,
@@ -128,6 +128,7 @@ class TraditionalAgent:
                     "step": step_num,
                     "tool_name": tool_name,
                     "query_used": action.tool_args.get("query", ""),
+                    "matched_keywords": matched_keywords,
                     "keyword_score": kw_score,
                     "llm_final_score": None,  # not computed yet
                     "done": done,

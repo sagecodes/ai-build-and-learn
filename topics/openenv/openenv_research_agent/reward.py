@@ -48,8 +48,25 @@ def keyword_reward(
     Returns a float between 0.0 and 1.0.
     Deliberately simple and gameable — this is the point of the demo.
     """
+    score, _ = keyword_reward_with_detail(query, tool_name, result, step)
+    return score
+
+
+def keyword_reward_with_detail(
+    query: str,
+    tool_name: str,
+    result: dict,
+    step: int,
+) -> tuple[float, list[str]]:
+    """
+    Same as keyword_reward but also returns the list of matched keywords.
+
+    Returns (score, matched_keywords) where matched_keywords is the list
+    of query keywords found in the result text — useful for surfacing
+    exactly what the agent is gaming.
+    """
     if not result or "error" in result:
-        return 0.0
+        return 0.0, []
 
     result_text = _flatten_result(result).lower()
 
@@ -60,14 +77,16 @@ def keyword_reward(
     ]
 
     if not keywords:
-        return 0.0
+        return 0.0, []
 
-    matches = sum(1 for kw in keywords if kw in result_text)
-    score = matches / len(keywords)
+    matched = [kw for kw in keywords if kw in result_text]
+    score = len(matched) / len(keywords)
 
     # Small step penalty to discourage padding — but not enough to stop gaming
     step_penalty = max(0.0, (step - 1) * 0.02)
-    return max(0.0, round(score - step_penalty, 3))
+    score = max(0.0, round(score - step_penalty, 3))
+
+    return score, matched
 
 
 # ---------------------------------------------------------------------------
@@ -101,18 +120,20 @@ def llm_judge_final_reward(
     if not accumulated_results:
         return 0.0
 
-    # Combine all results into one research summary for the judge
+    # Combine all results into one research summary for the judge.
+    # Give each result more room so the OpenEnv agent's deeper content
+    # isn't truncated to the same size as the traditional agent's snippets.
     combined = ""
     for i, result in enumerate(accumulated_results):
-        text = _flatten_result(result)[:800]  # 800 chars per step
+        text = _flatten_result(result)[:1500]  # 1500 chars per step
         if text.strip():
             combined += f"\n--- Result {i+1} ---\n{text}\n"
 
     if not combined.strip():
         return 0.0
 
-    # Truncate total to stay within token limits
-    combined = combined[:5000]
+    # Truncate total — generous limit so deep research isn't penalized
+    combined = combined[:12000]
 
     prompt = f"""You are evaluating the complete research output of an AI agent.
 
@@ -122,16 +143,23 @@ The agent gathered the following information across multiple tool calls:
 {combined}
 
 Rate the OVERALL quality of this accumulated research for answering the question.
-Consider:
-- Does it cover the key aspects of the question?
-- Does it include specific facts, figures, or comparisons (not just keywords)?
-- Does it show evidence of deep research (extracting full pages, following leads)?
-- Would this research actually help someone answer the question thoroughly?
+
+Scoring criteria — be strict and differentiate clearly:
+- PENALIZE heavily if the agent repeated nearly identical searches multiple times
+  without refining its approach. Repetition is a sign of poor reasoning.
+- REWARD agents that used progressively refined queries based on prior results,
+  extracted full page content from specific URLs, or followed specific leads.
+- REWARD agents that found specific facts, figures, prices, or direct comparisons
+  — not just pages that mention the topic keywords.
+- PENALIZE if the research is shallow (only search snippets, no extraction or
+  follow-up on specific sources).
 
 Respond with ONLY a single integer from 1 to 10.
-1 = superficial keyword matches, no real information
-5 = some relevant facts but incomplete or shallow
-10 = comprehensive, specific, directly answers the question with depth
+1 = repeated identical searches, no real information gathered
+3 = some relevant snippets but repetitive or shallow
+5 = decent coverage but missed depth or specifics
+7 = good breadth and some depth, specific facts found
+10 = comprehensive, specific, direct answers with evidence of deep research
 """
 
     try:
