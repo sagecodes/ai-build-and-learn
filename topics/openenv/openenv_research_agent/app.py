@@ -5,7 +5,7 @@ Three demo modes accessible via tabs:
 
   Tab 1 — Side-by-Side Comparison
     Run both agents on the same question simultaneously.
-    Shows live reward curves (Plotly) and step logs updating in real time.
+    Shows a unified reward chart (Plotly) and HTML step logs updating in real time.
     The reward hacking gap is visible here.
 
   Tab 2 — Agent Race
@@ -55,6 +55,87 @@ serving_env = flyte.app.AppEnvironment(
     requires_auth=False,
     port=7860,
 )
+
+
+# ---------------------------------------------------------------------------
+# HTML step log helpers
+# ---------------------------------------------------------------------------
+
+def _score_badge(score: float, color: str) -> str:
+    return (
+        f'<span style="background:{color};color:white;padding:2px 8px;'
+        f'border-radius:4px;font-weight:bold;font-size:0.85em">{score:.2f}</span>'
+    )
+
+
+def _trad_step_html(step: int, tool: str, kw: float, query_used: str, matched: list[str]) -> str:
+    badge = _score_badge(kw, "#e67e22")
+    q = query_used[:90] + ("..." if len(query_used) > 90 else "")
+    kw_tags = " ".join(
+        f'<span style="background:#fdebd0;color:#784212;padding:1px 5px;'
+        f'border-radius:3px;font-size:0.8em">{k}</span>'
+        for k in matched
+    )
+    return (
+        f'<div style="border-left:4px solid #e67e22;padding:6px 10px;margin:6px 0;background:#fdf6ec">'
+        f'<div style="font-weight:bold">Step {step}: {tool} &nbsp; {badge}</div>'
+        f'<div style="color:#555;font-size:0.85em;margin-top:3px">&#128269; &nbsp;<em>{q}</em></div>'
+        f'{"<div style=\'margin-top:4px\'>Matched: " + kw_tags + "</div>" if matched else ""}'
+        f'</div>'
+    )
+
+
+def _oe_step_html(step: int, tool: str, tool_args: dict, preview: str) -> str:
+    detail = ""
+    if tool == "tavily_search":
+        q = tool_args.get("query", "")
+        if q:
+            detail = f'<div style="color:#555;font-size:0.85em;margin-top:3px">&#128269; &nbsp;<em>{q[:90]}{"..." if len(q) > 90 else ""}</em></div>'
+    elif tool == "tavily_extract":
+        urls = tool_args.get("urls", [])
+        if urls:
+            u = urls[0]
+            extra = f" <span style='color:#888'>+{len(urls)-1} more</span>" if len(urls) > 1 else ""
+            detail = f'<div style="color:#555;font-size:0.85em;margin-top:3px">&#128196; &nbsp;<a href="{u}" target="_blank" style="color:#2471a3">{u[:80]}</a>{extra}</div>'
+    elif tool == "tavily_crawl":
+        url = tool_args.get("url", "")
+        if url:
+            detail = f'<div style="color:#555;font-size:0.85em;margin-top:3px">&#128375; &nbsp;<a href="{url}" target="_blank" style="color:#2471a3">{url[:80]}</a></div>'
+
+    found = ""
+    if preview:
+        p = preview[:120] + ("..." if len(preview) > 120 else "")
+        found = f'<div style="color:#666;font-size:0.8em;margin-top:3px;font-style:italic">Found: {p}</div>'
+
+    tool_color = {"tavily_search": "#2980b9", "tavily_extract": "#8e44ad", "tavily_crawl": "#16a085"}.get(tool, "#555")
+    tool_badge = f'<span style="background:{tool_color};color:white;padding:1px 7px;border-radius:4px;font-size:0.82em">{tool}</span>'
+
+    return (
+        f'<div style="border-left:4px solid #2471a3;padding:6px 10px;margin:6px 0;background:#eaf4fb">'
+        f'<div style="font-weight:bold">Step {step}: &nbsp;{tool_badge}</div>'
+        f'{detail}{found}'
+        f'</div>'
+    )
+
+
+def _summary_html(title: str, color: str, lines: list[str]) -> str:
+    content = "".join(f'<div style="margin:2px 0">{l}</div>' for l in lines)
+    return (
+        f'<div style="border-left:4px solid {color};padding:8px 12px;'
+        f'margin:10px 0;background:#f9f9f9;border-radius:4px">'
+        f'<div style="font-weight:bold;margin-bottom:4px">{title}</div>'
+        f'{content}</div>'
+    )
+
+
+def _final_score_html(label: str, score: float, color: str) -> str:
+    return (
+        f'<div style="text-align:center;padding:12px;margin:8px 0;'
+        f'background:{color};border-radius:8px;color:white">'
+        f'<div style="font-size:0.9em">{label}</div>'
+        f'<div style="font-size:2em;font-weight:bold">{score:.2f}</div>'
+        f'</div>'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -113,48 +194,53 @@ def _build_final_chart(
     title: str,
 ) -> go.Figure:
     """
-    Bar chart comparing keyword reward vs final LLM judge scores.
-    Makes the reward hacking gap visually obvious.
+    Step chart showing per-step keyword scores as a line, with final LLM
+    judge scores for both agents as horizontal reference lines.
+    Makes the reward hacking gap visually obvious on a single axis.
     """
     fig = go.Figure()
 
-    # Per-step keyword scores as a line (traditional only)
+    max_x = max(len(kw_scores), 1)
+
+    # Per-step keyword scores as an orange dashed line
     if kw_scores:
         steps = list(range(1, len(kw_scores) + 1))
         fig.add_trace(go.Scatter(
             x=steps,
             y=kw_scores,
             mode="lines+markers",
-            name="Per-step Keyword Score (Traditional)",
-            line=dict(color="orange", dash="dash"),
+            name="Keyword Score per step",
+            line=dict(color="#e67e22", dash="dash", width=2),
+            marker=dict(size=7),
         ))
+        max_x = len(kw_scores)
 
-    # Final scores as bars for direct comparison
-    labels, values, colors = [], [], []
+    # Traditional final LLM score as a solid red horizontal line
     if trad_final is not None:
-        labels.append("Traditional\nFinal LLM Score")
-        values.append(trad_final)
-        colors.append("tomato")
-    if oe_final is not None:
-        labels.append("OpenEnv\nFinal LLM Score")
-        values.append(oe_final)
-        colors.append("mediumseagreen")
+        fig.add_hline(
+            y=trad_final,
+            line=dict(color="#c0392b", width=2.5, dash="dot"),
+            annotation_text=f"Traditional Final LLM: {trad_final:.2f}",
+            annotation_position="top left",
+            annotation_font=dict(color="#c0392b", size=11),
+        )
 
-    if labels:
-        fig.add_trace(go.Bar(
-            x=labels,
-            y=values,
-            name="Final LLM Judge Score",
-            marker_color=colors,
-            width=0.4,
-        ))
+    # OpenEnv final LLM score as a solid green horizontal line
+    if oe_final is not None:
+        fig.add_hline(
+            y=oe_final,
+            line=dict(color="#1a7a4a", width=2.5, dash="dot"),
+            annotation_text=f"OpenEnv Final LLM: {oe_final:.2f}",
+            annotation_position="bottom left",
+            annotation_font=dict(color="#1a7a4a", size=11),
+        )
 
     fig.update_layout(
         title=title,
-        yaxis=dict(range=[0, 1], title="Score (0-1)"),
+        xaxis=dict(title="Step", dtick=1, range=[0.5, max_x + 0.5]),
+        yaxis=dict(range=[0, 1.05], title="Score (0-1)"),
         height=320,
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        barmode="group",
     )
     return fig
 
@@ -170,15 +256,14 @@ def run_comparison(query: str, max_steps: int):
     """
     if not query.strip():
         yield (
-            _empty_chart("Traditional RL Agent"),
-            _empty_chart("OpenEnv Agent"),
+            _empty_chart("Reward Comparison"),
             "Enter a research question above.",
             "Enter a research question above.",
         )
         return
 
     trad_kw = []
-    trad_log, oe_log = [], []
+    trad_html_blocks, oe_html_blocks = [], []
     trad_final_llm = None
     oe_final_llm = None
 
@@ -197,20 +282,20 @@ def run_comparison(query: str, max_steps: int):
                 step = next(trad_gen)
                 if step["tool_name"] == "final_judgment":
                     trad_final_llm = step.get("llm_final_score", 0.0)
-                    trad_log.append(f"\nFINAL LLM JUDGE SCORE: {trad_final_llm:.2f}")
+                    trad_html_blocks.append(
+                        _final_score_html("Final LLM Judge Score", trad_final_llm, "#c0392b")
+                    )
                     trad_done = True
                 else:
                     kw = step.get("keyword_score", 0.0)
                     trad_kw.append(kw)
-                    query_used = step.get("query_used", "")
-                    matched = step.get("matched_keywords", [])
-                    trad_log.append(
-                        f"Step {step['step']}: {step['tool_name']} | Keyword Score={kw:.2f}"
-                    )
-                    if query_used:
-                        trad_log.append(f"  Search: \"{query_used[:80]}{'...' if len(query_used) > 80 else ''}\"")
-                    if matched:
-                        trad_log.append(f"  Matched keywords: {', '.join(matched)}")
+                    trad_html_blocks.append(_trad_step_html(
+                        step["step"],
+                        step["tool_name"],
+                        kw,
+                        step.get("query_used", ""),
+                        step.get("matched_keywords", []),
+                    ))
             except StopIteration:
                 trad_done = True
 
@@ -219,50 +304,29 @@ def run_comparison(query: str, max_steps: int):
                 step = next(oe_gen)
                 if step["tool_name"] == "final_judgment":
                     oe_final_llm = step.get("llm_final_score", 0.0)
-                    oe_log.append(f"\nFINAL LLM JUDGE SCORE: {oe_final_llm:.2f}")
+                    oe_html_blocks.append(
+                        _final_score_html("Final LLM Judge Score", oe_final_llm, "#1a7a4a")
+                    )
                     oe_done = True
                 else:
-                    tool_name = step["tool_name"]
-                    tool_args = step.get("tool_args", {})
-                    preview = step.get("result_preview", "")
-                    oe_log.append(f"Step {step['step']}: {tool_name}")
-
-                    if tool_name == "tavily_search":
-                        q = tool_args.get("query", "")
-                        if q:
-                            oe_log.append(f"  Query: \"{q[:80]}{'...' if len(q) > 80 else ''}\"")
-                    elif tool_name == "tavily_extract":
-                        urls = tool_args.get("urls", [])
-                        if urls:
-                            oe_log.append(f"  Extracting: {urls[0]}")
-                            if len(urls) > 1:
-                                oe_log.append(f"  + {len(urls) - 1} more URL(s)")
-                    elif tool_name == "tavily_crawl":
-                        url = tool_args.get("url", "")
-                        if url:
-                            oe_log.append(f"  Crawling: {url}")
-
-                    if preview:
-                        oe_log.append(f"  Found: {preview[:100]}{'...' if len(preview) > 100 else ''}")
+                    oe_html_blocks.append(_oe_step_html(
+                        step["step"],
+                        step["tool_name"],
+                        step.get("tool_args", {}),
+                        step.get("result_preview", ""),
+                    ))
             except StopIteration:
                 oe_done = True
 
-        # Chart: traditional shows per-step keyword scores as a bar
-        # Final LLM scores shown as horizontal reference lines when available
-        trad_chart = _build_final_chart(
+        chart = _build_final_chart(
             trad_kw, trad_final_llm, oe_final_llm,
-            "Traditional RL vs OpenEnv — Reward Comparison"
-        )
-        oe_chart = _build_final_chart(
-            [], trad_final_llm, oe_final_llm,
-            "Final LLM Judge Scores"
+            "Reward Comparison — Traditional RL vs OpenEnv"
         )
 
         yield (
-            trad_chart,
-            oe_chart,
-            "\n".join(trad_log[-15:]),
-            "\n".join(oe_log[-15:]),
+            chart,
+            "".join(trad_html_blocks),
+            "".join(oe_html_blocks),
         )
 
     # Final summary
@@ -272,23 +336,24 @@ def run_comparison(query: str, max_steps: int):
     gap = avg_kw - trad_llm_val
     oe_advantage = oe_llm_val - trad_llm_val
 
-    trad_log.append(
-        f"\n--- SUMMARY ---\n"
-        f"Avg Keyword Score:     {avg_kw:.2f}  <- what the agent optimized\n"
-        f"Final LLM Judge Score: {trad_llm_val:.2f}  <- actual quality\n"
-        f"Overestimation gap:    {gap:.2f}  <- this is reward hacking"
-    )
-    oe_log.append(
-        f"\n--- SUMMARY ---\n"
-        f"Final LLM Judge Score:    {oe_llm_val:.2f}\n"
-        f"OpenEnv advantage:        +{oe_advantage:.2f} over traditional"
-    )
+    trad_html_blocks.append(_summary_html(
+        "Summary — Traditional RL", "#e67e22", [
+            f"Avg Keyword Score: <b>{avg_kw:.2f}</b> &larr; what the agent optimized",
+            f"Final LLM Judge Score: <b>{trad_llm_val:.2f}</b> &larr; actual quality",
+            f"Overestimation gap: <b>{gap:.2f}</b> &larr; this is reward hacking",
+        ]
+    ))
+    oe_html_blocks.append(_summary_html(
+        "Summary — OpenEnv Agent", "#2471a3", [
+            f"Final LLM Judge Score: <b>{oe_llm_val:.2f}</b>",
+            f"OpenEnv advantage: <b>+{oe_advantage:.2f}</b> over traditional",
+        ]
+    ))
 
     yield (
-        _build_final_chart(trad_kw, trad_final_llm, oe_final_llm, "FINAL — Traditional RL vs OpenEnv"),
-        _build_final_chart([], trad_final_llm, oe_final_llm, "FINAL — LLM Judge Scores"),
-        "\n".join(trad_log),
-        "\n".join(oe_log),
+        _build_final_chart(trad_kw, trad_final_llm, oe_final_llm, "FINAL — Reward Hacking Gap"),
+        "".join(trad_html_blocks),
+        "".join(oe_html_blocks),
     )
 
 
@@ -299,7 +364,8 @@ def run_comparison(query: str, max_steps: int):
 def run_race(query: str, max_steps: int):
     """
     Run 3 OpenEnv agents concurrently on the same query.
-    Yields a scoreboard string updated after each step.
+    Yields an HTML scoreboard table updated after each agent step,
+    followed by a summary card with narrative, scores, and session stats.
     """
     if not query.strip():
         yield "Enter a research question to start the race."
@@ -309,7 +375,9 @@ def run_race(query: str, max_steps: int):
     agents = [OpenEnvAgent(query=query, agent_id=i, max_steps=max_steps) for i in range(num_agents)]
     gens = [agent.run() for agent in agents]
 
-    scores = {i: [] for i in range(num_agents)}
+    step_counts = {i: 0 for i in range(num_agents)}
+    final_scores = {i: None for i in range(num_agents)}
+    last_tools = {i: "" for i in range(num_agents)}
     done = {i: False for i in range(num_agents)}
     winner = None
 
@@ -320,29 +388,131 @@ def run_race(query: str, max_steps: int):
             try:
                 step = next(gen)
                 if step["tool_name"] == "final_judgment":
-                    scores[i].append(step.get("llm_final_score", 0.0))
+                    final_scores[i] = step.get("llm_final_score", 0.0)
                     done[i] = True
                     if winner is None:
                         winner = i
-                elif step["done"]:
-                    done[i] = True
-                    if winner is None:
-                        winner = i
+                else:
+                    step_counts[i] += 1
+                    last_tools[i] = step.get("tool_name", "")
             except StopIteration:
                 done[i] = True
 
-        board = f"{'Agent':<10} {'Steps':<8} {'Avg Score':<12} {'Status'}\n"
-        board += "-" * 45 + "\n"
+        # Build HTML scoreboard
+        rows = ""
         for i in range(num_agents):
-            avg = sum(scores[i]) / max(len(scores[i]), 1)
-            status = "DONE" if done[i] else "running..."
             if winner == i:
-                status = "WINNER"
-            board += f"Agent {i:<5} {len(scores[i]):<8} {avg:<12.3f} {status}\n"
+                status = '<span style="background:#1a7a4a;color:white;padding:2px 8px;border-radius:4px;font-weight:bold">WINNER &#127942;</span>'
+                row_bg = "#eafaf1"
+            elif done[i]:
+                status = '<span style="color:#888">done</span>'
+                row_bg = "#f9f9f9"
+            else:
+                status = f'<span style="color:#2471a3">running... ({last_tools[i]})</span>'
+                row_bg = "#ffffff"
+
+            score_str = f"{final_scores[i]:.2f}" if final_scores[i] is not None else "-"
+            rows += (
+                f'<tr style="background:{row_bg}">'
+                f'<td style="padding:8px 12px;font-weight:bold;color:#111">Agent {i}</td>'
+                f'<td style="padding:8px 12px;color:#333">{step_counts[i]}</td>'
+                f'<td style="padding:8px 12px;color:#333">{score_str}</td>'
+                f'<td style="padding:8px 12px">{status}</td>'
+                f'</tr>'
+            )
+
+        board = (
+            f'<div style="color:#111">'
+            f'<table style="width:100%;border-collapse:collapse;font-family:monospace;color:#111">'
+            f'<tr style="background:#2c3e50;color:white">'
+            f'<th style="padding:8px 12px;text-align:left;color:white">Agent</th>'
+            f'<th style="padding:8px 12px;text-align:left;color:white">Steps</th>'
+            f'<th style="padding:8px 12px;text-align:left;color:white">Final LLM Score</th>'
+            f'<th style="padding:8px 12px;text-align:left;color:white">Status</th>'
+            f'</tr>{rows}</table></div>'
+        )
 
         yield board
 
-    yield board + f"\nRace complete. Winner: Agent {winner}"
+    winner_str = f"Agent {winner}" if winner is not None else "unknown"
+    all_scores = {i: s for i, s in final_scores.items() if s is not None}
+    best_agent = max(all_scores, key=lambda i: all_scores[i]) if all_scores else winner
+    best_score = all_scores.get(best_agent, 0.0)
+    winner_score = all_scores.get(winner, 0.0)
+    avg_score = sum(all_scores.values()) / max(len(all_scores), 1)
+
+    # Narrative — adapts based on whether winner == best scorer
+    scores_range = max(all_scores.values()) - min(all_scores.values()) if all_scores else 0
+    if best_agent != winner:
+        narrative = (
+            f"Agent {winner} crossed the finish line first with a score of {winner_score:.2f}, "
+            f"but Agent {best_agent} produced the strongest research at {best_score:.2f}. "
+            f"Speed vs quality &mdash; the classic concurrent agent trade-off."
+        )
+    elif scores_range < 0.05:
+        narrative = (
+            f"Agent {winner} won the race with a score of {winner_score:.2f}. "
+            f"All three agents finished with nearly identical quality scores &mdash; "
+            f"a tight race from start to finish."
+        )
+    else:
+        narrative = (
+            f"Agent {winner} won the race AND scored highest at {winner_score:.2f} &mdash; "
+            f"finishing first with the best research quality."
+        )
+
+    def _score_color(i):
+        if i == best_agent:
+            return "#1a7a4a"
+        elif i == winner:
+            return "#2471a3"
+        else:
+            return "#888"
+
+    score_cells = "".join(
+        f'<td style="padding:8px 16px;text-align:center;color:#111;border-right:1px solid #ddd">'
+        f'<div style="font-size:1.6em;font-weight:bold;color:{_score_color(i)}">{all_scores[i]:.2f}</div>'
+        f'<div style="font-size:0.85em;color:#555;margin-top:2px">Agent {i}'
+        f'{"&nbsp;&#127942;" if i == winner else ""}'
+        f'{"&nbsp;&#11088;" if i == best_agent and best_agent != winner else ""}'
+        f'</div></td>'
+        for i in sorted(all_scores)
+    )
+
+    summary = (
+        f'<div style="margin-top:14px;border:1px solid #a9dfbf;border-radius:6px;overflow:hidden">'
+
+        f'<div style="background:#1a7a4a;color:white;padding:10px 16px;font-weight:bold;font-size:1.05em">'
+        f'Race Complete &mdash; {winner_str} wins'
+        f'</div>'
+
+        f'<div style="background:#eafaf1;padding:12px 16px;color:#111;line-height:1.7;border-bottom:1px solid #a9dfbf">'
+        f'{narrative}'
+        f'</div>'
+
+        f'<div style="background:#f9f9f9;padding:10px 0;border-bottom:1px solid #ddd">'
+        f'<table style="width:100%;border-collapse:collapse">'
+        f'<tr>'
+        f'<td style="padding:6px 16px;color:#333;font-size:0.9em;font-weight:bold;border-right:1px solid #ddd;white-space:nowrap">Final LLM Scores</td>'
+        f'{score_cells}'
+        f'<td style="padding:8px 16px;color:#111;font-size:0.92em;white-space:nowrap">'
+        f'Avg: <b style="color:#111">{avg_score:.2f}</b><br>'
+        f'Sessions: <b style="color:#111">3 concurrent</b>'
+        f'</td>'
+        f'</tr>'
+        f'</table>'
+        f'</div>'
+
+        f'<div style="background:#2c3e50;padding:12px 16px;color:white;font-size:0.92em;line-height:1.6">'
+        f'<b>OpenEnv Concurrent Sessions:</b> All 3 agents ran simultaneously inside a single '
+        f'Docker container, each with its own fully isolated session '
+        f'(SUPPORTS_CONCURRENT_SESSIONS=True). No shared state, no interference between agents.'
+        f'</div>'
+
+        f'</div>'
+    )
+
+    yield board + summary
 
 
 # ---------------------------------------------------------------------------
@@ -421,18 +591,29 @@ def create_demo():
                     comp_steps = gr.Slider(minimum=3, maximum=15, value=6, step=1, label="Max Steps", scale=1)
                 comp_btn = gr.Button("Run Comparison", variant="primary")
 
-                with gr.Row():
-                    trad_chart = gr.Plot(label="Traditional RL Agent")
-                    oe_chart = gr.Plot(label="OpenEnv Agent")
+                reward_chart = gr.Plot(label="Reward Comparison")
 
                 with gr.Row():
-                    trad_log = gr.Textbox(label="Traditional Agent Steps", lines=8, interactive=False)
-                    oe_log = gr.Textbox(label="OpenEnv Agent Steps", lines=8, interactive=False)
+                    with gr.Column():
+                        gr.Markdown("**Traditional RL Agent Steps**")
+                        trad_log = gr.HTML()
+                    with gr.Column():
+                        gr.Markdown("**OpenEnv Agent Steps**")
+                        oe_log = gr.HTML()
 
                 comp_btn.click(
                     fn=run_comparison,
                     inputs=[comp_query, comp_steps],
-                    outputs=[trad_chart, oe_chart, trad_log, oe_log],
+                    outputs=[reward_chart, trad_log, oe_log],
+                )
+                gr.Examples(
+                    examples=[
+                        ["How does retrieval-augmented generation compare to fine-tuning for production LLM applications?"],
+                        ["What are the key differences between LangGraph and AutoGen for building multi-agent AI systems?"],
+                        ["Compare CoreWeave vs Lambda Labs GPU cloud pricing, availability, and performance benchmarks"],
+                    ],
+                    inputs=comp_query,
+                    label="Suggested questions (largest reward hacking gap)",
                 )
 
             # --- Tab 2: Agent Race ---
@@ -449,12 +630,21 @@ def create_demo():
                     )
                     race_steps = gr.Slider(minimum=3, maximum=15, value=6, step=1, label="Max Steps", scale=1)
                 race_btn = gr.Button("Start Race", variant="primary")
-                race_board = gr.Textbox(label="Live Scoreboard", lines=10, interactive=False)
+                race_board = gr.HTML(label="Live Scoreboard")
 
                 race_btn.click(
                     fn=run_race,
                     inputs=[race_query, race_steps],
                     outputs=[race_board],
+                )
+                gr.Examples(
+                    examples=[
+                        ["How does retrieval-augmented generation compare to fine-tuning for production LLM applications?"],
+                        ["What are the key differences between LangGraph and AutoGen for building multi-agent AI systems?"],
+                        ["Compare CoreWeave vs Lambda Labs GPU cloud pricing, availability, and performance benchmarks"],
+                    ],
+                    inputs=race_query,
+                    label="Suggested questions",
                 )
 
             # --- Tab 3: Parallel Flyte Fan-out ---
@@ -481,17 +671,6 @@ def create_demo():
                     outputs=[fanout_results, fanout_link],
                 )
 
-        gr.Markdown(
-            "**Suggested questions** — these produce the largest reward hacking gap:"
-        )
-        gr.Examples(
-            examples=[
-                ["How does retrieval-augmented generation compare to fine-tuning for production LLM applications?"],
-                ["What are the key differences between LangGraph and AutoGen for building multi-agent AI systems?"],
-                ["Compare CoreWeave vs Lambda Labs GPU cloud pricing, availability, and performance benchmarks"],
-            ],
-            inputs=comp_query,
-        )
 
     return demo
 
