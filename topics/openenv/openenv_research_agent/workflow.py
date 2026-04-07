@@ -1,7 +1,7 @@
 """
 Flyte workflow for the OpenEnv Research Agent demo.
 
-Two Flyte tasks are defined:
+Four Flyte tasks are defined:
 
 1. run_research_episode(query, agent_type, max_steps) -> str (JSON)
    Runs a single research episode — either the OpenEnv agent or the
@@ -11,8 +11,8 @@ Two Flyte tasks are defined:
    Returns the full episode result as JSON including step log and scores.
 
 2. run_research_comparison(queries, max_steps) -> str (JSON)
-   The main pipeline. Takes a list of research questions and fans them
-   out as parallel Flyte tasks — each question runs both agents
+   The main pipeline for Tab 3. Takes a list of research questions and fans
+   them out as parallel Flyte tasks — each question runs both agents
    simultaneously. Returns a comparison report.
 
    Fan-out diagram:
@@ -23,8 +23,18 @@ Two Flyte tasks are defined:
                  └─asyncio.gather──→ run_research_episode (traditional, q2)
                  → collect results → END
 
+3. run_side_by_side(query, max_steps) -> str (JSON)
+   Runs traditional and OpenEnv agents in parallel on the same query.
+   Used by Tab 1 (Side-by-Side Comparison) in Flyte mode.
+   Returns kw_scores list + both final LLM scores for chart rendering.
+
+4. run_agent_race(query, max_steps) -> str (JSON)
+   Runs 3 OpenEnv agents in parallel on the same query.
+   Uses asyncio.as_completed to identify the winner by completion order.
+   Used by Tab 2 (Agent Race) in Flyte mode.
+
 Flyte features demonstrated:
-  - Parallel fan-out via asyncio.gather across the cluster
+  - Parallel fan-out via asyncio.gather / as_completed across the cluster
   - Per-task HTML reports with step logs and reward scores
   - Result caching (same query + agent_type = instant replay)
   - Run links returned to Gradio UI
@@ -277,3 +287,161 @@ OpenEnv agent scores consistently high on the LLM judge — the meaningful signa
 
     log.info(f"[Comparison] Done. {len(results)} episodes completed.")
     return json.dumps({"results": results, "total_episodes": len(results)})
+
+
+# ---------------------------------------------------------------------------
+# Task 3: Side-by-side comparison — used by Tab 1 in Flyte mode
+# ---------------------------------------------------------------------------
+
+@env.task(report=True)
+async def run_side_by_side(query: str, max_steps: int = 6) -> str:
+    """
+    Run traditional and OpenEnv agents in parallel on the same query.
+
+    Fans out to two run_research_episode tasks via asyncio.gather.
+    Returns enough data to render the final reward chart and summaries
+    in the Gradio UI without streaming — the Flyte console shows full
+    per-step logs for each agent.
+    """
+    log.info(f"[SideBySide] Starting: query={query[:60]}")
+
+    await flyte.report.replace.aio(
+        f"<h2>Side-by-Side Comparison</h2>"
+        f"<p><b>Query:</b> {query}</p>"
+        f"<p>Running traditional and OpenEnv agents in parallel...</p>"
+    )
+    await flyte.report.flush.aio()
+
+    trad_json, oe_json = await asyncio.gather(
+        run_research_episode(query=query, agent_type="traditional", max_steps=max_steps),
+        run_research_episode(query=query, agent_type="openenv", max_steps=max_steps),
+    )
+    trad = json.loads(trad_json)
+    oe = json.loads(oe_json)
+
+    # Extract per-step keyword scores from traditional steps for chart rendering
+    kw_scores = [
+        s.get("keyword_score", 0.0)
+        for s in trad["steps"]
+        if s.get("tool_name") != "final_judgment"
+    ]
+
+    trad_final = trad["llm_final_score"]
+    oe_final = oe["llm_final_score"]
+    trad_avg_kw = trad["avg_keyword_score"] or 0.0
+    gap = trad_avg_kw - (trad_final or 0.0)
+    oe_advantage = (oe_final or 0.0) - (trad_final or 0.0)
+
+    trad_final_str = f"{trad_final:.2f}" if trad_final is not None else "N/A"
+    oe_final_str = f"{oe_final:.2f}" if oe_final is not None else "N/A"
+    trad_avg_str = f"{trad_avg_kw:.2f}"
+
+    report_html = f"""
+<h2>Side-by-Side Comparison Results</h2>
+<p><b>Query:</b> {query}</p>
+<table border="1" cellpadding="6">
+  <tr><th>Agent</th><th>Steps</th><th>Avg Keyword Score</th><th>Final LLM Score</th></tr>
+  <tr>
+    <td>Traditional RL</td><td>{trad['total_steps']}</td>
+    <td>{trad_avg_str}</td><td>{trad_final_str}</td>
+  </tr>
+  <tr>
+    <td>OpenEnv Agent</td><td>{oe['total_steps']}</td>
+    <td>N/A</td><td>{oe_final_str}</td>
+  </tr>
+</table>
+<p><b>Reward hacking gap:</b> {gap:.2f} &nbsp;|&nbsp;
+   <b>OpenEnv advantage:</b> +{oe_advantage:.2f}</p>
+<p><i>Traditional agent scores high on keyword metric but low on LLM judge.
+OpenEnv agent scores consistently higher on the meaningful signal.</i></p>
+"""
+    await flyte.report.replace.aio(report_html)
+    await flyte.report.flush.aio()
+
+    log.info(f"[SideBySide] Done: trad_llm={trad_final_str} oe_llm={oe_final_str} gap={gap:.2f}")
+    return json.dumps({
+        "query": query,
+        "kw_scores": kw_scores,
+        "trad_final_llm": trad_final,
+        "oe_final_llm": oe_final,
+        "trad_avg_kw": trad_avg_kw,
+        "trad_total_steps": trad["total_steps"],
+        "oe_total_steps": oe["total_steps"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Agent race — used by Tab 2 in Flyte mode
+# ---------------------------------------------------------------------------
+
+@env.task(report=True)
+async def run_agent_race(query: str, max_steps: int = 6) -> str:
+    """
+    Run 3 OpenEnv agents in parallel on the same query.
+
+    Uses asyncio.as_completed so the first task to finish on the cluster
+    is identified as the winner — preserving the race semantics even when
+    agents run on separate Flyte pods. Returns final scores, step counts,
+    and winner for scoreboard rendering in the Gradio UI.
+    """
+    num_agents = 3
+    log.info(f"[Race] Starting {num_agents} agents: query={query[:60]}")
+
+    await flyte.report.replace.aio(
+        f"<h2>Agent Race</h2>"
+        f"<p><b>Query:</b> {query}</p>"
+        f"<p>Racing {num_agents} OpenEnv agents on the cluster...</p>"
+    )
+    await flyte.report.flush.aio()
+
+    async def _run(agent_id: int):
+        result_json = await run_research_episode(
+            query=query, agent_type="openenv", max_steps=max_steps
+        )
+        result = json.loads(result_json)
+        result["agent_id"] = agent_id
+        return result
+
+    winner = None
+    results: dict[int, dict] = {}
+
+    # as_completed yields tasks in finish order — first completion = winner
+    for coro in asyncio.as_completed([_run(i) for i in range(num_agents)]):
+        result = await coro
+        agent_id = result["agent_id"]
+        results[agent_id] = result
+        if winner is None:
+            winner = agent_id
+            log.info(f"[Race] Winner: Agent {winner}")
+
+    final_scores = {i: results[i]["llm_final_score"] for i in results}
+    step_counts = {i: results[i]["total_steps"] for i in results}
+
+    scores_html = "".join(
+        f"<tr><td>Agent {i}</td><td>{step_counts[i]}</td>"
+        f"<td>{final_scores[i]:.2f if final_scores[i] is not None else 'N/A'}</td>"
+        f"<td>{'WINNER' if i == winner else ''}</td></tr>"
+        for i in sorted(results)
+    )
+    report_html = f"""
+<h2>Agent Race Results</h2>
+<p><b>Query:</b> {query}</p>
+<p><b>Winner:</b> Agent {winner} (first to complete on the cluster)</p>
+<table border="1" cellpadding="6">
+  <tr><th>Agent</th><th>Steps</th><th>Final LLM Score</th><th>Status</th></tr>
+  {scores_html}
+</table>
+<p><i>All 3 agents ran as separate Flyte tasks in parallel.
+Winner determined by task completion order via asyncio.as_completed.</i></p>
+"""
+    await flyte.report.replace.aio(report_html)
+    await flyte.report.flush.aio()
+
+    log.info(f"[Race] Done. Winner=Agent {winner}, scores={final_scores}")
+    return json.dumps({
+        "query": query,
+        "final_scores": final_scores,
+        "step_counts": step_counts,
+        "winner": winner,
+        "num_agents": num_agents,
+    })

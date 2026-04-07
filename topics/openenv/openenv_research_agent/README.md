@@ -85,7 +85,7 @@ topics/openenv/openenv_research_agent/
 ├── system_prompt.py         # Claude's research instructions
 ├── workflow.py              # Flyte tasks + parallel pipeline
 ├── config.py                # Flyte TaskEnvironment + secrets
-├── app.py                   # Gradio UI — tab wiring and agent orchestration
+├── app.py                   # Gradio UI — tab wiring, run mode toggle, agent orchestration
 ├── ui_components.py         # Plotly chart builders and HTML card builders
 ├── styles.css               # CSS classes used by ui_components.py
 ├── requirements.txt         # Full project dependencies
@@ -162,6 +162,13 @@ python app.py
 
 ## Demo Tabs
 
+Tabs 1 and 2 each have a **Run Mode** toggle:
+
+| Mode | Execution | Chart/Scoreboard | Flyte console link |
+|---|---|---|---|
+| Local Process | Agents run in the current Python process, connecting to local Docker | Live — updates per step | No |
+| Flyte Task | Agents dispatch as parallel Flyte tasks (local or remote cluster) | Final only — renders when tasks complete | Yes |
+
 ### Tab 1 — Side-by-Side Comparison
 
 Enter a research question. Both agents run simultaneously. Watch:
@@ -169,11 +176,17 @@ Enter a research question. Both agents run simultaneously. Watch:
 - The traditional agent's **keyword score climb** while its **LLM score stays low** — reward hacking in action
 - The OpenEnv agent chain tools intelligently and earn a **consistently high LLM score**
 
-The live Plotly chart updates after every step so the gap is visible in real time.
+**Local Process:** The Plotly chart updates after every step so the gap is visible in real time.
+
+**Flyte Task:** Both agents run as a `run_side_by_side` Flyte task (two parallel sub-tasks). A console link appears immediately. When tasks complete, the final chart and summaries render. Full per-step logs are visible in the Flyte console.
 
 ### Tab 2 — Agent Race
 
-Three OpenEnv agents race on the same question using OpenEnv's `SUPPORTS_CONCURRENT_SESSIONS`. A live scoreboard updates after each step. First agent to finish wins. All three agents connect to the **same Docker container** — each gets its own isolated session with independent episode state. No interference between sessions despite sharing one process.
+Three OpenEnv agents race on the same question. First to finish wins.
+
+**Local Process:** All three agents connect to the **same Docker container** using OpenEnv's `SUPPORTS_CONCURRENT_SESSIONS`. Live scoreboard updates after each step. Each agent gets its own isolated session — no shared state despite sharing one process.
+
+**Flyte Task:** Three agents run as parallel Flyte tasks via `run_agent_race`. Winner is the first task to complete on the cluster (`asyncio.as_completed` ordering). Final scoreboard and summary render when all tasks finish.
 
 ### Tab 3 — Parallel Flyte Fan-out
 
