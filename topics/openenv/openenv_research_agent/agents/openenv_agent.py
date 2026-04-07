@@ -121,7 +121,7 @@ class OpenEnvAgent:
         self,
         query: str,
         agent_id: int = 0,
-        max_steps: int = 10,
+        max_steps: int = 10,  # max tool calls (not LLM iterations)
         env_url: str = None,
     ):
         self.query = query
@@ -136,14 +136,24 @@ class OpenEnvAgent:
 
         Per-step: yields tool_name so the step log updates live.
         Final step: yields llm_final_score from the accumulated research judgment.
+
+        max_steps limits actual tool calls (client.step() invocations), not LLM
+        iterations. One LLM response can call multiple tools; the step counter is
+        checked before each new LLM call so the limit is respected across batches.
         """
         messages = [{"role": "user", "content": self.query}]
         accumulated_results = []
+        step_count = 0  # counts actual tool calls, not LLM iterations
 
         with GenericEnvClient(base_url=self._env_url).sync() as client:
             client.reset(query=self.query)
 
-            for _ in range(self.max_steps):
+            # Loop bound is generous — actual limit is step_count vs max_steps.
+            # One LLM call can execute multiple tools; we check before each new call.
+            for _ in range(self.max_steps * 3):
+                if step_count >= self.max_steps:
+                    break
+
                 response = self._client.messages.create(
                     model="claude-opus-4-6",
                     max_tokens=4096,
@@ -181,6 +191,7 @@ class OpenEnvAgent:
 
                         action = ResearchAction(tool_name=tool_name, tool_args=tool_args)
                         step_result = client.step(action)
+                        step_count += 1
 
                         obs = step_result.observation  # dict from ResearchObservation
                         tool_result = obs.get("result", {})
@@ -215,8 +226,8 @@ class OpenEnvAgent:
 
                     messages.append({"role": "user", "content": tool_results})
 
-                    # Handle finish or episode done after feeding all results back
-                    if finish_requested or episode_done:
+                    # Handle finish, episode done, or step limit after feeding all results back
+                    if finish_requested or episode_done or step_count >= self.max_steps:
                         llm_final = llm_judge_final_reward(
                             query=self.query,
                             accumulated_results=accumulated_results,

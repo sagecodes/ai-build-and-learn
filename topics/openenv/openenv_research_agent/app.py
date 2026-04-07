@@ -406,14 +406,14 @@ def create_demo():
                     comp_query = gr.Textbox(
                         label="Research Question",
                         placeholder="What is Model Context Protocol (MCP)?",
-                        scale=3,
+                        scale=4,
                     )
                     comp_steps = gr.Slider(minimum=3, maximum=15, value=6, step=1, label="Max Steps", scale=1)
-                with gr.Row():
                     comp_mode = gr.Radio(
                         choices=_RUN_MODE_CHOICES,
                         value="Local Process",
                         label="Run Mode",
+                        scale=1,
                     )
                     comp_btn = gr.Button("Run Comparison", variant="primary", scale=0)
 
@@ -455,14 +455,14 @@ def create_demo():
                     race_query = gr.Textbox(
                         label="Research Question",
                         placeholder="How does retrieval-augmented generation work?",
-                        scale=3,
+                        scale=4,
                     )
                     race_steps = gr.Slider(minimum=3, maximum=15, value=6, step=1, label="Max Steps", scale=1)
-                with gr.Row():
                     race_mode = gr.Radio(
                         choices=_RUN_MODE_CHOICES,
                         value="Local Process",
                         label="Run Mode",
+                        scale=1,
                     )
                     race_btn = gr.Button("Start Race", variant="primary", scale=0)
 
