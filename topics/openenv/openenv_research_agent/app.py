@@ -61,6 +61,7 @@ from ui_components import (
     agent_summary,
     race_scoreboard,
     race_summary,
+    fanout_results_table,
 )
 
 load_dotenv()
@@ -345,10 +346,10 @@ def run_flyte_fanout(queries_text: str, max_steps: int):
     """
     queries = [q.strip() for q in queries_text.strip().splitlines() if q.strip()]
     if not queries:
-        yield "Enter one research question per line.", ""
+        yield "<p>Enter one research question per line.</p>", ""
         return
 
-    yield f"Submitting {len(queries)} queries × 2 agents to Flyte...", ""
+    yield f"<p>Submitting {len(queries)} queries × 2 agents to Flyte...</p>", ""
 
     result = flyte.with_runcontext(mode=RUN_MODE).run(
         run_research_comparison,
@@ -357,23 +358,13 @@ def run_flyte_fanout(queries_text: str, max_steps: int):
     )
 
     link = _flyte_link(getattr(result, "url", None))
-    yield f"Tasks running... ({len(queries) * 2} parallel Flyte tasks)", link
+    yield f"<p>Tasks running... ({len(queries) * 2} parallel Flyte tasks)</p>", link
 
     result.wait()
     output = json.loads(result.outputs()[0])
     results = output.get("results", [])
 
-    lines = [f"{'Query':<50} {'Agent':<12} {'Steps':<8} {'Keyword Score':<15} {'Final LLM Score'}"]
-    lines.append("-" * 105)
-    for r in results:
-        kw = f"{r['avg_keyword_score']:.2f}" if r["avg_keyword_score"] is not None else "N/A"
-        llm = f"{r['llm_final_score']:.2f}" if r["llm_final_score"] is not None else "N/A"
-        lines.append(
-            f"{r['query'][:48]:<50} {r['agent_type']:<12} "
-            f"{r['total_steps']:<8} {kw:<15} {llm}"
-        )
-
-    yield "\n".join(lines), link
+    yield fanout_results_table(results), link
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +491,7 @@ def create_demo():
                     fanout_steps = gr.Slider(minimum=3, maximum=15, value=6, step=1, label="Max Steps", scale=1)
                 fanout_btn = gr.Button("Run on Flyte", variant="primary")
                 fanout_link = gr.HTML()
-                fanout_results = gr.Textbox(label="Results", lines=15, interactive=False)
+                fanout_results = gr.HTML(label="Results")
 
                 fanout_btn.click(
                     fn=run_flyte_fanout,

@@ -10,6 +10,7 @@ Sections:
   - Score blocks — HTML final score displays
   - Summary builders — Tab 1 agent summary callouts
   - Race builders — Tab 2 scoreboard table and post-race summary card
+  - Fanout builders — Tab 3 results table
 """
 
 import plotly.graph_objects as go
@@ -326,5 +327,81 @@ def race_summary(
         f'(SUPPORTS_CONCURRENT_SESSIONS=True). No shared state, no interference between agents.'
         f'</div>'
 
+        f'</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fanout results table (Tab 3)
+# ---------------------------------------------------------------------------
+
+def fanout_results_table(results: list[dict]) -> str:
+    """
+    HTML results table for the Parallel Flyte Fan-out tab.
+
+    Rows are grouped in pairs (openenv + traditional) per query.
+    Alternating query groups get a subtle background tint so related rows
+    read as a unit. Agent type is shown as a colour-coded badge.
+    Scores are colour-coded: green = good (≥0.6), amber = mid (≥0.4), red = low.
+    """
+    def _score_color(score: float | None) -> str:
+        if score is None:
+            return "#888"
+        if score >= 0.6:
+            return "#1a7a4a"
+        if score >= 0.4:
+            return "#b7770d"
+        return "#c0392b"
+
+    # Group into (openenv, traditional) pairs keyed by query
+    pairs: dict[str, dict] = {}
+    for r in results:
+        pairs.setdefault(r["query"], {})[r["agent_type"]] = r
+
+    rows = ""
+    for idx, (query, agents) in enumerate(pairs.items()):
+        row_bg = "#f4f6f7" if idx % 2 == 0 else "#ffffff"
+        for agent_type in ("openenv", "traditional"):
+            r = agents.get(agent_type)
+            if r is None:
+                continue
+
+            badge_class = "badge-oe" if agent_type == "openenv" else "badge-trad"
+            kw_str = f"{r['avg_keyword_score']:.2f}" if r["avg_keyword_score"] is not None else "—"
+            llm = r["llm_final_score"]
+            llm_str = f"{llm:.2f}" if llm is not None else "—"
+            llm_color = _score_color(llm)
+
+            # Only show query text on the first row of each pair
+            query_cell = (
+                f'<td style="padding:8px 12px;color:#111;vertical-align:top">{query}</td>'
+                if agent_type == "openenv"
+                else '<td style="padding:8px 12px"></td>'
+            )
+
+            rows += (
+                f'<tr style="background:{row_bg}">'
+                f'{query_cell}'
+                f'<td style="padding:8px 12px">'
+                f'<span class="badge {badge_class}">{agent_type}</span></td>'
+                f'<td style="padding:8px 12px;color:#333;text-align:center">{r["total_steps"]}</td>'
+                f'<td style="padding:8px 12px;color:#333;text-align:center">{kw_str}</td>'
+                f'<td style="padding:8px 12px;font-weight:bold;text-align:center;'
+                f'color:{llm_color}">{llm_str}</td>'
+                f'</tr>'
+            )
+
+    return (
+        f'<div style="color:#111">'
+        f'<table class="race-table" style="font-family:inherit">'
+        f'<tr>'
+        f'<th style="width:45%">Query</th>'
+        f'<th>Agent</th>'
+        f'<th style="text-align:center">Steps</th>'
+        f'<th style="text-align:center">Keyword Score</th>'
+        f'<th style="text-align:center">Final LLM Score</th>'
+        f'</tr>'
+        f'{rows}'
+        f'</table>'
         f'</div>'
     )
