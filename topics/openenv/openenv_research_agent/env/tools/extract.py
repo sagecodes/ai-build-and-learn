@@ -9,13 +9,9 @@ Use this action when the agent already has specific URLs from a
 tavily_search step and needs full page content rather than snippets.
 """
 
-import time
 from tavily import TavilyClient
 
-
-def _is_rate_limit(error: Exception) -> bool:
-    msg = str(error).lower()
-    return "usage limit" in msg or "rate limit" in msg or "429" in msg
+from env.tools.common import tavily_call_with_retry
 
 
 def run_extract(
@@ -34,24 +30,20 @@ def run_extract(
         extract_depth: "basic" for main content, "advanced" for deeper
                        extraction including tables and structured data.
     """
-    for attempt in range(3):
-        try:
-            response = client.extract(
-                urls=urls,
-                extract_depth=extract_depth,
-            )
-            return {
-                "results": [
-                    {
-                        "url": r.get("url", ""),
-                        "raw_content": r.get("raw_content", ""),
-                    }
-                    for r in response.get("results", [])
-                ],
-                "failed_results": response.get("failed_results", []),
-            }
-        except Exception as e:
-            if _is_rate_limit(e) and attempt < 2:
-                time.sleep(2 ** attempt)
-                continue
-            return {"error": str(e), "results": []}
+    def _call():
+        response = client.extract(
+            urls=urls,
+            extract_depth=extract_depth,
+        )
+        return {
+            "results": [
+                {
+                    "url": r.get("url", ""),
+                    "raw_content": r.get("raw_content", ""),
+                }
+                for r in response.get("results", [])
+            ],
+            "failed_results": response.get("failed_results", []),
+        }
+
+    return tavily_call_with_retry(_call, on_error={"results": []})

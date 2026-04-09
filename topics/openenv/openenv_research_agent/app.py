@@ -63,7 +63,7 @@ from ui_components import (
     race_summary,
     fanout_results_table,
     fanout_narrative_summary,
-    narrative_summary,
+    narrative_summary,  # used inside _comparison_summaries
     env_state_card,
 )
 
@@ -105,6 +105,45 @@ def _flyte_link(run_url) -> str:
             f'</div>'
         )
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _comparison_summaries(
+    avg_kw: float,
+    trad_final: float | None,
+    oe_final: float | None,
+    trad_steps: int,
+    oe_steps: int,
+) -> tuple[str, str, str]:
+    """
+    Build the agent summary HTML and narrative for both comparison paths.
+
+    Used by both the Local Process and Flyte Task paths in run_comparison()
+    so the output is identical regardless of how the data was produced.
+
+    Returns:
+        (trad_summary_html, oe_summary_html, narrative_html)
+    """
+    trad_final = trad_final or 0.0
+    oe_final = oe_final or 0.0
+    gap = avg_kw - trad_final
+    oe_advantage = oe_final - trad_final
+
+    trad_html = agent_summary("Summary — Traditional RL", "#e67e22", [
+        f"Avg Keyword Score: <b>{avg_kw:.2f}</b> &larr; what the agent optimized",
+        f"Final LLM Judge Score: <b>{trad_final:.2f}</b> &larr; actual quality",
+        f"Overestimation gap: <b>{gap:.2f}</b> &larr; this is reward hacking",
+    ])
+    oe_html = agent_summary("Summary — OpenEnv Agent", "#2471a3", [
+        f"Final LLM Judge Score: <b>{oe_final:.2f}</b>",
+        f"OpenEnv advantage: <b>+{oe_advantage:.2f}</b> over traditional",
+    ])
+    narr = narrative_summary(avg_kw, trad_final, oe_final, gap, oe_advantage,
+                             trad_steps, oe_steps)
+    return trad_html, oe_html, narr
 
 
 # ---------------------------------------------------------------------------
@@ -194,28 +233,18 @@ def run_comparison(query: str, max_steps: int, run_mode: str):
             )
 
         avg_kw = sum(trad_kw) / max(len(trad_kw), 1)
-        trad_llm_val = trad_final_llm or 0.0
-        oe_llm_val = oe_final_llm or 0.0
-        gap = avg_kw - trad_llm_val
-        oe_advantage = oe_llm_val - trad_llm_val
-
-        trad_html_blocks.append(agent_summary("Summary — Traditional RL", "#e67e22", [
-            f"Avg Keyword Score: <b>{avg_kw:.2f}</b> &larr; what the agent optimized",
-            f"Final LLM Judge Score: <b>{trad_llm_val:.2f}</b> &larr; actual quality",
-            f"Overestimation gap: <b>{gap:.2f}</b> &larr; this is reward hacking",
-        ]))
-        oe_html_blocks.append(agent_summary("Summary — OpenEnv Agent", "#2471a3", [
-            f"Final LLM Judge Score: <b>{oe_llm_val:.2f}</b>",
-            f"OpenEnv advantage: <b>+{oe_advantage:.2f}</b> over traditional",
-        ]))
+        trad_summ, oe_summ, narr = _comparison_summaries(
+            avg_kw, trad_final_llm, oe_final_llm, len(trad_kw), oe_step_count
+        )
+        trad_html_blocks.append(trad_summ)
+        oe_html_blocks.append(oe_summ)
 
         yield (
             build_reward_chart(trad_kw, trad_final_llm, oe_final_llm, "FINAL — Reward Hacking Gap"),
             "".join(trad_html_blocks),
             "".join(oe_html_blocks),
             "",
-            narrative_summary(avg_kw, trad_llm_val, oe_llm_val, gap, oe_advantage,
-                               len(trad_kw), oe_step_count),
+            narr,
         )
 
     # ── Flyte Task path ─────────────────────────────────────────────────────
@@ -236,32 +265,19 @@ def run_comparison(query: str, max_steps: int, run_mode: str):
         trad_final = data["trad_final_llm"]
         oe_final = data["oe_final_llm"]
         trad_avg_kw = data["trad_avg_kw"] or 0.0
-        gap = trad_avg_kw - (trad_final or 0.0)
-        oe_advantage = (oe_final or 0.0) - (trad_final or 0.0)
 
-        trad_html = (
-            final_score_block("Final LLM Judge Score", trad_final or 0.0, "#c0392b")
-            + agent_summary("Summary — Traditional RL", "#e67e22", [
-                f"Avg Keyword Score: <b>{trad_avg_kw:.2f}</b> &larr; what the agent optimized",
-                f"Final LLM Judge Score: <b>{trad_final or 0.0:.2f}</b> &larr; actual quality",
-                f"Overestimation gap: <b>{gap:.2f}</b> &larr; this is reward hacking",
-            ])
+        trad_summ, oe_summ, narr = _comparison_summaries(
+            trad_avg_kw, trad_final, oe_final, len(kw_scores), len(kw_scores)
         )
-        oe_html = (
-            final_score_block("Final LLM Judge Score", oe_final or 0.0, "#1a7a4a")
-            + agent_summary("Summary — OpenEnv Agent", "#2471a3", [
-                f"Final LLM Judge Score: <b>{oe_final or 0.0:.2f}</b>",
-                f"OpenEnv advantage: <b>+{oe_advantage:.2f}</b> over traditional",
-            ])
-        )
+        trad_html = final_score_block("Final LLM Judge Score", trad_final or 0.0, "#c0392b") + trad_summ
+        oe_html = final_score_block("Final LLM Judge Score", oe_final or 0.0, "#1a7a4a") + oe_summ
 
         yield (
             build_reward_chart(kw_scores, trad_final, oe_final, "FINAL — Reward Hacking Gap"),
             trad_html,
             oe_html,
             link,
-            narrative_summary(trad_avg_kw, trad_final or 0.0, oe_final or 0.0, gap, oe_advantage,
-                               len(kw_scores), len(kw_scores)),
+            narr,
         )
 
 

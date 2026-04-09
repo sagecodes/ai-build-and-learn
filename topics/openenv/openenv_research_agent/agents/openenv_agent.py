@@ -130,6 +130,25 @@ class OpenEnvAgent:
         self._env_url = env_url or os.getenv("ENV_URL", "http://localhost:8000")
         self._client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+    def _final_yield(self, client, accumulated_results: list, result_preview: str = None) -> dict:
+        """Build the final_judgment yield dict, calling client.state and llm_judge."""
+        result = {
+            "step": -1,
+            "tool_name": "final_judgment",
+            "tool_args": {},
+            "llm_final_score": llm_judge_final_reward(
+                query=self.query,
+                accumulated_results=accumulated_results,
+            ),
+            "env_state": _get_state(client),
+            "done": True,
+            "agent_id": self.agent_id,
+            "agent": "openenv",
+        }
+        if result_preview:
+            result["result_preview"] = result_preview
+        return result
+
     def run(self) -> Generator[dict, None, None]:
         """
         Run one research episode via Docker EnvClient, yielding a status dict after each step.
@@ -228,21 +247,7 @@ class OpenEnvAgent:
 
                     # Handle finish, episode done, or step limit after feeding all results back
                     if finish_requested or episode_done or step_count >= self.max_steps:
-                        env_state = _get_state(client)
-                        llm_final = llm_judge_final_reward(
-                            query=self.query,
-                            accumulated_results=accumulated_results,
-                        )
-                        yield {
-                            "step": -1,
-                            "tool_name": "final_judgment",
-                            "tool_args": {},
-                            "llm_final_score": llm_final,
-                            "env_state": env_state,
-                            "done": True,
-                            "agent_id": self.agent_id,
-                            "agent": "openenv",
-                        }
+                        yield self._final_yield(client, accumulated_results)
                         return
 
                 else:
@@ -253,40 +258,14 @@ class OpenEnvAgent:
                     if final_text:
                         accumulated_results.append({"text": final_text})
 
-                    env_state = _get_state(client)
-                    llm_final = llm_judge_final_reward(
-                        query=self.query,
-                        accumulated_results=accumulated_results,
+                    yield self._final_yield(
+                        client, accumulated_results,
+                        result_preview=final_text[:500] if final_text else None,
                     )
-                    yield {
-                        "step": -1,
-                        "tool_name": "final_judgment",
-                        "tool_args": {},
-                        "llm_final_score": llm_final,
-                        "env_state": env_state,
-                        "result_preview": final_text[:500],
-                        "done": True,
-                        "agent_id": self.agent_id,
-                        "agent": "openenv",
-                    }
                     return
 
             # Hit max steps — compute final reward on what was gathered
-            env_state = _get_state(client)
-            llm_final = llm_judge_final_reward(
-                query=self.query,
-                accumulated_results=accumulated_results,
-            )
-            yield {
-                "step": -1,
-                "tool_name": "final_judgment",
-                "tool_args": {},
-                "llm_final_score": llm_final,
-                "env_state": env_state,
-                "done": True,
-                "agent_id": self.agent_id,
-                "agent": "openenv",
-            }
+            yield self._final_yield(client, accumulated_results)
 
 
 def _preview(result: dict, max_chars: int = 200) -> str:

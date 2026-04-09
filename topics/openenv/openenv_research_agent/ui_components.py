@@ -19,16 +19,45 @@ import plotly.graph_objects as go
 # not here (unless adding new structure).
 
 # ---------------------------------------------------------------------------
+# Color palette — one place to change the dark theme across all HTML output
+# ---------------------------------------------------------------------------
+
+# Text
+_TEXT    = "#ccc"      # primary body text
+_TEXT2   = "#aaa"      # secondary / dimmer text
+_MUTED   = "#888"      # disabled / placeholder
+_DIM     = "#555"      # very muted labels and captions
+_BRIGHT  = "#e0e0e0"   # highlighted / bright text
+
+# Backgrounds
+_BG      = "#1a1a1a"   # card / surface background
+_BG2     = "#141414"   # deeper / alternate row background
+_BG3     = "#1e1e1e"   # section header background
+
+# Borders
+_BORDER  = "#2a2a2a"   # standard border / divider
+
+# Semantic score colors
+_GOOD    = "#1a7a4a"   # good score / OpenEnv win (green)
+_WARN    = "#b7770d"   # mid score / caution (amber)
+_BAD     = "#c0392b"   # low score / Traditional (red)
+
+# Agent identity colors
+_TRAD    = "#e67e22"   # Traditional RL agent (orange)
+_OE      = "#2471a3"   # OpenEnv agent (blue)
+_ACCENT  = "#e07b39"   # primary UI accent (orange)
+
+# ---------------------------------------------------------------------------
 # Chart builders
 # ---------------------------------------------------------------------------
 
 _DARK = dict(
-    paper_bgcolor="#1a1a1a",
-    plot_bgcolor="#141414",
-    font=dict(color="#aaa"),
+    paper_bgcolor=_BG,
+    plot_bgcolor=_BG2,
+    font=dict(color=_TEXT2),
 )
 
-_AXIS = dict(gridcolor="#2a2a2a", zerolinecolor="#2a2a2a", color="#aaa")
+_AXIS = dict(gridcolor=_BORDER, zerolinecolor=_BORDER, color=_TEXT2)
 
 
 def empty_chart(title: str) -> go.Figure:
@@ -70,7 +99,7 @@ def build_reward_chart(
             y=kw_scores,
             mode="lines+markers",
             name="Keyword Score per step (Traditional)",
-            line=dict(color="#e67e22", dash="dash", width=2),
+            line=dict(color=_TRAD, dash="dash", width=2),
             marker=dict(size=7),
         ))
         max_x = len(kw_scores)
@@ -78,19 +107,19 @@ def build_reward_chart(
     if trad_final is not None:
         fig.add_hline(
             y=trad_final,
-            line=dict(color="#c0392b", width=2.5, dash="dot"),
+            line=dict(color=_BAD, width=2.5, dash="dot"),
             annotation_text=f"Traditional Final LLM: {trad_final:.2f}",
             annotation_position="top left",
-            annotation_font=dict(color="#c0392b", size=11),
+            annotation_font=dict(color=_BAD, size=11),
         )
 
     if oe_final is not None:
         fig.add_hline(
             y=oe_final,
-            line=dict(color="#1a7a4a", width=2.5, dash="dot"),
+            line=dict(color=_GOOD, width=2.5, dash="dot"),
             annotation_text=f"OpenEnv Final LLM: {oe_final:.2f}",
             annotation_position="bottom left",
-            annotation_font=dict(color="#1a7a4a", size=11),
+            annotation_font=dict(color=_GOOD, size=11),
         )
 
     fig.update_layout(
@@ -152,10 +181,10 @@ def oe_step_card(step: int, tool: str, tool_args: dict, preview: str) -> str:
     elif tool == "tavily_extract":
         urls = tool_args.get("urls", [])
         if urls:
-            extra = f' <span style="color:#888">+{len(urls)-1} more</span>' if len(urls) > 1 else ""
+            extra = f' <span style="color:{_MUTED}">+{len(urls)-1} more</span>' if len(urls) > 1 else ""
             detail = (
                 f'<div class="step-detail">&#128196; &nbsp;'
-                f'<a href="{urls[0]}" target="_blank" style="color:#2471a3">'
+                f'<a href="{urls[0]}" target="_blank" style="color:{_OE}">'
                 f'{urls[0][:80]}</a>{extra}</div>'
             )
     elif tool == "tavily_crawl":
@@ -163,7 +192,7 @@ def oe_step_card(step: int, tool: str, tool_args: dict, preview: str) -> str:
         if url:
             detail = (
                 f'<div class="step-detail">&#128375; &nbsp;'
-                f'<a href="{url}" target="_blank" style="color:#2471a3">'
+                f'<a href="{url}" target="_blank" style="color:{_OE}">'
                 f'{url[:80]}</a></div>'
             )
 
@@ -200,7 +229,7 @@ def final_score_block(label: str, score: float, color: str) -> str:
 
 def agent_summary(title: str, color: str, lines: list[str]) -> str:
     """Callout box summarising one agent's episode results."""
-    content = "".join(f'<div style="margin:2px 0;color:#ccc">{l}</div>' for l in lines)
+    content = "".join(f'<div style="margin:2px 0;color:{_TEXT}">{l}</div>' for l in lines)
     return (
         f'<div class="summary-box" style="border-color:{color}">'
         f'<div class="summary-title" style="color:{color}">{title}</div>'
@@ -227,24 +256,24 @@ def race_scoreboard(
             row_bg = "#0f2018"
             status = '<span class="badge badge-oe">WINNER &#127942;</span>'
         elif done[i]:
-            row_bg = "#1a1a1a"
-            status = '<span style="color:#555">done</span>'
+            row_bg = _BG
+            status = '<span style="color:{_DIM}">done</span>'
         else:
-            row_bg = "#141414"
-            status = f'<span style="color:#2471a3">running... ({last_tools[i]})</span>'
+            row_bg = _BG2
+            status = f'<span style="color:{_OE}">running... ({last_tools[i]})</span>'
 
         score_str = f"{final_scores[i]:.2f}" if final_scores[i] is not None else "-"
         rows += (
             f'<tr style="background:{row_bg}">'
-            f'<td style="padding:8px 12px;font-weight:bold;color:#ccc">Agent {i}</td>'
-            f'<td style="padding:8px 12px;color:#aaa">{step_counts[i]}</td>'
-            f'<td style="padding:8px 12px;color:#aaa">{score_str}</td>'
+            f'<td style="padding:8px 12px;font-weight:bold;color:{_TEXT}">Agent {i}</td>'
+            f'<td style="padding:8px 12px;color:{_TEXT2}">{step_counts[i]}</td>'
+            f'<td style="padding:8px 12px;color:{_TEXT2}">{score_str}</td>'
             f'<td style="padding:8px 12px">{status}</td>'
             f'</tr>'
         )
 
     return (
-        f'<div style="color:#ccc">'
+        f'<div style="color:{_TEXT}">'
         f'<table class="race-table">'
         f'<tr>'
         f'<th>Agent</th><th>Steps</th><th>Final LLM Score</th><th>Status</th>'
@@ -296,9 +325,9 @@ def race_summary(
 
     def _score_color(i: int) -> str:
         if i == best_agent:
-            return "#1a7a4a"
+            return _GOOD
         if i == winner:
-            return "#2471a3"
+            return _OE
         return "#888"
 
     score_cells = "".join(
@@ -325,8 +354,8 @@ def race_summary(
         f'border-right:1px solid #333;white-space:nowrap">Final LLM Scores</td>'
         f'{score_cells}'
         f'<td style="padding:8px 16px;color:#ccc;font-size:0.92em;white-space:nowrap">'
-        f'Avg: <b style="color:#ccc">{avg_score:.2f}</b><br>'
-        f'Sessions: <b style="color:#ccc">3 concurrent</b>'
+        f'Avg: <b style="color:{_TEXT}">{avg_score:.2f}</b><br>'
+        f'Sessions: <b style="color:{_TEXT}">3 concurrent</b>'
         f'</td>'
         f'</tr>'
         f'</table>'
@@ -359,10 +388,10 @@ def fanout_results_table(results: list[dict]) -> str:
         if score is None:
             return "#888"
         if score >= 0.6:
-            return "#1a7a4a"
+            return _GOOD
         if score >= 0.4:
-            return "#b7770d"
-        return "#c0392b"
+            return _WARN
+        return _BAD
 
     # Group into (openenv, traditional) pairs keyed by query
     pairs: dict[str, dict] = {}
@@ -371,7 +400,7 @@ def fanout_results_table(results: list[dict]) -> str:
 
     rows = ""
     for idx, (query, agents) in enumerate(pairs.items()):
-        row_bg = "#1a1a1a" if idx % 2 == 0 else "#141414"
+        row_bg = _BG if idx % 2 == 0 else _BG2
         for agent_type in ("openenv", "traditional"):
             r = agents.get(agent_type)
             if r is None:
@@ -403,7 +432,7 @@ def fanout_results_table(results: list[dict]) -> str:
             )
 
     return (
-        f'<div style="color:#ccc">'
+        f'<div style="color:{_TEXT}">'
         f'<table class="race-table" style="font-family:inherit">'
         f'<tr>'
         f'<th style="width:45%">Query</th>'
@@ -440,25 +469,25 @@ def env_state_card(state: dict) -> str:
 
     tool_rows = "".join(
         f'<div style="display:flex;justify-content:space-between;padding:3px 0;'
-        f'border-bottom:1px solid #2a2a2a">'
-        f'<span style="color:#aaa">{tool}</span>'
+        f'border-bottom:1px solid {_BORDER}">'
+        f'<span style="color:{_TEXT2}">{tool}</span>'
         f'<span style="color:#e0e0e0;font-weight:600">{count}x</span>'
         f'</div>'
         for tool, count in tool_usage.items()
     )
 
-    status_color = "#1a7a4a" if done else "#b7770d"
+    status_color = _GOOD if done else _WARN
     status_text = "complete" if done else "in progress"
 
     return (
-        f'<div style="margin:10px 0;border:1px solid #2a2a2a;border-radius:6px;overflow:hidden">'
+        f'<div style="margin:10px 0;border:1px solid {_BORDER};border-radius:6px;overflow:hidden">'
         f'<div style="background:#1e1e1e;padding:8px 12px;font-size:0.78em;font-weight:700;'
-        f'text-transform:uppercase;letter-spacing:0.07em;color:#555;border-bottom:1px solid #2a2a2a">'
+        f'text-transform:uppercase;letter-spacing:0.07em;color:#555;border-bottom:1px solid {_BORDER}">'
         f'&#128202; client.state &mdash; Episode Snapshot</div>'
         f'<div style="background:#141414;padding:10px 12px">'
         f'<div style="display:flex;gap:20px;margin-bottom:10px">'
         f'<div style="text-align:center">'
-        f'<div style="font-size:1.4em;font-weight:700;color:#e0e0e0">{step}/{max_steps}</div>'
+        f'<div style="font-size:1.4em;font-weight:700;color:{_BRIGHT}">{step}/{max_steps}</div>'
         f'<div style="font-size:0.75em;color:#555;margin-top:2px">Steps</div>'
         f'</div>'
         f'<div style="text-align:center">'
@@ -551,7 +580,7 @@ def fanout_narrative_summary(results: list[dict]) -> str:
     q_rows = ""
     for q in query_gaps:
         short = q["query"][:70] + ("..." if len(q["query"]) > 70 else "")
-        gap_color = "#1a7a4a" if q["gap"] > 0.05 else "#b7770d" if q["gap"] >= 0 else "#c0392b"
+        gap_color = _GOOD if q["gap"] > 0.05 else _WARN if q["gap"] >= 0 else _BAD
         gap_str = f"+{q['gap']:.2f}" if q["gap"] >= 0 else f"{q['gap']:.2f}"
         q_rows += (
             f'<tr>'
@@ -566,13 +595,13 @@ def fanout_narrative_summary(results: list[dict]) -> str:
         f'<table style="width:100%;border-collapse:collapse;margin-top:10px">'
         f'<tr>'
         f'<th style="padding:6px 12px;text-align:left;color:#555;font-size:0.75em;'
-        f'text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid #2a2a2a">Question</th>'
+        f'text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid {_BORDER}">Question</th>'
         f'<th style="padding:6px 12px;text-align:center;color:#555;font-size:0.75em;'
-        f'text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid #2a2a2a">OpenEnv</th>'
+        f'text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid {_BORDER}">OpenEnv</th>'
         f'<th style="padding:6px 12px;text-align:center;color:#555;font-size:0.75em;'
-        f'text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid #2a2a2a">Traditional</th>'
+        f'text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid {_BORDER}">Traditional</th>'
         f'<th style="padding:6px 12px;text-align:center;color:#555;font-size:0.75em;'
-        f'text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid #2a2a2a">Advantage</th>'
+        f'text-transform:uppercase;letter-spacing:0.06em;border-bottom:1px solid {_BORDER}">Advantage</th>'
         f'</tr>'
         f'{q_rows}'
         f'</table>'
