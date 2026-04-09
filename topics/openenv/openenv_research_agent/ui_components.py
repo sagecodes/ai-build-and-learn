@@ -135,6 +135,22 @@ def build_reward_chart(
 
 
 # ---------------------------------------------------------------------------
+# Loading card — shown immediately on run start before first step arrives
+# ---------------------------------------------------------------------------
+
+def agent_loading_card(label: str, color: str) -> str:
+    """Prominent loading card shown in the agent column while the run initialises."""
+    return (
+        f'<div style="border:2px solid {color};border-radius:8px;padding:32px 16px;'
+        f'text-align:center;background:{_BG};margin:8px 0">'
+        f'<div style="font-size:1.6em;margin-bottom:10px">&#9651;</div>'
+        f'<div style="font-size:1.0em;font-weight:700;color:{color}">{label}</div>'
+        f'<div style="font-size:0.85em;color:{_DIM};margin-top:6px">Running... please wait</div>'
+        f'</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Step card builders
 # ---------------------------------------------------------------------------
 
@@ -689,21 +705,16 @@ def narrative_summary(
     else:
         oe_quality = "research with room for improvement"
 
-    # Tool diversity note (OpenEnv uses more steps = more tool types)
+    # Tool usage note — rendered as a bullet item, so keep it short
     if oe_steps > trad_steps:
         tool_note = (
-            f"OpenEnv used {oe_steps} steps vs {trad_steps} for Traditional. "
-            f"Rather than repeating the same search with keyword variations, it chained tools "
-            f"purposefully: <b>tavily_search</b> to find candidate pages, "
-            f"<b>tavily_extract</b> to pull full content from specific URLs, "
-            f"and <b>tavily_crawl</b> to explore related sections &mdash; "
-            f"each call informed by what the previous one found. "
+            f"Both used <b>tavily_search</b>; Traditional repeated it {trad_steps}x with stuffed "
+            f"templates, OpenEnv chained search &rarr; extract &rarr; crawl based on what each call returned"
         )
     else:
         tool_note = (
-            f"Both agents used {oe_steps} steps, but OpenEnv's tool choices were purposeful: "
-            f"<b>tavily_search</b> to find URLs, then <b>tavily_extract</b> to read actual page "
-            f"content &mdash; not the same query repeated with keyword stuffing. "
+            f"Both used <b>tavily_search</b> for all {oe_steps} steps; Traditional cycled fixed "
+            f"templates, OpenEnv reasoned about results before each next action"
         )
 
     # Advantage framing
@@ -722,47 +733,30 @@ def narrative_summary(
         )
 
     body = (
-        f"The Traditional RL agent scored <b>{avg_kw:.2f}</b> on the keyword metric "
-        f"by stuffing its queries with topic words on every step &mdash; "
-        f"a textbook example of reward hacking. "
-        f"Yet the LLM judge, evaluating the <em>actual research quality</em>, "
-        f"scored it just <b>{trad_llm:.2f}</b>. "
-        f"That is {gap_desc} gap of <b>{gap:.2f}</b> &mdash; the keyword reward "
-        f"{gap_verb} the true value of the research. "
-        f"<br><br>"
-        f"{tool_note}"
-        f"{advantage_note}"
-        f"<br><br>"
-        f"This is why OpenEnv uses LLM-as-judge rewards: keyword counts "
-        f"measure surface-level matching, not understanding. "
-        f"An agent that optimises for keyword scores will always game the metric "
-        f"rather than answer the question. "
-        f"The <b>client.state</b> snapshot above shows exactly what the OpenEnv environment "
-        f"recorded &mdash; tool usage counts, accumulated reward, and episode status &mdash; "
-        f"making every reward signal inspectable and trustworthy."
+        f'<div class="narrative-stat">Reward hacking in one number: '
+        f'Traditional scored <b>{avg_kw:.2f}</b> on keywords, '
+        f'<b>{trad_llm:.2f}</b> from the LLM judge &mdash; '
+        f'a <b>{gap:.2f}</b> gap.</div>'
+        f"<ul>"
+        f"<li>Keyword metric rewarded query stuffing, not research quality</li>"
+        f"<li>LLM judge evaluated what was actually found &mdash; Traditional scored <b>{trad_llm:.2f}</b></li>"
+        f"<li>OpenEnv scored <b>{oe_llm:.2f}</b> &mdash; <b>+{oe_advantage:.2f}</b> better on actual quality</li>"
+        f"<li>{tool_note}</li>"
+        f"</ul>"
     )
 
     openenv_how = (
-        f"OpenEnv wraps each research episode in a standard RL environment contract. "
-        f"This demo uses all three core methods:"
-        f"<br><br>"
-        f"<b>reset(query=...)</b> &mdash; called once at the start of every episode. "
-        f"It clears all state (step counter, tool usage, reward history) and sets the "
-        f"research question. This is what makes scores comparable across agents and runs &mdash; "
-        f"every episode starts from the same clean slate, with no carried-over context."
-        f"<br><br>"
-        f"<b>step(action)</b> &mdash; called once per tool invocation. It executes the tool, "
-        f"records the result in episode history, computes the per-step reward, and returns "
-        f"an observation containing the result and a <em>done</em> flag. "
-        f"This is the core feedback loop: the agent sees what each tool call actually found "
-        f"before deciding what to do next &mdash; search, then extract a specific URL, "
-        f"then crawl deeper if needed."
-        f"<br><br>"
-        f"<b>client.state</b> &mdash; called at episode end to retrieve the full environment "
-        f"record: tool usage counts, accumulated reward, step count, and completion status. "
-        f"This is the observability layer &mdash; you can inspect exactly what the agent did "
-        f"and what the environment scored, making the reward signal debuggable and trustworthy. "
-        f"The snapshot above is the live output of this call."
+        f"<ul>"
+        f"<li><b>reset()</b> &mdash; clean slate per episode; scores are comparable across agents and runs</li>"
+        f"<li><b>step(action)</b> &mdash; executes tool, returns observation + reward after every call; "
+        f"agent sees results before deciding next action</li>"
+        f"<li><b>client.state</b> &mdash; full episode record at end: tool usage, reward, steps &mdash; "
+        f"makes the reward signal inspectable</li>"
+        f"<li><em>The Traditional agent&rsquo;s fixed policy is intentional &mdash; it shows what happens "
+        f"when reward design is wrong, not when the tools are limited. A smarter traditional agent could "
+        f"chain tools too; OpenEnv&rsquo;s value is the standard contract that makes swapping agents, "
+        f"tools, and reward functions independent of each other.</em></li>"
+        f"</ul>"
     )
 
     return (

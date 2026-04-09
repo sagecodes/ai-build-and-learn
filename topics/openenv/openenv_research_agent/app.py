@@ -65,6 +65,7 @@ from ui_components import (
     fanout_narrative_summary,
     narrative_summary,  # used inside _comparison_summaries
     env_state_card,
+    agent_loading_card,
 )
 
 load_dotenv()
@@ -110,6 +111,7 @@ def _flyte_link(run_url) -> str:
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
 
 def _comparison_summaries(
     avg_kw: float,
@@ -171,6 +173,13 @@ def run_comparison(query: str, max_steps: int, run_mode: str):
         trad_final_llm = None
         oe_final_llm = None
         oe_step_count = 0
+
+        yield (
+            empty_chart("Reward Comparison — Traditional RL vs OpenEnv"),
+            agent_loading_card("Traditional RL Agent", "#e67e22"),
+            agent_loading_card("OpenEnv Agent", "#2471a3"),
+            "", "",
+        )
 
         trad_agent = TraditionalAgent(query=query, max_steps=max_steps)
         oe_agent = OpenEnvAgent(query=query, max_steps=max_steps)
@@ -303,6 +312,8 @@ def run_race(query: str, max_steps: int, run_mode: str):
 
     # ── Local Process path ──────────────────────────────────────────────────
     if run_mode == "Local Process":
+        yield agent_loading_card("Agent Race — 3 OpenEnv Agents", "#2471a3"), ""
+
         num_agents = 3
         agents = [OpenEnvAgent(query=query, agent_id=i, max_steps=max_steps) for i in range(num_agents)]
         gens = [agent.run() for agent in agents]
@@ -378,7 +389,7 @@ def run_flyte_fanout(queries_text: str, max_steps: int):
         yield "<p>Enter one research question per line.</p>", "", ""
         return
 
-    yield f"<p>Submitting {len(queries)} queries × 2 agents to Flyte...</p>", "", ""
+    yield agent_loading_card(f"Submitting {len(queries)} queries × 2 agents to Flyte...", "#2471a3"), "", ""
 
     result = flyte.with_runcontext(mode=RUN_MODE).run(
         run_research_comparison,

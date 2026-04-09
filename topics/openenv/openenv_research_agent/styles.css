@@ -410,6 +410,23 @@ body, .gradio-container {
     color: #e0e0e0;
 }
 
+.narrative-body ul {
+    margin: 6px 0 0;
+    padding-left: 20px;
+}
+
+.narrative-body ul li {
+    margin-bottom: 6px;
+    line-height: 1.6;
+}
+
+.narrative-stat {
+    font-size: 0.95em;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin-bottom: 8px;
+}
+
 
 /* ── Example questions list ──────────────────────────────────────────────── */
 
