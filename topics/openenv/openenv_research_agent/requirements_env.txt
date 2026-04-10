@@ -1,0 +1,9 @@
+# Dependencies for the OpenEnv environment Docker container only
+# (subset of requirements.txt — no Gradio/Flyte/Plotly needed inside the container)
+
+openenv-core>=0.2.3
+anthropic
+tavily-python
+python-dotenv
+uvicorn
+fastapi

@@ -1,0 +1,15 @@
+# OpenEnv Research Agent — dependencies
+
+# Core frameworks
+openenv-core>=0.2.3
+anthropic
+tavily-python
+flyte>=2.1.2
+
+# UI
+gradio
+plotly
+
+# Utilities
+python-dotenv
+markdown
