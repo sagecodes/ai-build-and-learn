@@ -78,26 +78,42 @@ app = create_app(MazeEnvironment, MazeAction, MazeObservation, env_name="maze")
 
 That's it. Your environment is now accessible over HTTP/WebSocket.
 
-## Demo: Maze RL
+## Demos
 
-See [`maze-rl/`](maze-rl/) for a complete example:
+### 1. Maze RL — Custom Environment, Two Agents
 
-- **Same maze environment** trained with two different approaches
-- **DQN** (2-layer MLP) — learns to solve the maze in minutes
-- **LLM GRPO** (SmolLM2-135M) — same env, different agent
-- Both run as **Flyte pipelines** with visual reports and interactive maze replays
+See [`maze-rl/`](maze-rl/) — build a custom maze environment, then train it with two completely different approaches:
+
+- **DQN** (neural network) — classic RL, learns to solve the maze in minutes
+- **LLM + GRPO** (SmolLM2-135M) — fine-tune a language model with the same environment, demonstrating how OpenEnv supports LLM-based RL training (RLHF-style workflows)
+
+Same `maze_env/`, different agents. Both run as Flyte pipelines with visual reports.
 
 ```bash
 cd maze-rl
 uv venv .venv --python 3.11 && source .venv/bin/activate
 uv pip install -r requirements.txt
 
-# DQN — fast learner
-flyte run --local maze_rl_dqn.py pipeline --training_steps 20
+# Classic RL — DQN agent
+flyte run --local maze_rl_dqn.py pipeline
 
-# LLM — same environment, different agent
+# LLM agent — GRPO training
 flyte run --local maze_rl_llm.py pipeline --training_steps 10
 ```
+
+### 2. Atari — Prebuilt Environment
+
+See [`atari/`](atari/) — use a **ready-made** OpenEnv environment with zero custom code. Just connect and play.
+
+```bash
+cd atari
+uv venv .venv --python 3.11 && source .venv/bin/activate
+uv pip install -r requirements.txt
+
+flyte run --local atari_demo.py pipeline --game_name pong
+```
+
+Same `reset()`/`step()` API, but playing Pong instead of navigating a maze.
 
 ## Links
 
