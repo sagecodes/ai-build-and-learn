@@ -1,0 +1,6 @@
+openenv-core
+ale-py>=0.8.0
+numpy>=1.24.0
+matplotlib
+uvicorn
+flyte[tui]>=2.0

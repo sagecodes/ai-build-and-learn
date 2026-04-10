@@ -1,7 +1,7 @@
 """Maze environment implementing the OpenEnv interface.
 
 Generates random solvable mazes using DFS (recursive backtracker)
-and lets an agent navigate from start to exit.
+with extra wall removals to create multiple paths and loops.
 """
 
 import random
@@ -15,19 +15,19 @@ from maze_env.models import MazeAction, MazeObservation, MazeState
 
 
 class MazeEnvironment(Environment[MazeAction, MazeObservation, MazeState]):
-    """8x8 maze navigation with DFS-generated mazes."""
+    """12x12 maze navigation with DFS-generated mazes and loops."""
 
     SUPPORTS_CONCURRENT_SESSIONS = True
 
-    ROWS = 8
-    COLS = 8
-    MAX_STEPS = 100
+    ROWS = 12
+    COLS = 12
+    MAX_STEPS = 200
 
     def __init__(self):
         super().__init__()
         self._grid: list[list[str]] = []
         self._agent_pos = (1, 1)
-        self._exit_pos = (5, 5)
+        self._exit_pos = (10, 10)
         self._done = False
         self._step_count = 0
         self._episode_id = ""
@@ -46,10 +46,17 @@ class MazeEnvironment(Environment[MazeAction, MazeObservation, MazeState]):
         self._done = False
         self._step_count = 0
 
-        self._grid = self._generate_maze(self._maze_seed)
+        rng = random.Random(self._maze_seed)
+        self._grid = self._generate_maze(rng)
         self._agent_pos = (1, 1)
-        self._visited = {self._agent_pos}
 
+        # Place exit at a far corner (bottom-right area)
+        exit_r = self.ROWS - 2 if (self.ROWS - 2) % 2 == 1 else self.ROWS - 3
+        exit_c = self.COLS - 2 if (self.COLS - 2) % 2 == 1 else self.COLS - 3
+        self._exit_pos = (exit_r, exit_c)
+        self._grid[exit_r][exit_c] = "."
+
+        self._visited = {self._agent_pos}
         self._optimal_path_length = self._bfs_shortest_path()
 
         return self._make_observation(reward=0.0)
@@ -124,12 +131,12 @@ class MazeEnvironment(Environment[MazeAction, MazeObservation, MazeState]):
         )
 
     # ------------------------------------------------------------------
-    # Maze generation (DFS recursive backtracker)
+    # Maze generation (DFS + loop creation)
     # ------------------------------------------------------------------
 
-    def _generate_maze(self, seed: int) -> list[list[str]]:
-        """Generate a maze using randomized DFS. Walls = '#', open = '.'."""
-        rng = random.Random(seed)
+    def _generate_maze(self, rng: random.Random) -> list[list[str]]:
+        """Generate a maze using randomized DFS, then remove extra walls
+        to create loops and multiple paths."""
         grid = [["#"] * self.COLS for _ in range(self.ROWS)]
 
         def carve(r: int, c: int):
@@ -144,10 +151,24 @@ class MazeEnvironment(Environment[MazeAction, MazeObservation, MazeState]):
 
         carve(1, 1)
 
-        exit_r = self.ROWS - 2 if (self.ROWS - 2) % 2 == 1 else self.ROWS - 3
-        exit_c = self.COLS - 2 if (self.COLS - 2) % 2 == 1 else self.COLS - 3
-        self._exit_pos = (exit_r, exit_c)
-        grid[exit_r][exit_c] = "."
+        # Remove ~15% of interior walls to create loops and alternate paths
+        interior_walls = []
+        for r in range(2, self.ROWS - 2):
+            for c in range(2, self.COLS - 2):
+                if grid[r][c] == "#":
+                    # Only remove walls that connect two open areas
+                    open_neighbors = 0
+                    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < self.ROWS and 0 <= nc < self.COLS and grid[nr][nc] == ".":
+                            open_neighbors += 1
+                    if open_neighbors >= 2:
+                        interior_walls.append((r, c))
+
+        rng.shuffle(interior_walls)
+        num_to_remove = max(len(interior_walls) // 6, 3)
+        for r, c in interior_walls[:num_to_remove]:
+            grid[r][c] = "."
 
         return grid
 
