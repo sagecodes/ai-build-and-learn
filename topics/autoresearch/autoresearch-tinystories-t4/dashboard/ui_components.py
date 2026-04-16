@@ -8,6 +8,7 @@ No Firestore imports here — receives data as plain dicts.
 Color constants are defined once at the top and reused throughout.
 """
 
+import pandas  # must import before plotly to avoid circular import in Gradio threads
 import plotly.graph_objects as go
 from typing import Optional
 
@@ -153,7 +154,6 @@ def val_bpb_chart(experiments: list[dict]) -> go.Figure:
         mode="lines",
         line=dict(color=_BORDER, width=1),
         showlegend=False,
-        hoverinfo="skip",
     ))
 
     # Kept experiments — green
