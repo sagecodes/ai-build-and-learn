@@ -50,11 +50,13 @@ def _get_client(project_id: Optional[str] = None) -> firestore.Client:
     Return an authenticated Firestore client.
 
     project_id defaults to the GCP_PROJECT env var, then to ADC project.
+    database defaults to the FIRESTORE_DATABASE env var, then '(default)'.
     On a GCP VM the service account is picked up automatically via ADC.
-    Locally, GOOGLE_APPLICATION_CREDENTIALS must point to the key file.
+    Locally, use gcloud auth application-default login.
     """
     project = project_id or os.getenv("GCP_PROJECT")
-    return firestore.Client(project=project)
+    database = os.getenv("FIRESTORE_DATABASE", "(default)")
+    return firestore.Client(project=project, database=database)
 
 
 # ── Run lifecycle ─────────────────────────────────────────────────────────────

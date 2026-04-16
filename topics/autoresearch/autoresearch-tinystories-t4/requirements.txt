@@ -5,9 +5,11 @@
 # Install locally (dashboard only — no GPU needed):
 #   pip install gradio plotly google-cloud-firestore anthropic
 
-# ── Core training (pre-installed on GCP Deep Learning VM) ────────────────────
-# torch        — pre-installed with CUDA on Deep Learning VM
-# numpy        — pre-installed
+# ── Core training ────────────────────────────────────────────────────────────
+# Note: Deep Learning VM has system torch but venv requires explicit install.
+# Use the CUDA 12.x index for GPU-enabled torch on the T4 instance.
+torch>=2.3.0
+numpy>=1.26.0
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 datasets>=2.18.0
