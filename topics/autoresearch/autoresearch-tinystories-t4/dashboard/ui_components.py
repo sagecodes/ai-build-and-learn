@@ -194,11 +194,37 @@ def val_bpb_chart(experiments: list[dict]) -> go.Figure:
 
 # ── Experiment log table ──────────────────────────────────────────────────────
 
+def _diff_html(diff: str) -> str:
+    """
+    Render a unified diff string as a syntax-highlighted HTML block.
+
+    Added lines (+) are green, removed lines (-) are red,
+    header lines (@@, ---,  +++) are dimmed.
+    """
+    import html
+    lines = diff.splitlines()
+    out = ['<pre class="exp-diff">']
+    for line in lines:
+        escaped = html.escape(line)
+        if line.startswith("+") and not line.startswith("+++"):
+            out.append(f'<span class="diff-add">{escaped}</span>')
+        elif line.startswith("-") and not line.startswith("---"):
+            out.append(f'<span class="diff-remove">{escaped}</span>')
+        elif line.startswith("@@") or line.startswith("---") or line.startswith("+++"):
+            out.append(f'<span class="diff-header">{escaped}</span>')
+        else:
+            out.append(escaped)
+        out.append("\n")
+    out.append("</pre>")
+    return "".join(out)
+
+
 def experiment_table(experiments: list[dict]) -> str:
     """
     Render the full experiment log as an HTML table.
 
-    Columns: #, Status, val_bpb before→after, delta, duration, description.
+    Columns: #, Status, val_bpb before→after, delta, loss, steps, duration, change.
+    Change column shows full reasoning text and a collapsible diff viewer.
     Most recent experiments appear first.
     """
     if not experiments:
@@ -212,7 +238,23 @@ def experiment_table(experiments: list[dict]) -> str:
         delta_class = "exp-delta-good" if delta < 0 else "exp-delta-bad"
         delta_str = f"{delta:+.4f}"
         duration = exp.get("duration_seconds", 0)
-        desc = exp.get("change_description", "")[:120]
+        desc = exp.get("change_description", "")
+        train_loss = exp.get("train_loss")
+        step_count = exp.get("step_count")
+        diff = exp.get("change_diff", "")
+
+        loss_str = f"{train_loss:.4f}" if train_loss is not None else "—"
+        steps_str = str(step_count) if step_count is not None else "—"
+
+        # Full reasoning + collapsible diff
+        diff_block = (
+            f'<details class="diff-details">'
+            f'<summary class="diff-summary">Show diff</summary>'
+            f'{_diff_html(diff)}'
+            f'</details>'
+        ) if diff else ""
+
+        change_cell = f'<div class="exp-desc">{desc}</div>{diff_block}'
 
         rows.append(
             f"<tr>"
@@ -220,15 +262,18 @@ def experiment_table(experiments: list[dict]) -> str:
             f"<td>{badge}</td>"
             f'<td style="color:{_MUTED}">{exp.get("val_bpb_before", 0):.4f} → {exp.get("val_bpb_after", 0):.4f}</td>'
             f'<td class="{delta_class}">{delta_str}</td>'
+            f'<td style="color:{_DIM}">{loss_str}</td>'
+            f'<td style="color:{_DIM}">{steps_str}</td>'
             f'<td style="color:{_DIM}">{duration:.0f}s</td>'
-            f'<td class="exp-desc">{desc}</td>'
+            f'<td>{change_cell}</td>'
             f"</tr>"
         )
 
     return (
         '<table class="exp-table">'
         "<thead><tr>"
-        "<th>#</th><th>Status</th><th>val_bpb</th><th>Delta</th><th>Duration</th><th>Change</th>"
+        "<th>#</th><th>Status</th><th>val_bpb</th><th>Delta</th>"
+        "<th>Loss</th><th>Steps</th><th>Duration</th><th>Change</th>"
         "</tr></thead>"
         "<tbody>" + "".join(rows) + "</tbody>"
         "</table>"

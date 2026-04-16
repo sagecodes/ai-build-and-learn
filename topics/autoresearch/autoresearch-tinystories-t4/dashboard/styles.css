@@ -200,6 +200,43 @@ body, .gradio-container {
 .summary-body li { margin-bottom: 6px; line-height: 1.6; }
 
 
+/* ── Diff viewer ─────────────────────────────────────────────────────────── */
+
+.diff-details {
+    margin-top: 8px;
+}
+
+.diff-summary {
+    font-size: 0.78em;
+    color: #555;
+    cursor: pointer;
+    user-select: none;
+    padding: 2px 0;
+}
+
+.diff-summary:hover {
+    color: #888;
+}
+
+.exp-diff {
+    margin: 6px 0 0;
+    padding: 10px 12px;
+    background: #0d0d0d;
+    border: 1px solid #222;
+    border-radius: 4px;
+    font-size: 0.78em;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre;
+    font-family: monospace;
+    color: #aaa;
+}
+
+.diff-add    { color: #2ecc71; }
+.diff-remove { color: #e74c3c; }
+.diff-header { color: #444; }
+
+
 /* ── Run selector ────────────────────────────────────────────────────────── */
 
 #run-selector label span {
