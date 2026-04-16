@@ -392,18 +392,28 @@ steps=XXXX
 
 ---
 
-## Part 5 — Test the agent loop (short run)
+## Part 5 — Test the agent loop (smoke test)
 
-Run a 30-minute test (~6 experiments) before committing to overnight:
+Run a short smoke test to verify the full path works end to end — Claude API, training, parsing, and checkpointing — without writing to Firestore:
+
 ```bash
-RUN_HOURS=0.5 python3 agent.py
+RUN_HOURS=0.2 python3 agent.py --dry-run
 ```
 
+`--dry-run` disables all Firestore writes so no test data pollutes your database.
+
 Watch for:
-- `Run started: <run_id>` — Firestore run document created
-- `Experiment 1 | val_bpb=X.XXXX` — agent loop running
-- `KEPT` or `REVERT` — keep/revert decision after each experiment
-- `Firestore write OK` — results logging to Firestore
+- `DRY RUN — Firestore writes disabled.`
+- `Baseline val_bpb=X.XXXXXX` — train.py ran and was parsed correctly
+- `Experiment 1` — Claude API call succeeded
+- `Change proposed: ...` — response parsed correctly
+- `KEPT` or `REVERT` — keep/revert decision made
+- `checkpoint.json` written in the project directory
+
+Once the smoke test passes cleanly, delete any leftover `checkpoint.json` before the production run:
+```bash
+rm -f checkpoint.json
+```
 
 ---
 
