@@ -217,28 +217,48 @@ def train() -> None:
         betas=(0.9, 0.95),
     )
 
+    # Estimate total steps from a short warmup to calibrate the LR schedule.
+    # Run 3 steps, measure throughput, project to the full time budget.
+    _warmup_start = time.time()
+    _warmup_model = GPT().to(device)
+    _warmup_opt = torch.optim.AdamW(_warmup_model.parameters(), lr=LEARNING_RATE)
+    for _ in range(3):
+        _warmup_opt.zero_grad()
+        for _ in range(GRAD_ACCUM_STEPS):
+            x, y = _get_batch(train_data, device)
+            logits = _warmup_model(x)
+            loss = F.cross_entropy(logits.view(-1, VOCAB_SIZE), y.view(-1))
+            (loss / GRAD_ACCUM_STEPS).backward()
+        _warmup_opt.step()
+    _secs_per_step = (time.time() - _warmup_start) / 3
+    del _warmup_model, _warmup_opt
+    estimated_total_steps = max(int(TRAIN_MINUTES * 60 / _secs_per_step), 1)
+    print(f"Estimated steps in {TRAIN_MINUTES}min: {estimated_total_steps} ({_secs_per_step:.2f}s/step)")
+
     deadline = time.time() + TRAIN_MINUTES * 60
     step = 0
     train_loss = 0.0
 
     model.train()
     while time.time() < deadline:
-        lr = _get_lr(step, total_steps=10_000)
+        lr = _get_lr(step, total_steps=estimated_total_steps)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-        # Gradient accumulation
+        # Gradient accumulation — average loss across micro-batches
         optimizer.zero_grad()
+        accum_loss = 0.0
         for _ in range(GRAD_ACCUM_STEPS):
             x, y = _get_batch(train_data, device)
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, VOCAB_SIZE), y.view(-1))
             (loss / GRAD_ACCUM_STEPS).backward()
+            accum_loss += loss.item() / GRAD_ACCUM_STEPS
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
         optimizer.step()
 
-        train_loss = loss.item()
+        train_loss = accum_loss
         step += 1
 
         if step % 50 == 0:
