@@ -557,9 +557,43 @@ gcloud compute instances stop autoresearch-t4 --zone=YOUR_ZONE
 
 ## Part 8 — Flyte workflow (alternative orchestration)
 
-`flyte_workflow.py` runs the same experiment logic as `agent.py` but orchestrated as [Flyte 2](https://github.com/flyteorg/flyte-sdk) tasks. Each experiment becomes a tracked task visible in the **Flyte TUI** with status, duration, and attempt count.
+`flyte_workflow.py` runs the same experiment logic as `agent.py` but orchestrated as [Flyte 2](https://github.com/flyteorg/flyte-sdk) tasks. Each experiment is broken into **3 tasks**, each visible as a separate row in the **Flyte TUI** with its own status, duration, and error detail.
 
 Both modes write to the same Firestore database — runs appear in the Gradio dashboard dropdown and can be toggled between.
+
+### 3 tasks per experiment
+
+Each experiment cycle runs as three sequential Flyte tasks:
+
+| Task | What it does | Typical duration |
+|------|-------------|-----------------|
+| `propose_change_task` | Calls Claude API, parses the proposed `train.py` change | ~5–15s |
+| `run_training_task` | Writes new `train.py`, runs training for 5 minutes, captures output | ~350s |
+| `evaluate_task` | Keep/revert decision, builds experiment record, logs to Firestore | ~1s |
+
+In the Flyte TUI, a healthy experiment looks like:
+```
+propose_change_task   succeeded   12s
+run_training_task     succeeded   358s
+evaluate_task         succeeded   1s
+```
+
+If Claude returns an unparseable response, `propose_change_task` fails and the other two tasks are skipped — making failures easy to diagnose by task.
+
+### Architecture
+
+```
+flyte_workflow.py
+  └── measure_baseline (Flyte task)
+        └── run_training()
+
+  └── per-experiment loop
+        ├── propose_change_task     ← call_claude() + parse_llm_response()
+        ├── run_training_task       ← write train.py + run_training()
+        └── evaluate_task           ← keep/revert + firestore_logger
+```
+
+All task logic lives in `core.py` (`propose_change`, `apply_and_train`, `evaluate_and_log`). `agent.py` calls `run_single_experiment()` which delegates to the same three functions — so both modes share identical experiment logic.
 
 ### Install Flyte on the T4
 
@@ -597,15 +631,22 @@ tmux attach -t flyte
 
 ### View the Flyte TUI
 
-In a second SSH session:
+Open a second tmux session alongside the running workflow:
 
 ```bash
-cd ai-build-and-learn/topics/autoresearch/autoresearch-tinystories-t4
+tmux new-session -d -s tui
+tmux send-keys -t tui "cd ~/ai-build-and-learn/topics/autoresearch/autoresearch-tinystories-t4 && source venv/bin/activate && flyte start tui" Enter
+tmux attach -t tui
+```
+
+Or split the current tmux window vertically (`Ctrl+B %`) and run:
+```bash
+cd ~/ai-build-and-learn/topics/autoresearch/autoresearch-tinystories-t4
 source venv/bin/activate
 flyte start tui
 ```
 
-Press `r` to refresh. Each experiment appears as a row with task name, status, duration, and error if any.
+Press `r` to refresh. You will see 3 rows per experiment plus the initial `measure_baseline` row.
 
 | Key | Action |
 |-----|--------|
@@ -619,6 +660,7 @@ Press `r` to refresh. Each experiment appears as a row with task name, status, d
 | | `agent.py` | `flyte_workflow.py` |
 |---|---|---|
 | Orchestration | Plain Python loop | Flyte 2 tasks |
+| Tasks per experiment | 1 (monolithic) | 3 (propose → train → evaluate) |
 | Observability | stdout + Gradio | Flyte TUI + Gradio |
 | Firestore | ✓ | ✓ |
 | Crash recovery | checkpoint.json | checkpoint.json |
