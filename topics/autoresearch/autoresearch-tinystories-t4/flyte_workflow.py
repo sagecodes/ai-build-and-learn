@@ -27,6 +27,7 @@ load_dotenv()
 
 import checkpoint
 import firestore_logger
+import metrics
 from core import (
     CLAUDE_MODEL,
     PROGRAM_MD,
