@@ -167,5 +167,13 @@ def run(dry_run: bool = False) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="Skip all Firestore writes")
+    parser.add_argument("--reset", action="store_true", help="Reset train.py to git baseline before starting")
     args = parser.parse_args()
+
+    if args.reset:
+        import subprocess as _sp
+        print("Resetting train.py to git baseline...")
+        _sp.run(["git", "checkout", "HEAD", "--", "train.py"], check=True)
+        print("train.py reset.")
+
     run(dry_run=args.dry_run)
