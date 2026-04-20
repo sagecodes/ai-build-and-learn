@@ -1,0 +1,4 @@
+gradio>=5.0.0
+ollama>=0.4.0
+faster-whisper>=1.1.0
+edge-tts>=7.0.0
