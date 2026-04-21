@@ -1,0 +1,18 @@
+# Gemma 4 Smart Gallery
+# pip install -r requirements.txt
+
+# ── Flyte orchestration ───────────────────────────────────────────────────────
+flyte[tui]>=2.1.0
+
+# ── Vertex AI / Gemma 4 (modern google-genai SDK) ────────────────────────────
+google-genai>=1.0.0
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+gradio>=4.36.0
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+# sqlite3 ships with Python — no install needed
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+Pillow>=10.0.0
