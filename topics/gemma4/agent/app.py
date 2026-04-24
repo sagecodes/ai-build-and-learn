@@ -25,6 +25,9 @@ from tools import SANDBOX, TOOL_REGISTRY, TOOL_SCHEMAS
 DEFAULT_MODEL = os.environ.get("GEMMA_MODEL", "gemma4:31b")
 MAX_TOOL_ROUNDS = 6  # hard cap to prevent runaway loops
 
+# Rough chars-per-token heuristic for the thinking-budget cutoff.
+CHARS_PER_TOKEN = 3.5
+
 SYSTEM_PROMPT = (
     "You are an assistant that can call tools. Use tools when helpful "
     "(math, current date/time, recent info via web search, files in the "
@@ -42,37 +45,78 @@ def list_models() -> list[str]:
         return [DEFAULT_MODEL]
 
 
-def run_agent(user_msg: str, model: str):
-    """Generator yielding (chat_history, trace_log) tuples as the agent works."""
+def run_agent(user_msg: str, model: str, think_budget: int):
+    """Generator yielding (chat, trace, thinking) as the agent works.
+
+    Streams each round so thinking tokens show up live. think_budget caps
+    thinking per round: when hit, we cancel and re-query the round with
+    think=False.
+    """
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_msg},
     ]
     trace_lines: list[str] = [f"**User**: {user_msg}"]
     chat: list[dict] = [{"role": "user", "content": user_msg}]
-    yield chat, "\n\n".join(trace_lines)
+    thinking_md = ""
+    budget_chars = int(think_budget * CHARS_PER_TOKEN) if think_budget else 0
+    yield chat, "\n\n".join(trace_lines), thinking_md
 
     for round_idx in range(MAX_TOOL_ROUNDS):
-        resp = ollama.chat(
-            model=model, messages=messages,
-            tools=TOOL_SCHEMAS,
+        round_header = f"### Round {round_idx + 1}"
+        round_thinking, content = "", ""
+        tool_calls: list = []
+        capped = False
+
+        stream = ollama.chat(
+            model=model, messages=messages, tools=TOOL_SCHEMAS,
+            stream=True, think=True,
             options={"temperature": 0.2},
         )
-        msg = resp["message"]
-        tool_calls = msg.get("tool_calls") or []
+        try:
+            for chunk in stream:
+                m = chunk["message"]
+                if m.get("thinking"):
+                    round_thinking += m["thinking"]
+                if m.get("content"):
+                    content += m["content"]
+                if m.get("tool_calls"):
+                    # Ollama re-sends the full tool_calls list; overwrite.
+                    tool_calls = m["tool_calls"]
+
+                # Live-update the thinking panel with this round's progress.
+                live = thinking_md + (f"\n\n{round_header}\n{round_thinking}" if round_thinking else "")
+                yield chat, "\n\n".join(trace_lines), live
+
+                if (budget_chars and not content and not tool_calls
+                        and len(round_thinking) >= budget_chars):
+                    capped = True
+                    break
+        finally:
+            stream.close()
+
+        if capped:
+            round_thinking += f"\n_[capped at ~{think_budget} tokens — retrying this round without thinking]_"
+            resp = ollama.chat(
+                model=model, messages=messages, tools=TOOL_SCHEMAS,
+                think=False, options={"temperature": 0.2},
+            )
+            content = resp["message"].get("content") or ""
+            tool_calls = resp["message"].get("tool_calls") or []
+
+        if round_thinking.strip():
+            thinking_md += f"\n\n{round_header}\n{round_thinking}"
 
         if not tool_calls:
-            # Model is done — emit final answer.
-            final = msg.get("content", "").strip() or "(no content)"
+            final = content.strip() or "(no content)"
             chat.append({"role": "assistant", "content": final})
             trace_lines.append(f"**Final answer**:\n{final}")
-            yield chat, "\n\n".join(trace_lines)
+            yield chat, "\n\n".join(trace_lines), thinking_md
             return
 
-        # Record the assistant's tool-calling turn so the model sees it in history.
         messages.append({
             "role": "assistant",
-            "content": msg.get("content", ""),
+            "content": content,
             "tool_calls": tool_calls,
         })
 
@@ -83,7 +127,7 @@ def run_agent(user_msg: str, model: str):
             trace_lines.append(
                 f"**Tool call** `{name}` args=`{json.dumps(args)}`"
             )
-            yield chat, "\n\n".join(trace_lines)
+            yield chat, "\n\n".join(trace_lines), thinking_md
 
             impl = TOOL_REGISTRY.get(name)
             if impl is None:
@@ -96,17 +140,16 @@ def run_agent(user_msg: str, model: str):
 
             preview = result if len(result) < 400 else result[:400] + "..."
             trace_lines.append(f"**Tool result**:\n```\n{preview}\n```")
-            yield chat, "\n\n".join(trace_lines)
+            yield chat, "\n\n".join(trace_lines), thinking_md
 
             messages.append({"role": "tool", "name": name, "content": result})
 
-    # Loop cap hit without a final answer.
     chat.append({
         "role": "assistant",
         "content": f"(stopped after {MAX_TOOL_ROUNDS} tool rounds)",
     })
     trace_lines.append(f"**Halted**: hit {MAX_TOOL_ROUNDS}-round cap")
-    yield chat, "\n\n".join(trace_lines)
+    yield chat, "\n\n".join(trace_lines), thinking_md
 
 
 def build_ui() -> gr.Blocks:
@@ -132,6 +175,11 @@ def build_ui() -> gr.Blocks:
         )
         with gr.Row():
             model = gr.Dropdown(models, value=default, label="Model")
+            think_budget = gr.Slider(
+                0, 4000, value=0, step=100,
+                label="Thinking budget per round (tokens, 0 = unlimited)",
+                info="Caps thinking each round. When hit, we retry that round without thinking.",
+            )
 
         with gr.Row():
             with gr.Column():
@@ -152,9 +200,13 @@ def build_ui() -> gr.Blocks:
                 )
             with gr.Column():
                 trace = gr.Markdown(label="Tool trace", value="_trace will appear here_")
+                with gr.Accordion("🧠 Thinking (per round)", open=False):
+                    thinking = gr.Markdown(value="_thinking will appear here_")
 
-        submit.click(run_agent, inputs=[msg, model], outputs=[chat, trace])
-        msg.submit(run_agent, inputs=[msg, model], outputs=[chat, trace])
+        agent_inputs = [msg, model, think_budget]
+        agent_outputs = [chat, trace, thinking]
+        submit.click(run_agent, inputs=agent_inputs, outputs=agent_outputs)
+        msg.submit(run_agent, inputs=agent_inputs, outputs=agent_outputs)
 
     return demo
 
