@@ -38,24 +38,35 @@ def chat(message, history, system_prompt, model, temperature, top_p):
         yield "", history
         return
 
-    history = history + [{"role": "user", "content": message},
-                         {"role": "assistant", "content": ""}]
+    # Three slots: the user turn, a collapsible "Thinking" bubble, and the answer.
+    # Ollama returns thinking and content on separate keys when think=True.
+    history = history + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": "", "metadata": {"title": "🧠 Thinking"}},
+        {"role": "assistant", "content": ""},
+    ]
     yield "", history
 
     msgs = []
     if system_prompt.strip():
         msgs.append({"role": "system", "content": system_prompt})
-    msgs.extend(history[:-1])  # everything except the empty assistant placeholder
+    # Feed the model only the real turns — skip the two assistant placeholders.
+    msgs.extend(history[:-2])
 
     stream = ollama.chat(
         model=model,
         messages=msgs,
         stream=True,
+        think=True,
         options={"temperature": float(temperature), "top_p": float(top_p)},
     )
 
     for chunk in stream:
-        history[-1]["content"] += chunk["message"]["content"]
+        m = chunk["message"]
+        if m.get("thinking"):
+            history[-2]["content"] += m["thinking"]
+        if m.get("content"):
+            history[-1]["content"] += m["content"]
         yield "", history
 
 
