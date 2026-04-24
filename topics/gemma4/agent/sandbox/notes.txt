@@ -1,0 +1,3 @@
+Project notes
+- Demo night: April 23rd
+- Three models to compare: gemma4:4b, gemma4:12b, gemma4:31b
