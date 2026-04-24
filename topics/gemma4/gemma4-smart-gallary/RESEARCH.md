@@ -98,7 +98,9 @@ Upgrading to 31B when confirmed requires zero code changes — just update `.env
 Mirrors the AutoResearch dashboard pattern:
 - `app.py` — Gradio UI only
 - `vision_service.py` — all Gemma 4 / Vertex AI calls
-- `workflows.py` — Flyte workflows and tasks for both flows
+- `workflows.py` — dispatcher only; routes to local or union backend
+- `workflows_local.py` — Flyte tasks and runners for local backend
+- `workflows_union.py` — Flyte tasks and runners for Union.ai remote backend
 - `ui_components.py` — HTML builders, no framework dependency
 - `styles.css` — all colors, layout, typography
 
@@ -125,11 +127,15 @@ topics/gemma4/gemma4-smart-gallary/
 ├── images/               ← user photos
 ├── gemma_photos.db       ← SQLite, keyed by full file path (generated)
 ├── app.py                ← Gradio UI
+├── agent.py              ← CLI entry point
+├── workflows.py          ← dispatcher: routes to local or union backend
+├── workflows_local.py    ← Flyte tasks + runners for local backend
+├── workflows_union.py    ← Flyte tasks + runners for Union.ai backend
 ├── vision_service.py     ← Gemma 4 / Vertex AI API calls
-├── workflows.py          ← Flyte workflows + tasks for both flows
+├── gemma_client.py       ← Vertex AI SDK wrapper
+├── db.py                 ← SQLite cache operations
 ├── ui_components.py      ← HTML card builders
 ├── styles.css            ← all styling
-├── agent.py              ← CLI entry point
 ├── .env                  ← GEMMA_MODEL + GCP credentials (not committed)
 └── RESEARCH.md           ← this file
 ```
@@ -202,14 +208,27 @@ Two terminal windows:
 
 ---
 
-## What's Next
+## Union.ai Remote Backend
 
-1. Set up Vertex AI credentials and confirm `gemma-4-26b-a4b-it` API access
-2. Build `vision_service.py` — describe image + search image functions
-3. Build `workflows.py` — Flyte tasks and workflows
-4. Build SQLite schema and cache logic
-5. Build `ui_components.py` — image card + results grid
-6. Build `app.py` — Gradio UI wiring
-7. Build `agent.py` — CLI entry point
-8. Build `styles.css`
-9. Test with 10 sample images
+### Decision
+Added support for running Gemma 4 tasks on a Union.ai managed cluster alongside the existing local backend. Controlled by `FLYTE_BACKEND` in `.env` — default is `local`, no behavior change for existing users.
+
+### Why modular workflow files
+`workflows.py` became a thin dispatcher importing `workflows_local` or `workflows_union` based on the env var. This keeps the local path completely isolated — zero risk of Union changes breaking the working local flow.
+
+### Union-specific challenges
+- **Local file access**: cluster containers can't read Windows local paths. Solution: scan folder locally (plain Python, not a Flyte task), base64-encode image bytes, pass as `str` to cluster tasks which decode to temp files.
+- **`bytes` type**: Flyte doesn't natively support `bytes` as a task input — falls back to PickleFile which requires object store. Solution: base64-encode to `str` instead.
+- **DB writes**: `save_descriptions_task` moved out of Flyte for the union path — results return to local machine and are written to SQLite there.
+- **GCP credentials**: not available on cluster from local `.env`. Solution: Union secrets (`GCP_PROJECT`, `GCP_REGION`, `GEMMA_MODEL`) injected as env vars via `flyte.Secret()` in the `TaskEnvironment`.
+- **Upload hang**: code bundle upload to Union's storage backend was hanging (39KB bundle, 2+ hrs). Root cause unresolved — likely a Union cluster storage configuration issue. Union integration is in progress pending support from Union.ai.
+
+### Union secrets setup
+```bash
+union create secret GCP_PROJECT --project dellenbaugh --domain development
+union create secret GCP_REGION --project dellenbaugh --domain development
+union create secret GEMMA_MODEL --project dellenbaugh --domain development
+```
+
+### Status
+Local backend: fully working. Union backend: code complete, upload hang blocking end-to-end validation.

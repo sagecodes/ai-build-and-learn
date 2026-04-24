@@ -1,122 +1,49 @@
 """
-workflows.py — Flyte tasks and parallel workflows for Gemma 4 Smart Gallery.
+workflows.py — Public entry point for Gemma 4 Smart Gallery workflows.
 
-Each image is processed as a discrete flyte.run() call so every image
-appears as its own task in the Flyte TUI. Tasks run sequentially but are
-individually visible and tracked.
+Reads FLYTE_BACKEND from .env and dispatches to the appropriate backend module:
+  FLYTE_BACKEND=local  (default) → workflows_local.py
+  FLYTE_BACKEND=union            → workflows_union.py
 
-Usage:
-    flyte start tui          # terminal 1 — watch tasks execute
-    python app.py            # terminal 2 — Gradio UI triggers these workflows
+app.py and agent.py import only from this file.
 """
 
-from pathlib import Path
+import os
 
 import flyte
+from dotenv import load_dotenv
 
-import db
-import vision_service
+load_dotenv()
 
-_SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-
-env = flyte.TaskEnvironment(name="gemma4-smart-gallery")
+_FLYTE_BACKEND = os.getenv("FLYTE_BACKEND", "local")
 
 
-# ── Shared tasks ──────────────────────────────────────────────────────────────
+def _init_flyte() -> None:
+    if _FLYTE_BACKEND == "union":
+        flyte.init(
+            endpoint="tryv2.hosted.unionai.cloud",
+            project="dellenbaugh",
+            domain="development",
+        )
+    else:
+        flyte.init(local_persistence=True)
 
-@env.task
-async def scan_folder(folder_path: str) -> list[str]:
-    """Return all supported image paths in the folder."""
-    folder = Path(folder_path)
-    return [
-        str(p) for p in sorted(folder.iterdir())
-        if p.suffix.lower() in _SUPPORTED_EXTENSIONS
-    ]
-
-
-# ── Describe workflow tasks ───────────────────────────────────────────────────
-
-@env.task
-async def describe_image_task(image_path: str) -> dict:
-    """Describe a single image via Gemma 4 vision."""
-    description = vision_service.describe_image(image_path)
-    return {"path": image_path, "description": description}
-
-
-@env.task
-async def save_descriptions_task(results: list[dict]) -> int:
-    """Persist all descriptions to SQLite. Returns count saved."""
-    db.init_db()
-    for result in results:
-        db.save_description(result["path"], result["description"])
-    return len(results)
-
-
-# ── Search workflow tasks ─────────────────────────────────────────────────────
-
-@env.task
-async def check_match_task(image_path: str, query: str) -> dict:
-    """Check if a single image matches the search query."""
-    matched = vision_service.check_image_match(image_path, query)
-    return {"path": image_path, "matched": matched}
-
-
-@env.task
-async def collect_matches_task(results: list[dict]) -> list[str]:
-    """Filter and return paths of images that matched the query."""
-    return [r["path"] for r in results if r["matched"]]
-
-
-# ── Workflow runners ──────────────────────────────────────────────────────────
 
 def run_describe_workflow(folder_path: str):
-    """
-    Process all images in folder_path with Gemma 4 and cache descriptions.
-    Each image is a discrete flyte.run() call — visible individually in TUI.
-    Yields one {path, description} dict per image as it completes.
-    """
-    flyte.init(local_persistence=True)
-
-    scan_run    = flyte.run(scan_folder, folder_path=folder_path)
-    image_paths = scan_run.outputs().o0
-
-    if not image_paths:
-        return
-
-    results = []
-    for path in image_paths:
-        run    = flyte.run(describe_image_task, image_path=path)
-        result = run.outputs().o0
-        results.append(result)
-        yield result
-
-    flyte.run(save_descriptions_task, results=results)
+    """Describe all images in folder. Yields one {path, description} per image."""
+    _init_flyte()
+    if _FLYTE_BACKEND == "union":
+        import workflows_union as backend
+    else:
+        import workflows_local as backend
+    yield from backend.run_describe(folder_path)
 
 
 def run_search_workflow(folder_path: str, query: str):
-    """
-    Check every image in folder_path against query using Gemma 4 vision.
-    Each image is a discrete flyte.run() call — visible individually in TUI.
-    Yields progress dicts {checked, total, done} per image, then a final dict
-    with matches included.
-    """
-    flyte.init(local_persistence=True)
-
-    scan_run    = flyte.run(scan_folder, folder_path=folder_path)
-    image_paths = scan_run.outputs().o0
-
-    if not image_paths:
-        yield {"checked": 0, "total": 0, "matches": [], "done": True}
-        return
-
-    total   = len(image_paths)
-    results = []
-    for i, path in enumerate(image_paths):
-        run    = flyte.run(check_match_task, image_path=path, query=query)
-        result = run.outputs().o0
-        results.append(result)
-        yield {"checked": i + 1, "total": total, "done": False}
-
-    collect_run = flyte.run(collect_matches_task, results=results)
-    matches     = collect_run.outputs().o0
-    yield {"checked": total, "total": total, "matches": matches, "done": True}
+    """Search images by query. Yields progress dicts; final dict includes matches."""
+    _init_flyte()
+    if _FLYTE_BACKEND == "union":
+        import workflows_union as backend
+    else:
+        import workflows_local as backend
+    yield from backend.run_search(folder_path, query)

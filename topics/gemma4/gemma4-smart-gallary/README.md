@@ -18,17 +18,21 @@ Every API call runs as a tracked task in the **Flyte TUI**, so you can watch eac
 ## Architecture
 
 ```
-app.py              Gradio UI — event wiring only, no business logic
-workflows.py        Flyte tasks and workflow runners
-vision_service.py   Prompt logic — describe and match
-gemma_client.py     Vertex AI SDK connection (swap here to change model provider)
-db.py               SQLite cache for image descriptions
-ui_components.py    HTML builders for the Gradio UI
-styles.css          All visual styles as CSS custom properties
-agent.py            CLI entry point (bypasses Gradio)
+app.py                 Gradio UI — event wiring only, no business logic
+workflows.py           Dispatcher — routes to local or union backend
+workflows_local.py     Flyte tasks and runners for local backend
+workflows_union.py     Flyte tasks and runners for Union.ai remote backend
+vision_service.py      Prompt logic — describe and match
+gemma_client.py        Vertex AI SDK connection (swap here to change model provider)
+db.py                  SQLite cache for image descriptions
+ui_components.py       HTML builders for the Gradio UI
+styles.css             All visual styles as CSS custom properties
+agent.py               CLI entry point (bypasses Gradio)
 ```
 
 Each image is submitted as a discrete `flyte.run()` call, so every image appears as its own task in the Flyte TUI.
+
+The backend is controlled by a single `.env` variable — local runs everything on your machine, union routes compute to a Union.ai cluster while keeping files and DB local.
 
 ---
 
@@ -75,6 +79,9 @@ cp .env.example .env
 GCP_PROJECT=your-gcp-project-id
 GCP_REGION=global
 GEMMA_MODEL=google/gemma-4-26b-a4b-it-maas
+
+# Flyte backend: "local" (default) or "union"
+FLYTE_BACKEND=local
 ```
 
 ---
@@ -127,21 +134,40 @@ Descriptions are stored in `gemma_photos.db` (SQLite, local). Re-running **Gener
 
 ---
 
+## Union.ai remote backend (optional)
+
+Set `FLYTE_BACKEND=union` in `.env` to run Gemma 4 tasks on a Union.ai cluster instead of locally. When using Union:
+
+- Images are read locally, base64-encoded, and passed to cluster tasks
+- GCP credentials are injected via Union secrets (not from local `.env`)
+- SQLite writes happen locally after results return from the cluster
+
+Create the required secrets on your Union cluster:
+```bash
+union create secret GCP_PROJECT --project <your-project> --domain development
+union create secret GCP_REGION --project <your-project> --domain development
+union create secret GEMMA_MODEL --project <your-project> --domain development
+```
+
+---
+
 ## Project structure
 
 ```
 gemma4-smart-gallary/
-├── app.py               Gradio UI
-├── agent.py             CLI entry point
-├── workflows.py         Flyte tasks and workflow runners
-├── vision_service.py    Prompt logic
-├── gemma_client.py      Vertex AI / google-genai SDK wrapper
-├── db.py                SQLite cache
-├── ui_components.py     HTML component builders
-├── styles.css           UI styles
-├── requirements.txt     Python dependencies
-├── .env.example         Environment variable template
-└── RESEARCH.md          Design decisions and research log
+├── app.py                  Gradio UI
+├── agent.py                CLI entry point
+├── workflows.py            Backend dispatcher
+├── workflows_local.py      Flyte tasks and runners — local backend
+├── workflows_union.py      Flyte tasks and runners — Union.ai backend
+├── vision_service.py       Prompt logic
+├── gemma_client.py         Vertex AI / google-genai SDK wrapper
+├── db.py                   SQLite cache
+├── ui_components.py        HTML component builders
+├── styles.css              UI styles
+├── requirements.txt        Python dependencies
+├── .env.example            Environment variable template
+└── RESEARCH.md             Design decisions and research log
 ```
 
 ---
