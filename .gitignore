@@ -11,3 +11,7 @@ checkpoints/
 
 # Upstream clone for the autoresearch topic — has its own .git, fetched per-machine
 topics/autoresearch/upstream/
+
+# Gemma 4 Smart Gallery — ignore user photos and generated DB
+topics/gemma4/gemma4-smart-gallary/images/
+topics/gemma4/gemma4-smart-gallary/gemma_photos.db

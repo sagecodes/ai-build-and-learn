@@ -27,6 +27,7 @@ load_dotenv()
 
 import checkpoint
 import firestore_logger
+import metrics
 from core import (
     CLAUDE_MODEL,
     PROGRAM_MD,
@@ -143,27 +144,41 @@ def run(dry_run: bool = False) -> None:
         "mode":         "flyte",
     }
 
+    # Check for checkpoint before creating a new Firestore run
+    prior = checkpoint.load()
+
     if dry_run:
         run_id = ""
         print("Run started: (dry run — no Firestore)")
+    elif prior is not None and prior.get("run_id"):
+        # Resume existing run — do not create a new Firestore run
+        run_id = prior["run_id"]
     else:
         try:
             run_id = firestore_logger.create_run(config=initial_config, project_id=gcp_project)
         except Exception as e:
             print(f"WARNING: Firestore create_run failed: {e}. Continuing without logging.")
             run_id = ""
-        print(f"Run started: {run_id}")
+    print(f"Run started: {run_id}")
 
     deadline = time.time() + RUN_SECONDS
 
-    # Baseline measurement as a Flyte task
-    # local_persistence=True enables TUI visibility via `flyte start tui`
     flyte.init(local_persistence=True)
-    baseline_run = flyte.run(measure_baseline)
-    current_val_bpb = baseline_run.outputs().o0
 
-    experiment_number  = 0
-    experiment_history = []
+    # Resume from checkpoint if one exists (e.g. after a crash or credit pause)
+    if prior is not None:
+        print(f"Resuming from checkpoint saved at {prior['saved_at']}")
+        print(f"  experiment_number={prior['experiment_number']}  val_bpb={prior['current_val_bpb']:.6f}")
+        current_val_bpb    = prior["current_val_bpb"]
+        experiment_number  = prior["experiment_number"]
+        experiment_history = prior["experiment_history"]
+    else:
+        # Baseline measurement as a Flyte task
+        # local_persistence=True enables TUI visibility via `flyte start tui`
+        baseline_run = flyte.run(measure_baseline)
+        current_val_bpb = baseline_run.outputs().o0
+        experiment_number  = 0
+        experiment_history = []
 
     while time.time() < deadline:
         experiment_number += 1
