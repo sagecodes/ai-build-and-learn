@@ -15,8 +15,8 @@ Gradio UI  ──flyte.run()──▶  Union cluster
                     retrieve_task     (after retrieve)
                     ┌──────────┐      generate_task
                     │ gte-small│      ┌──────────────┐
-                    │ embed    │      │ Claude Sonnet │
-                    │ query    │      │ RAG answer    │
+                    │ embed    │      │ Claude Sonnet│
+                    │ query    │      │ RAG answer   │
                     └────┬─────┘      └──────┬───────┘
                          │                   │
                     pgvector               answer +
@@ -115,11 +115,16 @@ postgresql://postgres.<project-ref>:<password>@aws-1-us-west-2.pooler.supabase.c
 
 ### 3. Configure secrets on Union
 
-The tasks expect two secrets injected as environment variables at runtime:
+The tasks expect two secrets injected as environment variables at runtime. Use the `flyte` CLI — `union create secret` does not work on Union hosted:
 
 ```bash
-union create secret ANTHROPIC_API_KEY --value "sk-ant-..."
-union create secret PG_URL --value "postgresql://user:pass@host:5432/db"
+flyte --endpoint <your-org>.hosted.unionai.cloud \
+      --org <your-org> \
+      create secret ANTHROPIC_API_KEY --value "sk-ant-..."
+
+flyte --endpoint <your-org>.hosted.unionai.cloud \
+      --org <your-org> \
+      create secret PG_URL --value "postgresql://postgres.<ref>:<pw>@aws-1-us-west-2.pooler.supabase.com:5432/postgres"
 ```
 
 ### 4. Configure flyte.yaml
