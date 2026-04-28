@@ -80,7 +80,7 @@ serving_env = flyte.app.AppEnvironment(
         flyte.Secret(key="ANTHROPIC_API_KEY", as_env_var="ANTHROPIC_API_KEY"),
         flyte.Secret(key="PG_URL",             as_env_var="PG_URL"),
     ],
-    env_vars={"FLYTE_BACKEND": "cluster"},
+    env_vars={"FLYTE_BACKEND": "cluster", "APP_VERSION": "2"},
     port=7860,
     resources=flyte.Resources(cpu=2, memory="4Gi"),
 )
