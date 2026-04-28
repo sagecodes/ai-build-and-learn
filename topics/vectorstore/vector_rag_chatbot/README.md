@@ -52,7 +52,7 @@ generate_task  →  Claude Sonnet (RAG prompt) → answer
 | UI | Gradio 6, deployed to Union as an App |
 | Orchestration | Union / Flyte 2 |
 | Embedding model | `thenlper/gte-small` (384-dim, runs in task pod) |
-| Vector store | PostgreSQL + pgvector extension (HNSW index, cosine distance) |
+| Vector store | Supabase (managed Postgres) + pgvector extension (HNSW index, cosine distance) |
 | LLM | Claude Sonnet (`claude-sonnet-4-6`) via Anthropic API |
 | PDF parsing | PyMuPDF |
 | Text splitting | LangChain `RecursiveCharacterTextSplitter` |
@@ -77,7 +77,7 @@ vector_rag_chatbot/
 ## Prerequisites
 
 - [Union account](https://union.ai) with a project created
-- PostgreSQL instance with the `pgvector` extension enabled
+- [Supabase account](https://supabase.com) (free tier, managed Postgres with pgvector)
 - [Anthropic API key](https://console.anthropic.com)
 - [Docker Hub account](https://hub.docker.com) (for image hosting)
 - GitHub repository with Actions enabled
@@ -95,20 +95,22 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. PostgreSQL + pgvector
+### 2. Supabase pgvector
 
-You need a Postgres instance with `pgvector` installed. A GCP `e2-micro` (free tier) with `pgvector` compiled from source works well. The schema is created automatically on first ingest — no migration needed.
-
-Enable the extension on your database:
+Create a [Supabase](https://supabase.com) project (free tier includes 500MB Postgres). Enable the pgvector extension in the Supabase SQL Editor:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-Your connection string format:
+The `document_chunks` table and HNSW index are created automatically on first ingest — no migration needed.
+
+**Important — use the Session Pooler URL, not the direct connection URL.** The Union cluster (AWS us-east-2) has no IPv6 connectivity, and Supabase's direct connection resolves to an IPv6 address. The Session Pooler is IPv4.
+
+Find it in your Supabase project: **Connect → Session pooler**
 
 ```
-postgresql://user:password@host:5432/dbname
+postgresql://postgres.<project-ref>:<password>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
 ```
 
 ### 3. Configure secrets on Union
