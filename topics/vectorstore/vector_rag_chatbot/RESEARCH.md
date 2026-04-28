@@ -295,11 +295,86 @@ No credentials in code or `.gitignore`-bypassed files. Secrets registered in Uni
 | Secret key | Injected as |
 |-----------|-------------|
 | `ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` env var |
-| `DATABASE_URL` | `DATABASE_URL` env var |
+| `PG_URL` | `PG_URL` env var |
 
 ```bash
 flyte create secret ANTHROPIC_API_KEY --project dellenbaugh --domain development
-flyte create secret DATABASE_URL --project dellenbaugh --domain development
+flyte create secret PG_URL --project dellenbaugh --domain development
+```
+
+Note: `DATABASE_URL` was the original secret name but `flyte create secret` does not update existing keys — it silently does nothing. A new key name (`PG_URL`) was used to bypass this. See Deployment Issues below.
+
+---
+
+## Deployment Issues & Solutions
+
+Encountered during first end-to-end Union cloud run. Documented here so future projects avoid the same friction.
+
+### 1. Gradio 6.0 Breaking Changes
+Three parameters removed in Gradio 6.0:
+- `css` on `gr.Blocks()` → moved to `launch(css=...)`
+- `type="messages"` on `gr.Chatbot()` → removed
+- `show_copy_button=True` on `gr.Chatbot()` → removed
+
+### 2. Docker Not Running
+Flyte builds the task container image locally using Docker. If Docker Desktop isn't open, the build fails immediately with a daemon connection error. Start Docker Desktop before running `python app.py` with `FLYTE_BACKEND=union`.
+
+### 3. ghcr.io 403 on Pull
+Docker couldn't pull the Flyte base image from GitHub Container Registry anonymously. Fix: authenticate with a GitHub PAT (`read:packages` scope):
+```bash
+echo YOUR_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+```
+
+### 4. Image Push Goes to Wrong Registry by Default
+The Union SDK defaults to pushing the built container image to `ghcr.io/flyteorg` — a namespace users don't own. Fix: explicitly set the registry in `config.py`:
+```python
+flyte.Image.from_debian_base(python_version=(3, 11), registry="docker.io/johndellenbaugh")
+```
+Requires a Docker Hub account. The created repo must be set to **Public** so the Union cluster can pull it.
+
+### 5. Union Console Secrets Page Broken
+The Secrets management page in the Union web UI throws "We're having trouble loading the secrets." Use the CLI instead:
+```bash
+flyte get secret --project dellenbaugh --domain development
+flyte create secret SECRET_NAME --project dellenbaugh --domain development
+```
+**(Union-side bug — reported to Union team)**
+
+### 6. `flyte create secret` Does Not Update Existing Keys
+Running `flyte create secret` on an already-existing key silently does nothing — old value persists, no error returned. Fix: use a new key name (`PG_URL` instead of `DATABASE_URL`).
+**(Union CLI bug — reported to Union team)**
+
+### 7. Supabase Direct Connection is IPv6-Only
+`db.<project>.supabase.co:5432` resolves to an IPv6 address. The Union cluster (AWS us-east-2) has no IPv6 connectivity. Fix: use Supabase's **Session Pooler** URL:
+```
+postgresql://postgres.<project>:<password>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
+```
+Found at: Supabase project → **Connect** button → **Session pooler**.
+
+### 8. psycopg3 Still Picks IPv6 Even With Pooler URL
+Even with the session pooler hostname, psycopg3 can prefer the IPv6 address returned by DNS. Fix: added `_pg_connect()` helper in `workflows.py` that explicitly resolves to IPv4 and passes it as `hostaddr`:
+```python
+def _pg_connect():
+    import psycopg
+    url = os.environ["PG_URL"]
+    p = urlparse(url)
+    ipv4 = socket.getaddrinfo(p.hostname, None, socket.AF_INET)[0][4][0]
+    return psycopg.connect(
+        host=p.hostname, hostaddr=ipv4,
+        port=p.port or 5432, dbname=p.path.lstrip("/"),
+        user=p.username, password=p.password,
+    )
+```
+
+### 9. `flyte.run()` is Non-Blocking on Union Backend
+`flyte.run()` submits the workflow and returns immediately — it does not wait for completion. `run.outputs().o0` is `None` until the run finishes. Fix: poll until the output is ready:
+```python
+outputs = run.outputs()
+deadline = time.time() + 180
+while (outputs is None or outputs.o0 is None) and time.time() < deadline:
+    time.sleep(3)
+    outputs = run.outputs()
+result = json.loads(outputs.o0)
 ```
 
 ---
