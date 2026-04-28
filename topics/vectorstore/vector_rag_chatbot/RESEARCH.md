@@ -306,6 +306,87 @@ Note: `DATABASE_URL` was the original secret name but `flyte create secret` does
 
 ---
 
+## Deploying the Gradio App to Union
+
+The Gradio UI can be deployed as a persistent web app on the Union cluster — no local machine needed. This is separate from the task image (which runs the ML workloads). The app image only needs to boot Gradio and call `flyte.run()`.
+
+### How it works
+
+Union exposes `flyte.app.AppEnvironment` — a lightweight container that runs a long-lived server process on the cluster and gives it a public URL.
+
+```
+python app.py --deploy
+      ↓
+flyte.serve(serving_env)
+      ↓
+Union builds app image → deploys pod → returns persistent URL
+      ↓
+app.url  →  https://everstorm-rag-chatbot.<project>.unionai.cloud
+```
+
+### Two separate images
+
+| Image | Contains | Used for |
+|-------|----------|----------|
+| Task image (`config.py env`) | psycopg, pgvector, sentence-transformers, anthropic, PyMuPDF, langchain | Flyte tasks on cluster |
+| App image (`serving_env` in `app.py`) | gradio, flyte, python-dotenv | Deployed Gradio server |
+
+The app image is intentionally minimal — it doesn't need ML dependencies because the heavy work is delegated to task runs via `flyte.run()`.
+
+### Key patterns
+
+**`AppEnvironment`** — defines the deployed app container:
+```python
+serving_env = flyte.app.AppEnvironment(
+    name="everstorm-rag-chatbot",
+    image=flyte.Image.from_debian_base(python_version=(3, 11), registry="docker.io/johndellenbaugh")
+        .with_pip_packages("gradio>=6.0.0", "flyte>=2.1.2", "python-dotenv>=1.0.0"),
+    secrets=[
+        flyte.Secret(key="ANTHROPIC_API_KEY", as_env_var="ANTHROPIC_API_KEY"),
+        flyte.Secret(key="PG_URL", as_env_var="PG_URL"),
+    ],
+    env_vars={"FLYTE_BACKEND": "cluster"},
+    port=7860,
+    resources=flyte.Resources(cpu=2, memory="4Gi"),
+)
+```
+
+**`@serving_env.server`** — marks the function that starts the server inside the deployed pod:
+```python
+@serving_env.server
+def _cluster_server():
+    css = CSS_FILE.read_text()
+    build_ui().launch(server_name="0.0.0.0", server_port=7860, share=False, css=css)
+```
+
+**`flyte.init_in_cluster()`** — when `FLYTE_BACKEND=cluster`, the app is already inside Union so it initializes without an external endpoint. Added to `config.py`:
+```python
+elif BACKEND == "cluster":
+    flyte.init_in_cluster()
+```
+
+**Deploy command:**
+```bash
+python app.py --deploy
+# App URL: https://everstorm-rag-chatbot.<project>.unionai.cloud
+```
+
+### Ingest tab: PDF upload widget
+
+The original ingest tab used a `CheckboxGroup` backed by a local `data/` directory. This only works when running the UI on the same machine as the PDFs — not viable for a deployed app.
+
+**Fix:** replaced with `gr.File(file_types=[".pdf"], file_count="multiple")`. Users drag-and-drop or browse to upload PDFs through the browser. Gradio saves them to a temp path; the ingest handler reads from there:
+
+```python
+for file_path in uploaded_files:
+    fname = Path(file_path).name                    # original filename preserved
+    b64 = base64.b64encode(Path(file_path).read_bytes()).decode()
+```
+
+This works identically in local dev and in the deployed cluster app.
+
+---
+
 ## Deployment Issues & Solutions
 
 Encountered during first end-to-end Union cloud run. Documented here so future projects avoid the same friction.
@@ -367,7 +448,9 @@ def _pg_connect():
 ```
 
 ### 9. `flyte.run()` is Non-Blocking on Union Backend
-`flyte.run()` submits the workflow and returns immediately — it does not wait for completion. `run.outputs().o0` is `None` until the run finishes. Fix: poll until the output is ready:
+`flyte.run()` submits the workflow and returns immediately — it does not wait for completion. `run.outputs().o0` is `None` until the run finishes.
+
+**Initial workaround (polling):**
 ```python
 outputs = run.outputs()
 deadline = time.time() + 180
@@ -376,6 +459,13 @@ while (outputs is None or outputs.o0 is None) and time.time() < deadline:
     outputs = run.outputs()
 result = json.loads(outputs.o0)
 ```
+
+**Proper fix (from Union "Build Apps" docs) — `run.wait()`:**
+```python
+run.wait()
+result = json.loads(run.outputs().o0)
+```
+`run.wait()` blocks until the run completes, then `run.outputs()` is guaranteed to have the result. Replaced both the ingest and chat polling loops with this pattern.
 
 ---
 
@@ -406,9 +496,10 @@ topics/vectorstore/vector_rag_chatbot/
 1. Add to `.env`:
    ```
    ANTHROPIC_API_KEY=...
-   DATABASE_URL=postgresql://postgres:<password>@db.<project>.supabase.co:5432/postgres
+   PG_URL=postgresql://postgres.<project>:<password>@aws-1-us-west-2.pooler.supabase.com:5432/postgres
    FLYTE_BACKEND=union
    ```
+   Use the **Session Pooler** URL from Supabase Connect page (not the direct connection — see Issue #7).
 
 2. Enable pgvector in Supabase SQL Editor:
    ```sql
@@ -421,17 +512,25 @@ topics/vectorstore/vector_rag_chatbot/
                langchain-text-splitters anthropic flyte gradio python-dotenv
    ```
 
-### Run
+### Run locally
 
 ```bash
 python app.py
 ```
 
-Opens at `http://localhost:7860`.
+Opens at `http://localhost:7860`. Docker Desktop must be running when `FLYTE_BACKEND=union`.
+
+### Deploy to Union cluster
+
+```bash
+python app.py --deploy
+```
+
+Builds the app image, deploys a persistent pod to Union, and prints the public URL. After deploying, the app runs on Union indefinitely — no local machine needed.
 
 ### Demo Flow
 
-1. **Ingest tab** — select PDFs (all 16 pre-selected), click "Run Ingest on Union"
+1. **Ingest tab** — upload one or more PDFs (drag-and-drop or browse), click "Run Ingest on Union"
    - Watch Union UI for parallel `load_and_chunk_task` nodes per PDF
    - `embed_and_index_task` fires after all chunks are merged
 
@@ -445,6 +544,7 @@ Opens at `http://localhost:7860`.
 |-------|----------|
 | `local` | Tasks run in-process, no Union needed, good for dev |
 | `union` | Tasks run on Union cluster, results visible in Union UI |
+| `cluster` | App is running inside Union pod — use `flyte.init_in_cluster()` |
 
 ---
 
@@ -456,7 +556,7 @@ Opens at `http://localhost:7860`.
 import psycopg
 from pgvector.psycopg import register_vector
 
-conn = psycopg.connect(os.environ["DATABASE_URL"])
+conn = psycopg.connect(os.environ["PG_URL"])
 register_vector(conn)
 ```
 
