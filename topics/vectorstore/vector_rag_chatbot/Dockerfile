@@ -9,3 +9,6 @@ RUN pip install --no-cache-dir \
     "PyMuPDF>=1.24.0" \
     "langchain-text-splitters>=0.3.0" \
     "python-dotenv>=1.0.0"
+
+# Pre-download embedding model so task pods don't re-fetch it on every run
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('thenlper/gte-small')"
