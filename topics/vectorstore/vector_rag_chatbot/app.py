@@ -65,7 +65,7 @@ _CSS = """
 
 def _load_css() -> str:
     try:
-        return _load_css()
+        return CSS_FILE.read_text()
     except FileNotFoundError:
         return _CSS
 
