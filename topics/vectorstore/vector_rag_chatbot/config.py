@@ -20,14 +20,15 @@ load_dotenv(Path(__file__).parent / ".env")
 
 BACKEND = os.getenv("FLYTE_BACKEND", "local")
 
+UNION_ORG      = "tryv2"
+UNION_ENDPOINT = f"{UNION_ORG}.hosted.unionai.cloud"
+UNION_PROJECT  = "dellenbaugh"
+UNION_DOMAIN   = "development"
+
 if BACKEND == "union":
-    flyte.init(
-        endpoint="tryv2.hosted.unionai.cloud",
-        project="dellenbaugh",
-        domain="development",
-    )
+    flyte.init(endpoint=UNION_ENDPOINT, project=UNION_PROJECT, domain=UNION_DOMAIN)
 elif BACKEND == "cluster":
-    flyte.init_in_cluster()
+    flyte.init_in_cluster(org=UNION_ORG, project=UNION_PROJECT, domain=UNION_DOMAIN)
 else:
     flyte.init(local_persistence=True)
 
