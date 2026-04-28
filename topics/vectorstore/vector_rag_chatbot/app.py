@@ -18,8 +18,6 @@ import flyte
 import flyte.app
 import gradio as gr
 
-from workflows import ingest_pipeline, query_pipeline
-
 CSS_FILE  = Path(__file__).parent / "styles.css"
 
 # ── Union App deployment environment ──────────────────────────────────────────
@@ -127,6 +125,7 @@ def run_ingest(uploaded_files, collection_name, chunk_size, chunk_overlap):
     yield emit("\n🚀 Dispatching ingest_pipeline → Union cluster..."), ""
 
     try:
+        from workflows import ingest_pipeline
         run = flyte.run(
             ingest_pipeline,
             filenames=filenames,
@@ -172,6 +171,7 @@ def chat(query, history, collection_name, top_k):
         return history, ""
 
     try:
+        from workflows import query_pipeline
         run = flyte.run(
             query_pipeline,
             query=query,
@@ -322,7 +322,6 @@ def _cluster_server():
 
 if __name__ == "__main__":
     if "--deploy" in sys.argv:
-        flyte.init_from_config(root_dir=Path(__file__).parent)
         app = flyte.serve(serving_env)
         print(f"App URL: {app.url}")
     else:
