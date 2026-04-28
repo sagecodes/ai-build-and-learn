@@ -467,6 +467,70 @@ result = json.loads(run.outputs().o0)
 ```
 `run.wait()` blocks until the run completes, then `run.outputs()` is guaranteed to have the result. Replaced both the ingest and chat polling loops with this pattern.
 
+### 10. `flyte deploy` CLI Requires a Config File for Project/Domain
+`flyte deploy app.py --project dellenbaugh --domain development serving_env` fails with "Project must be provided to initialize the client" even though `--project` is on the command line. The CLI's own client and the Python SDK's internal client are separate — the SDK needs project info from a config file.
+
+Fix: create `flyte.yaml` in the project directory and pass `--config flyte.yaml` to the CLI:
+```yaml
+admin:
+  endpoint: dns:///tryv2.hosted.unionai.cloud
+  insecure: false
+
+task:
+  project: dellenbaugh
+  domain: development
+```
+
+Full working deploy command:
+```bash
+flyte --endpoint tryv2.hosted.unionai.cloud --org tryv2 --config flyte.yaml deploy app.py --project dellenbaugh --domain development serving_env
+```
+
+### 11. Module-Level Workflow Import Conflicts With `flyte deploy` CLI Discovery
+When `flyte deploy` parses `app.py` to discover `serving_env`, it imports the module. A top-level `from workflows import ingest_pipeline, query_pipeline` triggered `config.py`'s `flyte.init()` which conflicted with the CLI's own client initialization. The SDK project state was overwritten, causing "Project must be provided."
+
+Fix: lazy-import workflows inside the handler functions:
+```python
+def run_ingest(...):
+    from workflows import ingest_pipeline  # imported on first use only
+    ...
+
+def chat(...):
+    from workflows import query_pipeline
+    ...
+```
+
+Then add `import config` at module level to ensure `flyte.init()` runs once with the right settings before `serving_env` is instantiated.
+
+### 12. `flyte deploy` Bundles Only Python Files — `styles.css` Missing on Cluster
+The deploy bundler follows Python imports and only packages `.py` files. `styles.css` is not bundled, so the cluster pod fails with `FileNotFoundError: '/root/styles.css'`.
+
+Fix: inline the full CSS as a `_CSS` string constant in `app.py`, with a helper that tries the file first and falls back to the inline copy:
+```python
+_CSS = """..."""  # full CSS inlined
+
+def _load_css() -> str:
+    try:
+        return CSS_FILE.read_text()   # works locally
+    except FileNotFoundError:
+        return _CSS                   # works on cluster
+```
+
+### 13. `RuntimeError: Event loop stopped before Future completed` in Cluster Server
+Union's serve runner wraps `@serving_env.server` in `asyncio.run()`. Gradio's `launch()` also manages asyncio internally, causing a conflict on event loop shutdown. Investigated multiple approaches:
+- `async def` + `run_in_executor`: ran `launch()` in a thread pool to isolate event loops — partially helped but event loop still errored during cleanup
+- Current attempt: sync `def` + `ui.queue()` matching the pattern from Union docs
+
+```python
+@serving_env.server
+def _cluster_server():
+    css = _load_css()
+    ui = build_ui()
+    ui.queue()
+    ui.launch(server_name="0.0.0.0", server_port=7860, share=False, css=css)
+```
+**(Under investigation — resume point for next session)**
+
 ---
 
 ## Final Architecture
