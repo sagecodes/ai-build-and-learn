@@ -36,7 +36,7 @@ else:
 
 env = flyte.TaskEnvironment(
     name="vector-rag-chatbot",
-    image=flyte.Image.from_ref_name(name="docker.io/johndellenbaugh/rag-task:latest"),
+    image="docker.io/johndellenbaugh/rag-task:latest",
     resources=flyte.Resources(cpu=2, memory="4Gi"),
     secrets=[
         flyte.Secret(key="ANTHROPIC_API_KEY", as_env_var="ANTHROPIC_API_KEY"),
