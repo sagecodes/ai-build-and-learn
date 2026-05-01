@@ -86,7 +86,7 @@ env = flyte.app.AppEnvironment(
         flyte.app.Parameter(name="hf_repo", value=HF_MEMORY_REPO),
         flyte.app.Parameter(name="hf_repo_type", value=HF_MEMORY_REPO_TYPE),
     ],
-    scaling=flyte.app.Scaling(replicas=(0, 1), scaledown_after=1800),
+    scaling=flyte.app.Scaling(replicas=(0, 1), scaledown_after=300),
 )
 
 
