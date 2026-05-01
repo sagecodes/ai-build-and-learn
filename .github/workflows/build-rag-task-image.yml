@@ -1,0 +1,51 @@
+name: Build RAG images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "topics/vectorstore/vector_rag_chatbot/Dockerfile"
+      - "topics/vectorstore/vector_rag_chatbot/Dockerfile.app"
+
+jobs:
+  build-task-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: johndellenbaugh
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push task image
+        uses: docker/build-push-action@v6
+        with:
+          context: topics/vectorstore/vector_rag_chatbot
+          file: topics/vectorstore/vector_rag_chatbot/Dockerfile
+          push: true
+          tags: |
+            docker.io/johndellenbaugh/rag-task:latest
+            docker.io/johndellenbaugh/rag-task:${{ github.sha }}
+
+  build-app-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: johndellenbaugh
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: topics/vectorstore/vector_rag_chatbot
+          file: topics/vectorstore/vector_rag_chatbot/Dockerfile.app
+          push: true
+          tags: |
+            docker.io/johndellenbaugh/rag-app:latest
+            docker.io/johndellenbaugh/rag-app:${{ github.sha }}

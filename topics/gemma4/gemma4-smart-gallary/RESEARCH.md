@@ -232,3 +232,68 @@ union create secret GEMMA_MODEL --project dellenbaugh --domain development
 
 ### Status
 Local backend: fully working. Union backend: code complete, upload hang blocking end-to-end validation.
+
+---
+
+## Gemma 4 Setup — Quick Reference
+
+Minimal steps to connect any agent or script to Gemma 4 via Vertex AI.
+
+### 1. GCP Project
+Create a GCP project and enable billing.
+
+### What is MaaS?
+**Model as a Service** — you call the model via API without deploying it yourself. No GPUs, no servers, no containers. Google runs the infrastructure; you just send requests. This is how Gemma 4 is accessed on Vertex AI — enable the API in Model Garden and start calling it immediately.
+
+### 2. Enable Gemma 4 on Vertex AI Model Garden
+- Vertex AI → Model Garden → search **Gemma 4 26B A4B IT**
+- Click **Enable API** — no deployment step, Google hosts everything
+
+### 3. Authenticate locally
+```bash
+gcloud auth application-default login
+```
+
+### 4. Install the SDK
+```bash
+pip install google-genai
+```
+
+### 5. Call Gemma 4
+```python
+from google import genai
+from google.genai.types import Part
+
+client = genai.Client(
+    vertexai=True,
+    project="your-gcp-project-id",
+    location="global",
+)
+
+# Text only
+response = client.models.generate_content(
+    model="google/gemma-4-26b-a4b-it-maas",
+    contents=["What is the capital of France?"],
+)
+
+# Vision — image + text
+image_bytes = open("photo.jpg", "rb").read()
+image_part  = Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+
+response = client.models.generate_content(
+    model="google/gemma-4-26b-a4b-it-maas",
+    contents=[image_part, "Describe this image."],
+)
+
+print(response.text)
+```
+
+### Key facts
+| | |
+|---|---|
+| SDK | `google-genai` (not `google-cloud-aiplatform`) |
+| Model ID | `google/gemma-4-26b-a4b-it-maas` |
+| Region | `global` |
+| Auth | `gcloud auth application-default login` |
+| Pricing | MaaS — promotional/free during Gemma 4 launch period, verify in GCP Billing |
+| Vision | Pass image as `Part.from_bytes()` alongside text prompt |

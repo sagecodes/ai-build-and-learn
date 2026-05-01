@@ -1,0 +1,7 @@
+admin:
+  endpoint: dns:///tryv2.hosted.unionai.cloud
+  insecure: false
+
+task:
+  project: dellenbaugh
+  domain: development

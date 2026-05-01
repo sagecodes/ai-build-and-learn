@@ -1,0 +1,21 @@
+# Core
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+
+# Vector store
+psycopg[binary]>=3.1.0
+pgvector>=0.3.0
+
+# Embeddings & PDF
+sentence-transformers>=3.0.0
+PyMuPDF>=1.24.0
+langchain-text-splitters>=0.3.0
+
+# Orchestration
+flyte>=2.1.2
+
+# UI
+gradio>=4.44.0
+
+# PDF generation (generate_docs.py only)
+reportlab>=4.0.0

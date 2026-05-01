@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vector RAG Chatbot — Architecture Walkthrough</title>
+<style>
+:root {
+  --bg:       #0a0c10;
+  --surface:  #111418;
+  --card:     #161b22;
+  --border:   #21262d;
+  --border2:  #30363d;
+  --text:     #e6edf3;
+  --muted:    #7d8590;
+  --muted2:   #484f58;
+  --accent:   #388bfd;
+  --hi:       #e3a008;
+  --hi-glow:  rgba(227,160,8,0.22);
+  --hi-text:  #fbbf24;
+  --done:     #3fb950;
+  --teal:     #39d353;
+  --purple:   #bc8cff;
+  --code-bg:  #0d1117;
+  --code-fg:  #79c0ff;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:24px 20px 40px;}
+
+/* ── Header ──────────────────────────────────────────────────── */
+.header{text-align:center;margin-bottom:20px;}
+.header h1{font-size:1.4em;font-weight:700;letter-spacing:-.02em;}
+.header .badge{display:inline-block;margin-left:10px;background:var(--border2);color:var(--muted);font-size:.68em;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:3px 10px;border-radius:4px;vertical-align:middle;}
+
+/* ── Tabs ─────────────────────────────────────────────────────── */
+.tabs{display:flex;justify-content:center;gap:8px;margin-bottom:18px;}
+.tab{padding:7px 22px;border-radius:6px;border:1px solid var(--border2);background:var(--card);color:var(--muted);font-size:.83em;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:6px;}
+.tab.active{background:var(--hi);color:#000;border-color:var(--hi);}
+.tab:hover:not(.active){background:var(--surface);color:var(--text);}
+
+/* ── Diagram wrapper ─────────────────────────────────────────── */
+.diagram-outer{max-width:1100px;margin:0 auto 18px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;overflow:hidden;}
+.diagram-grid{display:grid;grid-template-columns:160px 520px 160px;gap:0;position:relative;z-index:1;justify-content:space-between;}
+
+/* ── SVG arrow layer ─────────────────────────────────────────── */
+#svg-arrows{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:0;}
+.arrow-path{fill:none;stroke:var(--border2);stroke-width:1.5;transition:stroke .35s,stroke-width .35s,opacity .35s;opacity:.45;marker-end:url(#arr-dim);}
+.arrow-path.lit{stroke:var(--hi);stroke-width:2.5;opacity:1;marker-end:url(#arr-lit);}
+
+/* ── Columns ─────────────────────────────────────────────────── */
+.col{display:flex;flex-direction:column;gap:12px;justify-content:space-around;padding:10px 0;}
+
+/* ── Node cards ──────────────────────────────────────────────── */
+.node{background:var(--card);border:1.5px solid var(--border2);border-radius:9px;padding:13px 14px;transition:border-color .35s,box-shadow .35s,background .35s;}
+.node.active{border-color:var(--hi);box-shadow:0 0 16px var(--hi-glow);background:#19160a;}
+.node-icon{font-size:1.4em;margin-bottom:6px;}
+.node-name{font-weight:700;font-size:.83em;margin-bottom:3px;}
+.node-sub{color:var(--muted);font-size:.72em;line-height:1.4;}
+.node-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-top:8px;}
+
+/* ── Union cluster ───────────────────────────────────────────── */
+.cluster{border:1.5px dashed var(--border2);border-radius:10px;padding:14px;transition:border-color .35s;}
+.cluster.active{border-color:var(--accent);}
+.cluster-hdr{font-size:.65em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:6px;}
+.section-label{font-size:.62em;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted2);margin:8px 0 6px 2px;}
+.cluster-div{border-top:1px solid var(--border);margin:10px 0;}
+
+/* ── Task rows ───────────────────────────────────────────────── */
+.task{display:flex;align-items:center;gap:9px;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:10px 11px;margin-bottom:12px;transition:border-color .35s,background .35s,box-shadow .35s;}
+.task:last-child{margin-bottom:0;}
+.task.active{border-color:var(--hi);background:#130e00;box-shadow:0 0 10px var(--hi-glow);}
+.task-ico{font-size:1.05em;flex-shrink:0;}
+.task-body{flex:1;min-width:0;}
+.task-name{font-weight:700;font-size:.8em;}
+.task-detail{color:var(--muted);font-size:.7em;margin-top:2px;line-height:1.35;}
+.tbadge{flex-shrink:0;background:var(--border);color:var(--muted);font-size:.64em;font-weight:700;padding:2px 7px;border-radius:8px;transition:background .35s,color .35s;}
+.task.active .tbadge{background:var(--hi);color:#000;}
+
+/* ── Progress dots ───────────────────────────────────────────── */
+.dots{display:flex;justify-content:center;gap:6px;margin-bottom:14px;}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--border2);cursor:pointer;transition:background .3s,transform .3s;}
+.dot.cur{background:var(--hi);transform:scale(1.4);}
+.dot.past{background:var(--accent);}
+
+/* ── Step panel ──────────────────────────────────────────────── */
+.step-panel{max-width:1100px;margin:0 auto 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.step-top{display:flex;align-items:center;gap:10px;padding:14px 18px 12px;border-bottom:1px solid var(--border);}
+.step-num{background:var(--hi);color:#000;font-size:.72em;font-weight:800;padding:3px 11px;border-radius:11px;flex-shrink:0;}
+.step-ttl{font-weight:700;font-size:1em;color:var(--hi-text);}
+.step-body{display:grid;grid-template-columns:1fr 1fr;gap:0;}
+.step-left{padding:14px 18px;border-right:1px solid var(--border);}
+.step-right{padding:14px 18px;background:var(--code-bg);}
+.panel-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-bottom:7px;}
+.step-desc{color:var(--muted);font-size:.83em;line-height:1.65;margin-bottom:14px;white-space:pre-line;}
+.comp-tags{display:flex;flex-wrap:wrap;gap:5px;}
+.comp-tag{background:var(--border);color:var(--text);font-size:.72em;font-weight:600;padding:3px 9px;border-radius:5px;font-family:'SFMono-Regular',Consolas,monospace;}
+.step-code{font-family:'SFMono-Regular',Consolas,monospace;font-size:.75em;color:var(--code-fg);line-height:1.65;white-space:pre;overflow-x:auto;min-height:80px;}
+.step-code .kw{color:#ff7b72;}
+.step-code .fn{color:#d2a8ff;}
+.step-code .str{color:#a5d6ff;}
+.step-code .cm{color:#8b949e;font-style:italic;}
+
+/* ── Controls ────────────────────────────────────────────────── */
+.controls{display:flex;justify-content:center;align-items:center;gap:14px;max-width:1100px;margin:0 auto;}
+.btn{padding:9px 26px;border-radius:7px;border:none;font-weight:700;font-size:.85em;cursor:pointer;transition:background .2s;}
+.btn-p{background:var(--hi);color:#000;}
+.btn-p:hover:not(:disabled){background:#c88a00;}
+.btn-s{background:var(--card);color:var(--text);border:1px solid var(--border2);}
+.btn-s:hover:not(:disabled){background:var(--border);}
+.btn:disabled{opacity:.28;cursor:not-allowed;}
+.step-ct{color:var(--muted);font-size:.83em;font-weight:600;min-width:56px;text-align:center;}
+.hint{text-align:center;color:var(--muted2);font-size:.72em;margin-top:12px;}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Vector RAG Chatbot <span class="badge">Architecture Walkthrough</span></h1>
+</div>
+
+<div class="tabs">
+  <button class="tab active" id="tab-ingest" onclick="setFlow('ingest')">↑ Ingest Flow</button>
+  <button class="tab"        id="tab-query"  onclick="setFlow('query')">↻ Query Flow</button>
+</div>
+
+<!-- ── DIAGRAM ──────────────────────────────────────────────── -->
+<div class="diagram-outer" id="diagram-outer">
+
+  <!-- SVG arrow layer (drawn by JS) -->
+  <svg id="svg-arrows">
+    <defs>
+      <marker id="arr-dim" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+        <path d="M0,0 L7,3.5 L0,7 Z" fill="#30363d"/>
+      </marker>
+      <marker id="arr-lit" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+        <path d="M0,0 L7,3.5 L0,7 Z" fill="#e3a008"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <div class="diagram-grid" id="diagram-grid">
+
+    <!-- Left column -->
+    <div class="col">
+      <div class="node" id="n-user">
+        <div class="node-icon">👤</div>
+        <div class="node-name">User</div>
+        <div class="node-sub">Browser — types questions or uploads PDFs</div>
+        <div class="node-label">User</div>
+      </div>
+      <div class="node" id="n-gradio">
+        <div class="node-icon">🖥️</div>
+        <div class="node-name">Gradio UI</div>
+        <div class="node-sub">app.py — Chat + Ingest tabs. Calls flyte.run() to dispatch Union tasks</div>
+        <div class="node-label">Gradio</div>
+      </div>
+    </div>
+
+    <!-- Center: Union Cluster -->
+    <div class="cluster" id="n-union">
+      <div class="cluster-hdr">☁️ Union Cluster</div>
+
+      <div class="section-label">Ingest</div>
+      <div class="task" id="n-ingest-pipe">
+        <div class="task-ico">🔀</div>
+        <div class="task-body">
+          <div class="task-name">ingest_pipeline</div>
+          <div class="task-detail">Fans out one load_and_chunk_task per PDF in parallel</div>
+        </div>
+        <span class="tbadge">orchestrator</span>
+      </div>
+      <div class="task" id="n-load-chunk">
+        <div class="task-ico">📄</div>
+        <div class="task-body">
+          <div class="task-name">load_and_chunk_task</div>
+          <div class="task-detail">PyMuPDF → text · chunks (size=600, overlap=60)</div>
+        </div>
+        <span class="tbadge">×16 parallel</span>
+      </div>
+      <div class="task" id="n-embed-index">
+        <div class="task-ico">🔢</div>
+        <div class="task-body">
+          <div class="task-name">embed_and_index_task</div>
+          <div class="task-detail">gte-small → 384D vectors · batch upsert to pgvector</div>
+        </div>
+        <span class="tbadge">batch</span>
+      </div>
+
+      <div class="cluster-div"></div>
+      <div class="section-label">Query</div>
+
+      <div class="task" id="n-query-pipe">
+        <div class="task-ico">🔀</div>
+        <div class="task-body">
+          <div class="task-name">query_pipeline</div>
+          <div class="task-detail">Runs retrieve_task then generate_task in sequence</div>
+        </div>
+        <span class="tbadge">orchestrator</span>
+      </div>
+      <div class="task" id="n-retrieve">
+        <div class="task-ico">🔍</div>
+        <div class="task-body">
+          <div class="task-name">retrieve_task</div>
+          <div class="task-detail">Embed query · cosine search · return top-k chunks + scores</div>
+        </div>
+        <span class="tbadge">step 1 / 2</span>
+      </div>
+      <div class="task" id="n-generate">
+        <div class="task-ico">✍️</div>
+        <div class="task-body">
+          <div class="task-name">generate_task</div>
+          <div class="task-detail">RAG prompt from retrieved chunks · Claude Sonnet → answer</div>
+        </div>
+        <span class="tbadge">step 2 / 2</span>
+      </div>
+    </div>
+
+    <!-- Right column -->
+    <div class="col">
+      <div class="node" id="n-claude">
+        <div class="node-icon">🤖</div>
+        <div class="node-name">Claude Sonnet</div>
+        <div class="node-sub">claude-sonnet-4-6 · Anthropic API · RAG answer</div>
+        <div class="node-label">Claude</div>
+      </div>
+      <div class="node" id="n-gte">
+        <div class="node-icon">🧠</div>
+        <div class="node-name">gte-small</div>
+        <div class="node-sub">384D sentence embeddings · baked into task image · no per-run download</div>
+        <div class="node-label">Embedding</div>
+      </div>
+      <div class="node" id="n-pgvector">
+        <div class="node-icon">🗄️</div>
+        <div class="node-name">Supabase</div>
+        <div class="node-sub">pgvector · 127 chunks · HNSW multi-layer graph · cosine distance · approximate nearest-neighbor</div>
+        <div class="node-label">Vector DB</div>
+      </div>
+    </div>
+
+  </div><!-- /diagram-grid -->
+</div><!-- /diagram-outer -->
+
+<!-- ── Progress dots ────────────────────────────────────────── -->
+<div class="dots" id="dots"></div>
+
+<!-- ── Step panel ───────────────────────────────────────────── -->
+<div class="step-panel" id="step-panel">
+  <div class="step-top">
+    <span class="step-num" id="s-num">Step 1</span>
+    <span class="step-ttl" id="s-ttl"></span>
+  </div>
+  <div class="step-body">
+    <div class="step-left">
+      <div class="panel-label">Description</div>
+      <div class="step-desc" id="s-desc"></div>
+      <div class="panel-label">Active Components</div>
+      <div class="comp-tags" id="s-tags"></div>
+    </div>
+    <div class="step-right">
+      <div class="panel-label">Code</div>
+      <pre class="step-code" id="s-code"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- ── Controls ─────────────────────────────────────────────── -->
+<div class="controls">
+  <button class="btn btn-s" id="btn-prev" onclick="prev()">← Prev</button>
+  <span class="step-ct" id="s-ct">1 / 7</span>
+  <button class="btn btn-p" id="btn-next" onclick="next()">Next →</button>
+</div>
+<p class="hint">← → arrow keys to navigate between steps</p>
+
+<script>
+/* ─── Arrow definitions ──────────────────────────────────────── */
+const ARROWS = [
+  { id:'user-gradio',     from:'n-user',       fS:'bottom', to:'n-gradio',     tS:'top'   },
+  { id:'gradio-ingest',   from:'n-gradio',     fS:'top',    to:'n-ingest-pipe',tS:'left'  },
+  { id:'gradio-query',    from:'n-gradio',     fS:'right',  to:'n-query-pipe', tS:'left'  },
+  { id:'ingest-load',     from:'n-ingest-pipe',fS:'bottom', to:'n-load-chunk', tS:'top'   },
+  { id:'load-embed',      from:'n-load-chunk', fS:'bottom', to:'n-embed-index',tS:'top'   },
+  { id:'embed-gte',       from:'n-embed-index',fS:'right',  to:'n-gte',        tS:'left', fOff:-8, tOff:-10 },
+  { id:'embed-pgvector',  from:'n-embed-index',fS:'right',  to:'n-pgvector',   tS:'left', fOff:8,  tOff:-10 },
+  { id:'query-retrieve',  from:'n-query-pipe', fS:'bottom', to:'n-retrieve',   tS:'top'   },
+  { id:'retrieve-gte',    from:'n-retrieve',   fS:'right',  to:'n-gte',        tS:'left', fOff:-8, tOff:10  },
+  { id:'retrieve-pgvector',from:'n-retrieve',  fS:'right',  to:'n-pgvector',   tS:'left', fOff:8,  tOff:10  },
+  { id:'generate-claude', from:'n-generate',   fS:'right',  to:'n-claude',     tS:'left'  },
+  { id:'answer-gradio',   from:'n-claude',     fS:'top',    to:'n-gradio',     tS:'top',  bend:'arc' },
+];
+
+/* ─── Flow step data ─────────────────────────────────────────── */
+const FLOWS = {
+  ingest: [
+    {
+      nodes:['n-user'], arrows:[],
+      ttl:'User uploads PDFs',
+      desc:'In the Ingest Documents tab, the user selects up to 16 PDFs using the file upload widget. Collection name (everstorm_docs), chunk size (600), and chunk overlap (60) are set in the left sidebar.',
+      tags:['user'],
+      code:`<span class="cm"># Ingest Documents tab — Gradio UI</span>
+file_upload = gr.File(
+    file_types=[".pdf"],
+    file_count="multiple",
+    label="Upload PDFs",
+)
+chunk_size    = gr.Slider(value=600)
+chunk_overlap = gr.Slider(value=60)`,
+    },
+    {
+      nodes:['n-user','n-gradio'], arrows:['user-gradio'],
+      ttl:'Gradio encodes PDFs and dispatches to Union',
+      desc:'app.py reads each uploaded file, base64-encodes the bytes so they can be passed as plain strings to Flyte tasks (no file handles across machines), then calls flyte.run(ingest_pipeline) with all filenames and encoded data.',
+      tags:['gradio','flyte.run()'],
+      code:`<span class="cm"># app.py — run_ingest()</span>
+<span class="kw">for</span> file_path <span class="kw">in</span> uploaded_files:
+    fname = Path(file_path).name
+    b64   = base64.b64encode(
+                Path(file_path).read_bytes()
+            ).decode()
+
+run = flyte.run(
+    ingest_pipeline,
+    filenames=filenames,
+    pdf_bytes_b64=pdf_bytes_b64,
+    chunk_size=600, chunk_overlap=60,
+)
+run.wait()`,
+    },
+    {
+      nodes:['n-union','n-ingest-pipe'], arrows:['gradio-ingest'],
+      ttl:'ingest_pipeline fans out — one task per PDF',
+      desc:'The orchestrator uses asyncio.gather() to dispatch one load_and_chunk_task per PDF simultaneously. All 16 PDFs run in parallel on separate Union task pods. You can watch all 16 nodes in the Union console.',
+      tags:['ingest_pipeline','asyncio.gather()','Union'],
+      code:`<span class="cm"># workflows.py — ingest_pipeline</span>
+chunk_results = <span class="kw">await</span> asyncio.gather(*[
+    load_and_chunk_task(
+        pdf_b64=b64,
+        filename=fname,
+        chunk_size=600,
+        chunk_overlap=60,
+    )
+    <span class="kw">for</span> fname, b64 <span class="kw">in</span> zip(filenames, pdf_bytes_b64)
+])
+<span class="cm"># → 16 tasks running in parallel on Union</span>`,
+    },
+    {
+      nodes:['n-load-chunk'], arrows:['ingest-load'],
+      ttl:'load_and_chunk_task — extract and split (×16 parallel)',
+      desc:'Each task decodes base64 → writes temp file → PyMuPDF extracts full text → RecursiveCharacterTextSplitter splits into 600-char chunks with 60-char overlap. The splitter respects paragraph → sentence → word boundaries, keeping section headers with their content.',
+      tags:['load_and_chunk_task','PyMuPDF','RecursiveCharacterTextSplitter'],
+      code:`<span class="cm"># workflows.py — load_and_chunk_task</span>
+doc       = pymupdf.open(tmp_path)
+full_text = "".join(page.get_text() <span class="kw">for</span> page <span class="kw">in</span> doc)
+
+splitter  = RecursiveCharacterTextSplitter(
+    chunk_size=600, chunk_overlap=60
+)
+raw_chunks = splitter.split_text(full_text)
+
+chunks = [
+    {<span class="str">"source_doc"</span>:filename, <span class="str">"chunk_index"</span>:i, <span class="str">"chunk_text"</span>:t}
+    <span class="kw">for</span> i, t <span class="kw">in</span> enumerate(raw_chunks)
+]
+<span class="cm"># e.g. Everstorm_Account_and_Security.pdf → 9 chunks</span>`,
+    },
+    {
+      nodes:['n-embed-index','n-gte'], arrows:['load-embed','embed-gte'],
+      ttl:'embed_and_index_task — vectorise with gte-small',
+      desc:'All 16 chunk lists are merged (127 total). embed_and_index_task loads gte-small and encodes every chunk_text into a 384D semantic vector in one batch pass. The model is baked into the task Docker image — no HuggingFace download at runtime.',
+      tags:['embed_and_index_task','gte-small','384D vectors'],
+      code:`<span class="cm"># workflows.py — embed_and_index_task</span>
+<span class="cm"># Merge all 16 task outputs: 127 total chunks</span>
+all_chunks: list = []
+<span class="kw">for</span> result_json <span class="kw">in</span> chunk_results:
+    all_chunks.extend(json.loads(result_json))
+
+model      = SentenceTransformer(<span class="str">"thenlper/gte-small"</span>)
+embeddings = model.encode(
+    [c[<span class="str">"chunk_text"</span>] <span class="kw">for</span> c <span class="kw">in</span> all_chunks],
+    convert_to_numpy=True,
+)
+<span class="cm"># embeddings.shape → (127, 384)</span>`,
+    },
+    {
+      nodes:['n-embed-index','n-pgvector'], arrows:['embed-pgvector'],
+      ttl:'Vectors upserted to Supabase pgvector',
+      desc:'Existing rows are deleted first (idempotent — safe to re-run without duplicates), then all 127 vectors are inserted in one batch.\n\nOn first ingest, pgvector builds an HNSW index (Hierarchical Navigable Small World) — a multi-layer graph where each vector is linked to its nearest neighbors. Upper layers are sparse for fast coarse navigation; lower layers are dense for precise local matching. This lets pgvector find the closest vectors in milliseconds without scanning all 127 rows. The search is approximate, not exact — but close enough that the right document is returned with high confidence.',
+      tags:['pgvector','HNSW index','multi-layer graph','cosine_ops','127 vectors'],
+      code:`<span class="cm"># Idempotent: wipe then re-insert</span>
+DELETE FROM document_chunks
+  WHERE collection_name = <span class="str">'everstorm_docs'</span>;
+
+INSERT INTO document_chunks
+    (collection_name, source_doc,
+     chunk_index, chunk_text, embedding)
+VALUES (%s, %s, %s, %s, %s)  <span class="cm">-- × 127 rows</span>
+
+<span class="cm">-- HNSW index (auto-created if not exists)</span>
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+    ON document_chunks
+    USING hnsw (embedding vector_cosine_ops);`,
+    },
+    {
+      nodes:['n-gradio','n-user'], arrows:[],
+      ttl:'Ingest complete — collection ready',
+      desc:'The status log confirms 127 vectors in everstorm_docs. The collection is live in pgvector. Switch to the Chat tab and start asking questions.',
+      tags:['everstorm_docs','127 chunks','ready'],
+      code:`stats = json.loads(run.outputs().o0)
+<span class="cm"># {</span>
+<span class="cm">#   "collection_name": "everstorm_docs",</span>
+<span class="cm">#   "total_chunks":     127,</span>
+<span class="cm">#   "vectors_upserted": 127,</span>
+<span class="cm">#   "embed_model":      "thenlper/gte-small",</span>
+<span class="cm">#   "embed_dim":        384</span>
+<span class="cm"># }</span>`,
+    },
+  ],
+
+  query: [
+    {
+      nodes:['n-user'], arrows:[],
+      ttl:'User asks a question',
+      desc:'A customer types a support question into the Gradio chat interface. The question stays visible in the input box during the entire processing time — the processing timer shows only in the chatbot area.',
+      tags:['user','Gradio Chat tab'],
+      code:`<span class="cm"># Chat tab — question stays in input box</span>
+query_input = gr.Textbox(
+    placeholder=<span class="str">"Ask anything about Everstorm..."</span>,
+    label=<span class="str">"Question"</span>,
+    submit_btn=True,
+)
+<span class="cm"># Processing timer appears only in chatbot,</span>
+<span class="cm"># not in the textbox (query_input not in outputs)</span>`,
+    },
+    {
+      nodes:['n-user','n-gradio'], arrows:['user-gradio'],
+      ttl:'Gradio dispatches the job to Union',
+      desc:'app.py calls flyte.run(query_pipeline) which submits a new execution to the Union cluster and returns immediately with a run handle. run.wait() blocks until the cluster finishes.',
+      tags:['gradio','flyte.run()','run.wait()'],
+      code:`<span class="cm"># app.py — chat()</span>
+run = flyte.run(
+    query_pipeline,
+    query=query,
+    collection_name=<span class="str">"everstorm_docs"</span>,
+    k=int(top_k),   <span class="cm"># default: 5</span>
+)
+run.wait()         <span class="cm"># blocks until Union finishes</span>
+result = json.loads(run.outputs().o0)`,
+    },
+    {
+      nodes:['n-union','n-query-pipe'], arrows:['gradio-query'],
+      ttl:'Union receives and schedules the pipeline',
+      desc:'The Union cluster picks up the query_pipeline execution. It schedules two tasks in sequence: retrieve_task first (embed + search), then generate_task using the retrieved chunks as input to Claude.',
+      tags:['query_pipeline','Union cluster'],
+      code:`<span class="cm"># workflows.py — query_pipeline</span>
+<span class="kw">async def</span> <span class="fn">query_pipeline</span>(
+    query: str,
+    collection_name: str = <span class="str">"everstorm_docs"</span>,
+    k: int = 5,
+) -> str:
+    context_json = <span class="kw">await</span> retrieve_task(
+        query=query, collection_name=collection_name, k=k
+    )
+    result_json  = <span class="kw">await</span> generate_task(
+        query=query, context_json=context_json
+    )
+    <span class="kw">return</span> result_json`,
+    },
+    {
+      nodes:['n-retrieve','n-gte'], arrows:['query-retrieve','retrieve-gte'],
+      ttl:'retrieve_task — embed the query with gte-small',
+      desc:'retrieve_task loads the gte-small model (baked into the task pod image — no download) and encodes the question into a 384D semantic vector. This vector captures the meaning of the question, not just its keywords.',
+      tags:['retrieve_task','gte-small','384D vector'],
+      code:`<span class="cm"># workflows.py — retrieve_task</span>
+model = SentenceTransformer(<span class="str">"thenlper/gte-small"</span>)
+query_vector = model.encode(query).tolist()
+<span class="cm"># → [0.021, -0.143, 0.887, ...]  384 floats
+# Encodes MEANING, not just keywords:
+# "what are the password requirements?"
+# ≈ "2  Password Requirements
+#    Minimum 12 characters..."</span>`,
+    },
+    {
+      nodes:['n-retrieve','n-pgvector'], arrows:['retrieve-pgvector'],
+      ttl:'retrieve_task — cosine search in pgvector',
+      desc:'The 384D query vector is sent to Supabase pgvector. The HNSW index navigates its multi-layer graph starting at the top (coarse) layer and drills down to the densest local neighborhood — returning the top-k chunks without scanning every row.\n\nSimilarity is measured with cosine distance (<=>): vectors pointing in the same direction score close to 1.0 regardless of magnitude. A score of 0.91 means the chunk is semantically very close to the question. Each result includes the source doc, chunk text, and score.',
+      tags:['pgvector','HNSW','cosine distance','top-k chunks','score 0–1'],
+      code:`<span class="cm"># workflows.py — retrieve_task (SQL)</span>
+SELECT source_doc, chunk_text,
+       1 - (embedding <=> %s::vector) AS score
+FROM document_chunks
+WHERE collection_name = <span class="str">'everstorm_docs'</span>
+ORDER BY embedding <=> %s::vector
+LIMIT 5
+
+<span class="cm">-- Returns:
+-- Everstorm_Account_and_Security.pdf  score: 0.91 ✓
+-- (chunk contains "Password Requirements
+--  Minimum 12 characters...")</span>`,
+    },
+    {
+      nodes:['n-generate','n-claude'], arrows:['generate-claude'],
+      ttl:'generate_task — Claude builds the RAG answer',
+      desc:'generate_task assembles a RAG prompt: retrieved chunks become the CONTEXT block, the user question follows. Claude Sonnet is instructed to answer ONLY from the provided context and cite sources. If the answer isn\'t in the chunks it says so explicitly.',
+      tags:['generate_task','Claude Sonnet','RAG prompt'],
+      code:`<span class="cm"># workflows.py — generate_task (prompt)</span>
+context_text = <span class="str">"\n\n"</span>.join(
+    f<span class="str">"[Source: {c['source_doc']} | Score: {c['score']}]\n{c['chunk_text']}"</span>
+    <span class="kw">for</span> c <span class="kw">in</span> context_chunks
+)
+system = (
+    <span class="str">"Answer using ONLY the provided context. "</span>
+    <span class="str">"If not in context, say: 'I don't have that "</span>
+    <span class="str">"information in our support docs.' "</span>
+    <span class="str">"Cite the source document for key facts."</span>
+)
+response = client.messages.create(
+    model=<span class="str">"claude-sonnet-4-6"</span>,
+    max_tokens=600, ...
+)`,
+    },
+    {
+      nodes:['n-gradio','n-user'], arrows:['answer-gradio'],
+      ttl:'Answer returned to the user',
+      desc:'The answer and source list travel back through run.outputs().o0 to the Gradio chatbot. The UI displays the formatted answer with a collapsible accordion showing which documents were used. The question input is then cleared.',
+      tags:['gradio','chatbot','source accordion'],
+      code:`<span class="cm"># app.py — chat() final steps</span>
+result  = json.loads(run.outputs().o0)
+answer  = result[<span class="str">"answer"</span>]
+sources = result.get(<span class="str">"sources"</span>, [])
+
+history.append({
+    <span class="str">"role"</span>: <span class="str">"assistant"</span>,
+    <span class="str">"content"</span>: f<span class="str">"{answer}\n\n{accordion}"</span>,
+})
+<span class="cm"># .then() fires after fn returns → clears textbox</span>
+<span class="cm"># → ["Everstorm_Account_and_Security.pdf"]</span>`,
+    },
+  ],
+};
+
+/* ─── State ──────────────────────────────────────────────────── */
+let flow = 'ingest', step = 0;
+
+/* ─── Arrow drawing ──────────────────────────────────────────── */
+function rect(id) {
+  const el  = document.getElementById(id);
+  const svg = document.getElementById('diagram-outer');
+  const er  = el.getBoundingClientRect();
+  const sr  = svg.getBoundingClientRect();
+  return {
+    l: er.left - sr.left, t: er.top - sr.top,
+    r: er.right - sr.left, b: er.bottom - sr.top,
+    cx: er.left - sr.left + er.width/2,
+    cy: er.top  - sr.top  + er.height/2,
+    w: er.width, h: er.height,
+  };
+}
+
+function edge(r, side, off=0) {
+  if (side==='top')    return { x: r.cx+off, y: r.t };
+  if (side==='bottom') return { x: r.cx+off, y: r.b };
+  if (side==='left')   return { x: r.l, y: r.cy+off };
+  if (side==='right')  return { x: r.r, y: r.cy+off };
+}
+
+function buildPath(def) {
+  const fr = rect(def.from), tr = rect(def.to);
+  const p1 = edge(fr, def.fS, def.fOff||0);
+  const p2 = edge(tr, def.tS, def.tOff||0);
+  let c1, c2;
+
+  if (def.bend === 'arc') {
+    const top = Math.min(p1.y, p2.y) - 60;
+    c1 = { x: p1.x, y: top };
+    c2 = { x: p2.x, y: top };
+  } else {
+    const dx = Math.max(Math.abs(p2.x - p1.x) * 0.5, 40);
+    const dy = Math.max(Math.abs(p2.y - p1.y) * 0.5, 40);
+    if      (def.fS==='right')  c1 = { x: p1.x+dx, y: p1.y };
+    else if (def.fS==='left')   c1 = { x: p1.x-dx, y: p1.y };
+    else if (def.fS==='bottom') c1 = { x: p1.x,    y: p1.y+dy };
+    else                        c1 = { x: p1.x,    y: p1.y-dy };
+    if      (def.tS==='left')   c2 = { x: p2.x-dx, y: p2.y };
+    else if (def.tS==='right')  c2 = { x: p2.x+dx, y: p2.y };
+    else if (def.tS==='top')    c2 = { x: p2.x,    y: p2.y-dy };
+    else                        c2 = { x: p2.x,    y: p2.y+dy };
+  }
+  return `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
+}
+
+function drawArrows() {
+  const svg = document.getElementById('svg-arrows');
+  // Remove old paths (keep defs)
+  [...svg.querySelectorAll('.arrow-path')].forEach(p => p.remove());
+
+  ARROWS.forEach(def => {
+    try {
+      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('id', 'a-' + def.id);
+      path.setAttribute('d', buildPath(def));
+      path.setAttribute('class', 'arrow-path');
+      svg.appendChild(path);
+    } catch(e) {}
+  });
+
+  // Set SVG size to match outer container
+  const outer = document.getElementById('diagram-outer');
+  svg.setAttribute('width', outer.offsetWidth);
+  svg.setAttribute('height', outer.offsetHeight);
+}
+
+/* ─── Render step ────────────────────────────────────────────── */
+const ALL_NODES = ['n-user','n-gradio','n-union','n-claude','n-gte','n-pgvector',
+  'n-ingest-pipe','n-load-chunk','n-embed-index','n-query-pipe','n-retrieve','n-generate'];
+
+function render() {
+  const steps = FLOWS[flow];
+  const s = steps[step];
+  const total = steps.length;
+
+  // Clear
+  ALL_NODES.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+  document.querySelectorAll('.arrow-path').forEach(p => p.classList.remove('lit'));
+
+  // Activate nodes
+  s.nodes.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
+    if (id.startsWith('n-ingest')||id.startsWith('n-load')||id.startsWith('n-embed')||
+        id.startsWith('n-query') ||id.startsWith('n-retrieve')||id.startsWith('n-generate'))
+      document.getElementById('n-union').classList.add('active');
+  });
+
+  // Activate arrows
+  s.arrows.forEach(aid => {
+    const el = document.getElementById('a-'+aid);
+    if (el) el.classList.add('lit');
+  });
+
+  // Step panel
+  document.getElementById('s-num').textContent  = `Step ${step+1}`;
+  document.getElementById('s-ttl').textContent  = s.ttl;
+  document.getElementById('s-desc').textContent = s.desc;
+  document.getElementById('s-code').innerHTML   = s.code;
+
+  const tagsEl = document.getElementById('s-tags');
+  tagsEl.innerHTML = s.tags.map(t=>`<span class="comp-tag">${t}</span>`).join('');
+
+  // Counter + buttons
+  document.getElementById('s-ct').textContent = `${step+1} / ${total}`;
+  document.getElementById('btn-prev').disabled = step===0;
+  document.getElementById('btn-next').disabled = step===total-1;
+  document.getElementById('btn-next').textContent = step===total-1 ? '✓ Done' : 'Next →';
+
+  // Dots
+  const dotsEl = document.getElementById('dots');
+  dotsEl.innerHTML = '';
+  for (let i=0; i<total; i++) {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i===step?' cur': i<step?' past':'');
+    d.title = FLOWS[flow][i].ttl;
+    d.onclick = () => { step=i; render(); };
+    dotsEl.appendChild(d);
+  }
+}
+
+function next() { if (step < FLOWS[flow].length-1) { step++; render(); } }
+function prev() { if (step > 0) { step--; render(); } }
+
+function setFlow(f) {
+  flow=f; step=0;
+  document.getElementById('tab-ingest').classList.toggle('active', f==='ingest');
+  document.getElementById('tab-query').classList.toggle('active',  f==='query');
+  render();
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key==='ArrowRight'||e.key==='ArrowDown') next();
+  if (e.key==='ArrowLeft' ||e.key==='ArrowUp')   prev();
+});
+
+// Initial render + draw arrows after layout settles
+window.addEventListener('load', () => {
+  render();
+  requestAnimationFrame(() => { drawArrows(); render(); });
+});
+window.addEventListener('resize', () => { drawArrows(); });
+</script>
+</body>
+</html>

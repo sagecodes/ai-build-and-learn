@@ -1,0 +1,108 @@
+/* ── Run link ─────────────────────────────────────────────────────────────── */
+
+.run-link a {
+    display: inline-block;
+    padding: 6px 14px;
+    background: #5865f2;
+    color: #fff;
+    border-radius: 6px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.run-link a:hover {
+    background: #4752c4;
+}
+
+/* ── Source accordion ─────────────────────────────────────────────────────── */
+
+.source-accordion {
+    margin-top: 10px;
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 0.88em;
+}
+
+.source-accordion summary {
+    padding: 6px 12px;
+    background: rgba(255,255,255,0.08);
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--body-text-color, #e0e0e0);
+    list-style: none;
+}
+
+.source-accordion summary:hover {
+    background: rgba(255,255,255,0.14);
+}
+
+/* ── Source item ──────────────────────────────────────────────────────────── */
+
+.source-item {
+    padding: 8px 12px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+}
+
+.source-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.source-doc {
+    font-weight: 600;
+    color: var(--body-text-color, #e0e0e0);
+    font-size: 0.85em;
+}
+
+.source-text {
+    color: var(--body-text-color-subdued, #aaa);
+    font-size: 0.82em;
+    line-height: 1.4;
+    margin: 0;
+}
+
+/* ── Score badges ─────────────────────────────────────────────────────────── */
+
+.score-high {
+    background: #d4edda;
+    color: #155724;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 0.8em;
+    font-weight: 700;
+}
+
+.score-mid {
+    background: #fff3cd;
+    color: #856404;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 0.8em;
+    font-weight: 700;
+}
+
+.score-low {
+    background: #f8d7da;
+    color: #721c24;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 0.8em;
+    font-weight: 700;
+}
+
+/* ── Status log ───────────────────────────────────────────────────────────── */
+
+.log-box textarea {
+    font-family: monospace !important;
+    font-size: 0.85em !important;
+}
+
+/* ── Tab sidebar column ───────────────────────────────────────────────────── */
+
+.tab-sidebar {
+    border-right: 1px solid rgba(255,255,255,0.1);
+    padding-right: 16px !important;
+}
