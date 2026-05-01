@@ -117,7 +117,7 @@ env = flyte.app.AppEnvironment(
         flyte.app.Parameter(name="collection_name", value=COLLECTION_NAME),
         flyte.app.Parameter(name="default_top_k", value=str(DEFAULT_TOP_K)),
     ],
-    scaling=flyte.app.Scaling(replicas=(0, 1), scaledown_after=1800),
+    scaling=flyte.app.Scaling(replicas=(0, 1), scaledown_after=300),
 )
 
 
