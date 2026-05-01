@@ -1,0 +1,11 @@
+[project]
+name = "pear-harness"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "gradio>=5.0.0",
+    "ollama>=0.6.2",
+    "pillow>=12.2.0",
+    "mss>=9.0.0",
+    "chromadb>=0.6.0",
+]
