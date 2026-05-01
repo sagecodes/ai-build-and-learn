@@ -91,7 +91,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .step-left{padding:14px 18px;border-right:1px solid var(--border);}
 .step-right{padding:14px 18px;background:var(--code-bg);}
 .panel-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-bottom:7px;}
-.step-desc{color:var(--muted);font-size:.83em;line-height:1.65;margin-bottom:14px;}
+.step-desc{color:var(--muted);font-size:.83em;line-height:1.65;margin-bottom:14px;white-space:pre-line;}
 .comp-tags{display:flex;flex-wrap:wrap;gap:5px;}
 .comp-tag{background:var(--border);color:var(--text);font-size:.72em;font-weight:600;padding:3px 9px;border-radius:5px;font-family:'SFMono-Regular',Consolas,monospace;}
 .step-code{font-family:'SFMono-Regular',Consolas,monospace;font-size:.75em;color:var(--code-fg);line-height:1.65;white-space:pre;overflow-x:auto;min-height:80px;}
@@ -232,7 +232,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       <div class="node" id="n-pgvector">
         <div class="node-icon">🗄️</div>
         <div class="node-name">Supabase</div>
-        <div class="node-sub">pgvector · 127 chunks · HNSW index · cosine distance</div>
+        <div class="node-sub">pgvector · 127 chunks · HNSW multi-layer graph · cosine distance · approximate nearest-neighbor</div>
         <div class="node-label">Vector DB</div>
       </div>
     </div>
@@ -383,8 +383,8 @@ embeddings = model.encode(
     {
       nodes:['n-embed-index','n-pgvector'], arrows:['embed-pgvector'],
       ttl:'Vectors upserted to Supabase pgvector',
-      desc:'Existing collection rows are deleted first (idempotent — safe to re-run without duplicates), then all 127 rows are inserted in one batch. The HNSW index is created automatically on first ingest.',
-      tags:['pgvector','HNSW index','127 vectors'],
+      desc:'Existing rows are deleted first (idempotent — safe to re-run without duplicates), then all 127 vectors are inserted in one batch.\n\nOn first ingest, pgvector builds an HNSW index (Hierarchical Navigable Small World) — a multi-layer graph where each vector is linked to its nearest neighbors. Upper layers are sparse for fast coarse navigation; lower layers are dense for precise local matching. This lets pgvector find the closest vectors in milliseconds without scanning all 127 rows. The search is approximate, not exact — but close enough that the right document is returned with high confidence.',
+      tags:['pgvector','HNSW index','multi-layer graph','cosine_ops','127 vectors'],
       code:`<span class="cm"># Idempotent: wipe then re-insert</span>
 DELETE FROM document_chunks
   WHERE collection_name = <span class="str">'everstorm_docs'</span>;
@@ -481,8 +481,8 @@ query_vector = model.encode(query).tolist()
     {
       nodes:['n-retrieve','n-pgvector'], arrows:['retrieve-pgvector'],
       ttl:'retrieve_task — cosine search in pgvector',
-      desc:'The 384D query vector is sent to Supabase pgvector. The HNSW index finds the 5 chunks with the smallest cosine distance to the query vector. Each result includes source doc, chunk text, and similarity score (0–1).',
-      tags:['pgvector','HNSW','cosine search','top-5 chunks'],
+      desc:'The 384D query vector is sent to Supabase pgvector. The HNSW index navigates its multi-layer graph starting at the top (coarse) layer and drills down to the densest local neighborhood — returning the top-k chunks without scanning every row.\n\nSimilarity is measured with cosine distance (<=>): vectors pointing in the same direction score close to 1.0 regardless of magnitude. A score of 0.91 means the chunk is semantically very close to the question. Each result includes the source doc, chunk text, and score.',
+      tags:['pgvector','HNSW','cosine distance','top-k chunks','score 0–1'],
       code:`<span class="cm"># workflows.py — retrieve_task (SQL)</span>
 SELECT source_doc, chunk_text,
        1 - (embedding <=> %s::vector) AS score
