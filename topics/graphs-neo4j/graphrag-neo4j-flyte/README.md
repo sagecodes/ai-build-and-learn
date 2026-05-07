@@ -240,7 +240,9 @@ Pick one and flip the mode radio to show what changes:
 ## Known limitations
 
 - **No persistence.** Pod restart wipes the graph. The pipeline is the
-  source of truth; just re-run it. Add a PVC when this becomes painful.
+  source of truth; just re-run it (`embed_papers` is cached in rustfs so
+  it's ~10s). Anything you typed by hand into the Neo4j browser does not
+  survive. See "Snapshot to rustfs" under Next ideas.
 - **HTTP API, not Bolt.** Functionally equivalent for our scale, but more
   verbose than the Bolt driver. We don't get the nice transaction objects
   or retry helpers; queries go one statement per HTTP round trip.
@@ -258,3 +260,18 @@ Pick one and flip the mode radio to show what changes:
 - **Persistence + larger corpus.** PVC-backed Neo4j and a 5–10k paper
   graph would make the demo feel less toy without changing any of the
   retrieval code.
+- **Snapshot to rustfs (ephemeral compute, durable state).** The graph
+  itself dies with the pod, but the Flyte object store (rustfs) survives
+  devbox restarts. Add a periodic snapshot task that dumps the live graph
+  via `apoc.export.cypher.all` (or `neo4j-admin database dump`) and
+  uploads it as a `flyte.io.Dir`. On Neo4j startup, restore from the
+  latest snapshot if one exists. Two design notes for whoever picks this
+  up:
+  - Don't trust shutdown hooks for the actual save: Knative gives ~30s
+    grace before SIGKILL, easy to overrun on a real corpus. Snapshot on
+    a timer (or after each pipeline run) and treat shutdown as
+    best-effort flush.
+  - Wiring this into the current `command=` based app means either
+    writing a wrapped entrypoint (shell script that pulls the snapshot
+    before `exec neo4j`) or switching back to an `@env.server` Python
+    wrapper so the `@on_startup` / `@on_shutdown` decorators fire.
