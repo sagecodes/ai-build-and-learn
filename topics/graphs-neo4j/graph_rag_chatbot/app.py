@@ -137,15 +137,15 @@ _CSS = """
 .pipeline-step {
     background: rgba(255,255,255,0.08);
     border: 1px solid rgba(255,255,255,0.12);
-    padding: 4px 11px;
+    padding: 3px 8px;
     border-radius: 5px;
-    font-size: 0.88em;
+    font-size: 0.76em;
     white-space: nowrap;
     color: var(--body-text-color, #e0e0e0);
 }
 .pipeline-arrow {
     color: rgba(255,255,255,0.3);
-    font-size: 0.88em;
+    font-size: 0.76em;
 }
 .panel-stats {
     display: flex;
@@ -154,10 +154,10 @@ _CSS = """
     color: var(--body-text-color-subdued, #aaa);
 }
 .panel-mode-desc {
-    font-size: 0.82em;
-    color: rgba(255,255,255,0.45);
+    font-size: 0.93em;
+    color: rgba(255,255,255,0.7);
     font-style: italic;
-    line-height: 1.4;
+    line-height: 1.5;
     margin: 6px 0 10px;
 }
 """
