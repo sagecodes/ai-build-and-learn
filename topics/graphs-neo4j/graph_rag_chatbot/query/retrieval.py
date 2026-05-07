@@ -14,6 +14,7 @@ from sentence_transformers import SentenceTransformer
 from config import CLAUDE_MODEL, EMBED_MODEL, VECTOR_INDEX_NAME, anthropic_client, neo4j_driver, task_env
 
 _TOP_K = 5
+_HYBRID_SCORE_THRESHOLD = 0.75  # drop chunks below this cosine similarity
 
 
 def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
@@ -39,6 +40,7 @@ async def hybrid_retrieve(question: str) -> str:
                 f"""
                 CALL db.index.vector.queryNodes('{VECTOR_INDEX_NAME}', $top_k, $embedding)
                 YIELD node AS chunk, score
+                WHERE score >= $threshold
                 RETURN chunk.id AS chunk_id,
                        chunk.source_doc AS source_doc,
                        chunk.text AS text,
@@ -47,6 +49,7 @@ async def hybrid_retrieve(question: str) -> str:
                 """,
                 top_k=_TOP_K,
                 embedding=query_vec,
+                threshold=_HYBRID_SCORE_THRESHOLD,
             ).data()
 
             chunk_ids = [r["chunk_id"] for r in chunk_rows]
