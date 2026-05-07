@@ -99,14 +99,20 @@ OPTIONS {
 
 **The key GraphRAG query — vector search + graph traversal in one statement:**
 ```cypher
-CALL db.index.vector.queryNodes('chunk-embeddings', 5, $query_embedding)
+CALL db.index.vector.queryNodes('chunk-embeddings', 3, $query_embedding)
 YIELD node AS chunk, score
+WHERE score >= 0.75
 MATCH (chunk)-[:MENTIONS]->(entity:Entity)
 OPTIONAL MATCH (entity)-[:RELATED]->(other:Entity)
 RETURN chunk.text, entity.name, entity.type,
        collect(other.name) AS related_entities, score
 ORDER BY score DESC
 ```
+
+`TOP_K=3` and the `score >= 0.75` threshold work together to filter noise.
+Without both, documents that share surface-level vocabulary with the query
+(e.g. "Gift Cards" when asking about shipping) score above the threshold and
+pollute the entity expansion with irrelevant nodes.
 
 This is what pgvector cannot do — vector search and relationship traversal
 combined in a single query.
@@ -220,9 +226,12 @@ and drop this workaround.
 Three modes, selected by a Claude query router:
 
 **Mode A — Hybrid: Vector + Graph Expansion** (factual / specific questions)
-1. Embed query with gte-small → HNSW vector search finds top-k Chunk nodes
+1. Embed query with gte-small → HNSW vector search finds top-3 Chunk nodes (score ≥ 0.75)
 2. Follow `MENTIONS` edges → collect Entity nodes referenced by those chunks
 3. Combined context (chunks + entities) sent to Claude
+
+The threshold + TOP_K combination is critical — without it, chunks that share
+surface vocabulary with the query inflate the entity list with irrelevant nodes.
 
 **Mode B — Entity Lookup + Traversal** (relationship questions)
 1. Claude tool use extracts named entities from the question
@@ -343,7 +352,7 @@ query_pipeline  (query/pipeline.py — orchestrator)
     │       embed question → cosine similarity to Community summaries → best match
     │
     └── generate                  query/generation.py
-            mode-specific RAG prompt → Claude answer + sources + retrieval_mode + entities_used
+            mode-specific RAG prompt → Claude answer + sources + retrieval_mode + entities_used + routing_reason
 ```
 
 ---

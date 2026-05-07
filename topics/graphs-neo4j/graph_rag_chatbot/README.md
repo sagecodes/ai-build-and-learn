@@ -193,6 +193,10 @@ Enrichment steps (resolve, detect, summarize) run sequentially after.
 2. Type a question and submit
 3. The answer includes a retrieval mode badge (**Hybrid** / **Entity** / **Community**),
    source documents, and entities used
+4. The **Last Query Retrieval** panel (sidebar) shows Claude's routing reasoning,
+   the pipeline path with graph edge types (`Graph: MENTIONS` / `Graph: RELATED` /
+   `Graph: Community Sim`), and source and entity counts — useful for understanding
+   why a particular retrieval strategy was chosen
 
 **Example questions by mode:**
 
