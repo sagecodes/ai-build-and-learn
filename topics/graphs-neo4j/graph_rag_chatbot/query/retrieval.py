@@ -13,7 +13,7 @@ from sentence_transformers import SentenceTransformer
 
 from config import CLAUDE_MODEL, EMBED_MODEL, VECTOR_INDEX_NAME, anthropic_client, neo4j_driver, task_env
 
-_TOP_K = 5
+_TOP_K = 3
 _HYBRID_SCORE_THRESHOLD = 0.75  # drop chunks below this cosine similarity
 
 
