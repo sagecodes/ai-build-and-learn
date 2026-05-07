@@ -434,10 +434,16 @@ def build_ui() -> gr.Blocks:
                             height=480,
                         )
 
+                panel_state = gr.State("")
+
                 query_input.submit(
                     fn=chat,
                     inputs=[query_input, chatbot],
-                    outputs=[chatbot, retrieval_panel],
+                    outputs=[chatbot, panel_state],
+                ).then(
+                    fn=lambda p: p,
+                    inputs=[panel_state],
+                    outputs=[retrieval_panel],
                 ).then(
                     fn=lambda: "",
                     outputs=[query_input],
