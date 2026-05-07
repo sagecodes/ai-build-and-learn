@@ -63,4 +63,8 @@ async def route_query(question: str) -> str:
     )
 
     tool_block = next(b for b in response.content if b.type == "tool_use")
-    return tool_block.input["mode"]
+    import json
+    return json.dumps({
+        "mode":      tool_block.input["mode"],
+        "reasoning": tool_block.input.get("reasoning", ""),
+    })

@@ -104,6 +104,55 @@ _CSS = """
 
 /* ── Sidebar divider ──────────────────────────────────────────────────── */
 .tab-sidebar { border-right: 1px solid rgba(255,255,255,0.1); padding-right: 16px !important; }
+
+/* ── Retrieval panel ──────────────────────────────────────────────────── */
+.retrieval-panel {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px;
+    padding: 14px;
+    margin-top: 12px;
+}
+.panel-header {
+    font-size: 0.62em;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.35);
+    margin-bottom: 8px;
+}
+.panel-reasoning {
+    font-size: 0.82em;
+    color: var(--body-text-color-subdued, #aaa);
+    line-height: 1.5;
+    margin: 8px 0 12px;
+}
+.panel-pipeline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 12px;
+}
+.pipeline-step {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.12);
+    padding: 3px 9px;
+    border-radius: 5px;
+    font-size: 0.75em;
+    white-space: nowrap;
+    color: var(--body-text-color, #e0e0e0);
+}
+.pipeline-arrow {
+    color: rgba(255,255,255,0.3);
+    font-size: 0.75em;
+}
+.panel-stats {
+    display: flex;
+    gap: 10px;
+    font-size: 0.78em;
+    color: var(--body-text-color-subdued, #aaa);
+}
 """
 
 # ── Union App deployment environment ──────────────────────────────────────────
@@ -150,6 +199,33 @@ def build_entities_accordion(entities: list) -> str:
         f'<summary>🔗 {len(entities)} entity/entities used</summary>'
         f'{items}'
         f'</details>'
+    )
+
+
+_PIPELINE_STEPS = {
+    "hybrid":    [("📊", "Vector Search"), ("🕸️", "Graph Expand"), ("✍️", "Generate")],
+    "entity":    [("🔍", "Entity Extract"), ("🕸️", "Graph Traverse"), ("✍️", "Generate")],
+    "community": [("🏘️", "Community Match"), ("✍️", "Generate")],
+}
+
+def build_retrieval_panel(mode: str, reasoning: str, sources: list, entities: list) -> str:
+    label = {"hybrid": "Hybrid", "entity": "Entity", "community": "Community"}.get(mode, mode)
+    steps = _PIPELINE_STEPS.get(mode, [])
+    pipeline_html = '<span class="pipeline-arrow">→</span>'.join(
+        f'<span class="pipeline-step">{ico} {name}</span>'
+        for ico, name in steps
+    )
+    return (
+        f'<div class="retrieval-panel">'
+        f'<div class="panel-header">Last Query Retrieval</div>'
+        f'<span class="mode-badge mode-{mode}">{label}</span>'
+        f'<div class="panel-reasoning">{reasoning}</div>'
+        f'<div class="panel-pipeline">{pipeline_html}</div>'
+        f'<div class="panel-stats">'
+        f'<span>📄 {len(sources)} source(s)</span>'
+        f'<span>🔗 {len(entities)} entity/entities</span>'
+        f'</div>'
+        f'</div>'
     )
 
 
@@ -224,7 +300,7 @@ def chat(question, history):
     history = list(history or [])
 
     if not question:
-        return history
+        return history, ""
 
     history.append({"role": "user", "content": question})
 
@@ -234,10 +310,11 @@ def chat(question, history):
         run.wait()
         result = json.loads(run.outputs().o0)
 
-        answer   = result["answer"]
-        mode     = result.get("retrieval_mode", "hybrid")
-        sources  = result.get("sources", [])
-        entities = result.get("entities_used", [])
+        answer         = result["answer"]
+        mode           = result.get("retrieval_mode", "hybrid")
+        sources        = result.get("sources", [])
+        entities       = result.get("entities_used", [])
+        routing_reason = result.get("routing_reason", "")
 
         badge    = _mode_badge(mode)
         src_html = build_sources_accordion(sources) if sources else ""
@@ -248,13 +325,16 @@ def chat(question, history):
             "content": f"{answer}\n\n{badge}{src_html}{ent_html}",
         })
 
+        panel_html = build_retrieval_panel(mode, routing_reason, sources, entities)
+
     except Exception as exc:
         history.append({
             "role": "assistant",
             "content": f"❌ Error: {exc}",
         })
+        panel_html = ""
 
-    return history
+    return history, panel_html
 
 
 # ── UI layout ──────────────────────────────────────────────────────────────────
@@ -313,6 +393,7 @@ def build_ui() -> gr.Blocks:
                             "🟢 **Community** — broad themes and programs"
                         )
                         clear_btn = gr.Button("🗑 Clear")
+                        retrieval_panel = gr.HTML()
 
                     with gr.Column(scale=4):
                         query_input = gr.Textbox(
@@ -328,15 +409,15 @@ def build_ui() -> gr.Blocks:
                 query_input.submit(
                     fn=chat,
                     inputs=[query_input, chatbot],
-                    outputs=[chatbot],
+                    outputs=[chatbot, retrieval_panel],
                 ).then(
                     fn=lambda: "",
                     outputs=[query_input],
                 )
 
                 clear_btn.click(
-                    fn=lambda: ([], ""),
-                    outputs=[chatbot, query_input],
+                    fn=lambda: ([], "", ""),
+                    outputs=[chatbot, query_input, retrieval_panel],
                 )
 
     return app
