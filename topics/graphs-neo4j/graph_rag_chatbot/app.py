@@ -114,7 +114,7 @@ _CSS = """
     margin-top: 12px;
 }
 .panel-header {
-    font-size: 0.62em;
+    font-size: 0.72em;
     font-weight: 700;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -122,7 +122,7 @@ _CSS = """
     margin-bottom: 8px;
 }
 .panel-reasoning {
-    font-size: 0.82em;
+    font-size: 0.92em;
     color: var(--body-text-color-subdued, #aaa);
     line-height: 1.5;
     margin: 8px 0 12px;
@@ -137,21 +137,28 @@ _CSS = """
 .pipeline-step {
     background: rgba(255,255,255,0.08);
     border: 1px solid rgba(255,255,255,0.12);
-    padding: 3px 9px;
+    padding: 4px 11px;
     border-radius: 5px;
-    font-size: 0.75em;
+    font-size: 0.88em;
     white-space: nowrap;
     color: var(--body-text-color, #e0e0e0);
 }
 .pipeline-arrow {
     color: rgba(255,255,255,0.3);
-    font-size: 0.75em;
+    font-size: 0.88em;
 }
 .panel-stats {
     display: flex;
     gap: 10px;
-    font-size: 0.78em;
+    font-size: 0.88em;
     color: var(--body-text-color-subdued, #aaa);
+}
+.panel-mode-desc {
+    font-size: 0.82em;
+    color: rgba(255,255,255,0.45);
+    font-style: italic;
+    line-height: 1.4;
+    margin: 6px 0 10px;
 }
 """
 
@@ -203,14 +210,34 @@ def build_entities_accordion(entities: list) -> str:
 
 
 _PIPELINE_STEPS = {
-    "hybrid":    [("📊", "Vector Search"), ("🕸️", "Graph Expand"), ("✍️", "Generate")],
-    "entity":    [("🔍", "Entity Extract"), ("🕸️", "Graph Traverse"), ("✍️", "Generate")],
-    "community": [("🏘️", "Community Match"), ("✍️", "Generate")],
+    "hybrid":    [("📊", "Vector Search"), ("🕸️", "Graph: MENTIONS")],
+    "entity":    [("🔍", "Entity Extract"), ("🕸️", "Graph: RELATED")],
+    "community": [("🏘️", "Graph: Community Sim")],
+}
+
+_MODE_DESCRIPTIONS = {
+    "hybrid": (
+        "Vector search finds the closest text chunks by embedding similarity — "
+        "the same technique used in vector RAG. "
+        "The graph layer then follows MENTIONS edges from those chunks to the entities they reference, "
+        "adding structured relationship context that pure vector search cannot provide."
+    ),
+    "entity": (
+        "Named entities are extracted from your question, then matched directly to nodes in the graph. "
+        "RELATED edges traverse their connections to surface how things are linked — "
+        "no vector search needed because the graph index is the lookup."
+    ),
+    "community": (
+        "Pre-computed community summaries are embedded at ingest time. "
+        "Your question is embedded and matched by cosine similarity to find the closest topic cluster, "
+        "then all member entities of that community are returned — useful for broad 'what does X offer' questions."
+    ),
 }
 
 def build_retrieval_panel(mode: str, reasoning: str, sources: list, entities: list) -> str:
     label = {"hybrid": "Hybrid", "entity": "Entity", "community": "Community"}.get(mode, mode)
     steps = _PIPELINE_STEPS.get(mode, [])
+    mode_desc = _MODE_DESCRIPTIONS.get(mode, "")
     pipeline_html = '<span class="pipeline-arrow">→</span>'.join(
         f'<span class="pipeline-step">{ico} {name}</span>'
         for ico, name in steps
@@ -221,6 +248,7 @@ def build_retrieval_panel(mode: str, reasoning: str, sources: list, entities: li
         f'<span class="mode-badge mode-{mode}">{label}</span>'
         f'<div class="panel-reasoning">{reasoning}</div>'
         f'<div class="panel-pipeline">{pipeline_html}</div>'
+        f'<div class="panel-mode-desc">{mode_desc}</div>'
         f'<div class="panel-stats">'
         f'<span>📄 {len(sources)} source(s)</span>'
         f'<span>🔗 {len(entities)} entity/entities</span>'
