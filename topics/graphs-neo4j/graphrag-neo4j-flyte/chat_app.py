@@ -148,8 +148,8 @@ PANEL_CSS = """
 .gr-rank { font-weight: 600; }
 .gr-score { font-variant-numeric: tabular-nums; }
 .gr-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
-.gr-title a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--body-text-color-subdued); }
-.gr-title a:hover { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+.gr-title a, .gr-rank a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--body-text-color-subdued); }
+.gr-title a:hover, .gr-rank a:hover { color: var(--color-accent); border-bottom-color: var(--color-accent); }
 .gr-snippet {
     font-size: 0.88rem;
     line-height: 1.4;
@@ -190,6 +190,19 @@ def _render_panel(papers: list[dict], edges: list[dict]) -> str:
                 snippet = snippet[:280].rsplit(" ", 1)[0] + "…"
             title = (p.get("title") or p.get("id") or "?").replace("<", "&lt;").replace(">", "&gt;")
             url = (p.get("url") or "").replace('"', "&quot;")
+            # Derive a short, readable paper label from the URL: arxiv ID
+            # when available, S2 short hash otherwise. Long S2 paperIds
+            # like `4fe445a1df3b73c…` are noise in the meta line.
+            if url.startswith("https://arxiv.org/abs/"):
+                paper_label = "arXiv:" + url.rsplit("/", 1)[-1]
+            elif "/paper/" in url:
+                paper_label = "S2:" + url.rsplit("/", 1)[-1][:8]
+            else:
+                paper_label = (p.get("id") or "?")[:10]
+            paper_link = (
+                f'<a href="{url}" target="_blank" rel="noopener">{paper_label}</a>'
+                if url else paper_label
+            )
             title_html = (
                 f'<a href="{url}" target="_blank" rel="noopener">{title}</a>'
                 if url else title
@@ -197,7 +210,7 @@ def _render_panel(papers: list[dict], edges: list[dict]) -> str:
             cards.append(
                 '<div class="gr-card">'
                 '<div class="gr-card-meta">'
-                f'<span class="gr-rank">#{i} · paper {p.get("id", "?")} · {p.get("year", "?")}</span>'
+                f'<span class="gr-rank">#{i} · {paper_link} · {p.get("year", "?")}</span>'
                 f'<span class="gr-score">score {score_text}</span>'
                 '</div>'
                 f'<div class="gr-title">{title_html}</div>'
