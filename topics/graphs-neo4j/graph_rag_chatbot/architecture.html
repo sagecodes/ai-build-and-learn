@@ -580,7 +580,9 @@ sources = result.get(<span class="str">"sources"</span>, [])`,
       tags:['query_pipeline','Union cluster','sequential tasks'],
       code:`<span class="cm"># query/pipeline.py — query_pipeline</span>
 <span class="kw">async def</span> <span class="fn">query_pipeline</span>(question: str) -> str:
-    mode = <span class="kw">await</span> route_query(question=question)
+    route = json.loads(<span class="kw">await</span> route_query(question=question))
+    mode           = route[<span class="str">"mode"</span>]
+    routing_reason = route.get(<span class="str">"reasoning"</span>, <span class="str">""</span>)
 
     <span class="kw">if</span> mode == <span class="str">"entity"</span>:
         context = <span class="kw">await</span> entity_retrieve(question=question)
@@ -589,9 +591,11 @@ sources = result.get(<span class="str">"sources"</span>, [])`,
     <span class="kw">else</span>:
         context = <span class="kw">await</span> hybrid_retrieve(question=question)
 
-    <span class="kw">return await</span> generate(
+    result = json.loads(<span class="kw">await</span> generate(
         question=question, context_json=context
-    )`,
+    ))
+    result[<span class="str">"routing_reason"</span>] = routing_reason
+    <span class="kw">return</span> json.dumps(result)`,
     },
     {
       nodes:['n-route','n-claude'], arrows:['query-route','route-claude'],
@@ -614,8 +618,11 @@ tool_block = next(
     b <span class="kw">for</span> b <span class="kw">in</span> response.content
     <span class="kw">if</span> b.type == <span class="str">"tool_use"</span>
 )
-<span class="kw">return</span> tool_block.input[<span class="str">"mode"</span>]
-<span class="cm"># → "hybrid" | "entity" | "community"</span>`,
+<span class="kw">return</span> json.dumps({
+    <span class="str">"mode"</span>:      tool_block.input[<span class="str">"mode"</span>],
+    <span class="str">"reasoning"</span>: tool_block.input.get(<span class="str">"reasoning"</span>, <span class="str">""</span>),
+})
+<span class="cm"># reasoning shown in the UI's retrieval panel</span>`,
     },
     {
       nodes:['n-retrieve','n-gte','n-neo4j'], arrows:['route-retrieve','retrieve-gte','retrieve-neo4j'],
@@ -630,9 +637,12 @@ community — embed question with gte-small → cosine similarity to all Communi
       tags:['hybrid_retrieve','entity_retrieve','community_retrieve','HNSW','graph traversal'],
       code:`<span class="cm"># hybrid: vector search + MENTIONS traversal</span>
 chunk_rows = session.run(
-    <span class="str">f"CALL db.index.vector.queryNodes('{INDEX}', $k, $v)"</span>,
-    top_k=5, embedding=query_vec,
+    <span class="str">f"CALL db.index.vector.queryNodes('{INDEX}', $top_k, $emb)"</span>
+    <span class="str">" YIELD node AS chunk, score"</span>
+    <span class="str">" WHERE score >= $threshold"</span>,
+    top_k=3, embedding=query_vec, threshold=0.75,
 ).data()
+<span class="cm"># TOP_K=3 + score>=0.75 filters noise chunks</span>
 entity_rows = session.run(
     <span class="str">"MATCH (c:Chunk)-[:MENTIONS]->(e:Entity)"</span>
     <span class="str">"WHERE c.id IN $ids ..."</span>
@@ -675,20 +685,21 @@ response = client.messages.create(
     {
       nodes:['n-gradio','n-user'], arrows:['answer-gradio'],
       ttl:'Answer returned to the user',
-      desc:'The answer, source documents, retrieval mode, and entities used travel back through run.outputs().o0 to the Gradio chatbot. The UI displays the formatted answer with a collapsible accordion showing which documents and entities were used and which retrieval mode was selected.',
-      tags:['gradio','chatbot','retrieval_mode','sources','entities_used'],
+      desc:'The answer, source documents, retrieval mode, entities used, and routing reasoning travel back through run.outputs().o0. The UI shows the answer in the chatbot and populates the Last Query Retrieval sidebar panel with the mode badge, Claude\'s routing reasoning, pipeline path (with graph edge types), and source/entity counts.',
+      tags:['gradio','chatbot','retrieval_mode','sources','entities_used','routing_reason'],
       code:`<span class="cm"># app.py — chat() final steps</span>
-result   = json.loads(run.outputs().o0)
-answer   = result[<span class="str">"answer"</span>]
-mode     = result[<span class="str">"retrieval_mode"</span>]
-sources  = result.get(<span class="str">"sources"</span>, [])
-entities = result.get(<span class="str">"entities_used"</span>, [])
+result         = json.loads(run.outputs().o0)
+answer         = result[<span class="str">"answer"</span>]
+mode           = result.get(<span class="str">"retrieval_mode"</span>, <span class="str">"hybrid"</span>)
+sources        = result.get(<span class="str">"sources"</span>, [])
+entities       = result.get(<span class="str">"entities_used"</span>, [])
+routing_reason = result.get(<span class="str">"routing_reason"</span>, <span class="str">""</span>)
 
 history.append({
     <span class="str">"role"</span>: <span class="str">"assistant"</span>,
-    <span class="str">"content"</span>: <span class="str">f"{answer}\n\n{accordion}"</span>,
+    <span class="str">"content"</span>: <span class="str">f"{answer}\n\n{badge}{sources}{entities}"</span>,
 })
-<span class="cm"># Accordion shows: mode, sources, entities</span>`,
+<span class="cm"># Sidebar panel: mode + reasoning + pipeline path</span>`,
     },
   ],
 };
