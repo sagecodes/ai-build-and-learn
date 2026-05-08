@@ -4,7 +4,8 @@ A complete Graph-RAG demo running on the DGX Spark Flyte 2 devbox: Neo4j 5
 as a Flyte app (with native vector index), a pipeline that pulls papers
 from Semantic Scholar by keyword query (cached) and loads them as a
 graph, and a Gradio chat UI with three retrieval modes (pure vector,
-vector + 1-hop graph expand, hybrid RRF) talking to Gemma 4 through vLLM.
+vector + 1-hop graph expand, hybrid Reciprocal Rank Fusion / RRF)
+talking to Gemma 4 through vLLM.
 
 ```
 ┌────────────────────┐  HTTP /db/neo4j/tx/commit  ┌────────────────────┐
@@ -237,6 +238,30 @@ URL is logged at the end:
 Graph RAG chat UI deployed: http://graphrag-chat-ui-flytesnacks-development.localhost:30081/
 ```
 
+### Why graph at all
+
+Pure vector retrieval ranks by embedding cosine, which is great for
+topical overlap and bad at two specific things:
+
+1. **Intellectual lineage.** Papers that build on each other often use
+   different vocabulary. RAG and Self-RAG are tightly related, but their
+   abstracts share few keywords. Vector misses the link; an explicit
+   `CITES` edge captures it.
+2. **Authority.** The most influential paper in a topic is rarely the
+   tightest abstract match for a casual query. Vector surfaces what
+   *sounds* like the question; the graph surfaces what the field built
+   on.
+
+Each edge type pulls a different lever:
+
+- `CITES` is the strongest signal. It encodes a human judgment that two
+  papers are intellectually connected. Mode 2 expansion uses it to add
+  foundational dependencies and follow-on work to the LLM context.
+- `IN_CATEGORY` powers cohort lookups in mode 3: "what are the most-cited
+  papers in the same field as the vector hits?"
+- `AUTHORED_BY` is the weakest for accuracy but matters for
+  author-shaped questions ("what else has Asai worked on?").
+
 ### The three retrieval modes
 
 The right-hand panel shows `📄 Retrieved papers` plus, in modes 2 and 3,
@@ -244,17 +269,45 @@ The right-hand panel shows `📄 Retrieved papers` plus, in modes 2 and 3,
 the LLM got beyond raw vector hits. Each paper card has a `via …` source
 label so you can tell why it surfaced.
 
-1. **Vector** is pure `db.index.vector.queryNodes`. Baseline. Same shape
-   as the `rag-chroma` chat app from the previous week.
-2. **Vector + Expand** runs the vector query, then a single 1-hop
-   traversal across `CITES`, `AUTHORED_BY`, `IN_CATEGORY` for every seed.
-   Adds the neighbor titles into the LLM context as a `GRAPH RELATIONS`
-   block.
-3. **Hybrid (RRF)** runs the vector query *and* a Cypher pass for
-   most-cited papers in the same `Category` as the vector hits, then
-   fuses both lists with reciprocal rank. Surfaces papers that are
-   authoritative in the topic but whose abstract isn't a great vector
-   match.
+**1. Vector.** Pure `db.index.vector.queryNodes` against the bge-small
+embeddings. Baseline; same shape as the `rag-chroma` chat app. Use this
+when the query is direct and well-phrased ("explain RAG").
+
+**2. Vector + Expand.** Run the vector query, then for each seed paper
+hop one edge across `CITES`, `AUTHORED_BY`, `IN_CATEGORY` and add the
+neighbor titles to the LLM context as a `GRAPH RELATIONS` block (capped
+at `EXPAND_NEIGHBOR_LIMIT = 8` per seed in `chat_app.py`). Wins when the
+answer requires connecting papers whose abstracts don't overlap but
+which sit one citation hop apart. *Question shape:* "How does X extend
+Y?", "What does X cite?", "Compare A and B."
+
+**3. Hybrid (Reciprocal Rank Fusion, RRF).** Two queries run side by
+side:
+- Vector top-k (same as mode 1).
+- A Cypher pass for the most-cited papers `IN_CATEGORY` of the vector
+  hits, excluding the hits themselves. This is the graph-only signal: a
+  paper a pure-graph retriever would surface because it's authoritative
+  in the topic, even if its abstract isn't a great match.
+
+The two lists are fused with reciprocal rank fusion: for each list, a
+paper's contribution is `1 / (RRF_K + rank)` (with `RRF_K = 60`), and
+the per-paper scores are summed across both lists. The trick is that
+ranks are commensurable across lists even when the raw scores aren't
+(cosine similarity vs citation count), so no normalization is needed.
+Papers in both lists win the most weight; lone hits stay in but ranked
+lower. Wins when a foundational paper isn't a tight semantic match for
+the query but everyone in the topic builds on it. *Question shape:*
+"What are the influential papers in...?", "What's the canonical work
+on...?"
+
+### When to use which
+
+- **Mode 1 (Vector)** for direct, well-phrased questions about a single
+  paper or concept.
+- **Mode 2 (Expand)** for relationship questions, where the answer lives
+  in citation structure rather than abstract similarity.
+- **Mode 3 (Hybrid)** when authority/centrality in the topic matters more
+  than abstract phrasing.
 
 Each retrieved paper card links to the actual paper (arXiv when
 available, Semantic Scholar otherwise), so you can click through during
@@ -262,18 +315,50 @@ the demo to show the source.
 
 ### Demo prompts
 
-Pick one and flip the mode radio to show what changes. Exact behavior
-depends on what S2 returns for your query, but on the default RAG corpus
-these consistently land:
+Question shape determines which mode shines. Pick one per mode and flip
+the radio to show what changes; the right-hand panel makes the
+difference visible. Exact behavior depends on which papers your S2
+query returned, but the patterns hold.
 
-- *"What's the relationship between RAG and Self-RAG?"*: mode 2 surfaces
-  the explicit `CITES` edge between them when both papers appear in the
-  result set.
-- *"Compare dense passage retrieval and BM25."*: mode 1 finds DPR via
-  abstracts; mode 2 pulls in citation neighbors that contrast the two.
-- *"Who are the most influential authors in retrieval-augmented
-  generation?"*: mode 3 promotes highly-cited papers via the graph that
-  pure vector misses.
+**Mode 1 (Vector): definition or single-paper questions.** These live
+in one abstract, so the graph block adds little.
+
+- *"What is RAG?"*
+- *"Explain Self-RAG."*
+- *"How does dense passage retrieval differ from BM25?"*
+
+**Mode 2 (Vector + Expand): relationship and lineage questions.** Force
+the model to walk citation edges. Visible thinking should reference
+edges like `[#3] → CITES [#1]`.
+
+- *"Trace the citation lineage between the retrieved papers."*
+- *"How does Self-RAG extend RAG?"*
+- *"For each retrieved paper, what does it cite that's also retrieved?"*
+- *"Which papers build directly on the original RAG paper?"*
+
+**Mode 3 (Hybrid RRF): authority and canonicality questions.** The
+category-cohort lane surfaces foundational papers whose abstracts
+aren't tight semantic matches.
+
+- *"What are the most influential papers on retrieval-augmented
+  generation in this corpus?"*
+- *"Which papers should I read first to understand modern RAG?"*
+- *"What is the canonical work on dense retrieval?"*
+
+**Mode 2 vs Mode 3 in one sentence.** Mode 2 walks edges *from* the
+papers vector retrieved, so it answers "what's connected to my hits?".
+Mode 3 fuses a separate graph-only ranking *alongside* the vector hits,
+so it answers "what's important in this neighborhood that vector
+missed?". Same query, different answer shape: try *"Influential papers
+on RAG"* in both modes and compare which papers each surfaces.
+
+**Why a "What is X?" query won't show graph reasoning.** Mode 2 on a
+definition question still includes the graph block, but the model
+correctly ignores it because the abstract already answers the question.
+Forcing it to cite edges anyway would just add noise. Graph context
+earns its keep on relational questions. If you want to see graph
+reasoning live, ask something where the answer requires walking from
+one paper to another.
 
 ## 5. Snapshot / restore (optional)
 

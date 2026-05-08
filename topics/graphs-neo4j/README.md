@@ -8,6 +8,94 @@ Some things to look up to get started:
 - Neo4j: https://neo4j.com/
 - Neo4j GraphRAG: https://neo4j.com/labs/genai-ecosystem/graphrag/
 
+**Working demo in this repo:** [`graphrag-neo4j-flyte/`](./graphrag-neo4j-flyte/)
+deploys Neo4j as a Flyte 2 app, loads ~400 papers from Semantic Scholar
+into a graph (papers, authors, categories, citations), and serves a
+Gradio chat with three retrieval modes (vector, vector+expand, hybrid
+Reciprocal Rank Fusion / RRF) wired to Gemma 4 over vLLM.
+
+## Why graphs for RAG and agents
+
+Vector retrieval is great at one thing: finding text whose embedding is
+close to the query. That covers a lot of "what does this document say?"
+questions, but it falls short whenever the answer lives in
+*relationships* rather than topic similarity.
+
+Three places pure vector misses:
+
+1. **Intellectual lineage.** Two papers can be tightly related (one
+   cites the other, one extends the other) without their abstracts
+   sharing keywords. RAG and Self-RAG are a textbook case. Vector misses
+   the link; an explicit `CITES` edge captures it.
+2. **Authority.** The most-cited paper in a topic is rarely the tightest
+   abstract match for a casual query. Graphs let you ask "what's central
+   in this neighborhood?" instead of "what's similar to this string?"
+3. **Compositional structure.** Org charts, dependency trees, supply
+   chains, conversations, codebases: the *shape* of the data is the
+   answer. A vector store flattens it; a graph keeps it.
+
+The value lives in the edge types. A useful modeling exercise: list the
+three or four edge types you care about (`CITES`, `REPORTS_TO`,
+`DEPENDS_ON`, `FOLLOWED_BY`, …) and ask which questions become trivial
+Cypher and which remain hard. If your domain has none of those, a graph
+probably isn't the right tool.
+
+## Common GraphRAG patterns
+
+Worth holding in your head when you decide how much graph to bring:
+
+- **Vector + 1-hop expand.** Run a vector query, then walk one edge
+  from each hit and add the neighbors to the LLM context. Cheap,
+  predictable, surfaces direct dependencies (citations, prerequisites,
+  "see also"s). The lightest pattern to add to an existing vector RAG.
+- **Hybrid retrieval (Reciprocal Rank Fusion, RRF).** Run vector AND a
+  graph-only query (e.g. "most-cited papers in the same category"),
+  then fuse with reciprocal-rank fusion: for each list, score a doc as
+  `1 / (K + rank)`, sum across lists. Top items in either list win,
+  shared items win bigger, and raw scores on different scales (cosine
+  vs citation count) don't have to be normalized. Surfaces
+  authoritative-but-not-keyword-matching results. Good when authority
+  matters as much as topic.
+- **Text-to-Cypher.** The LLM writes the Cypher query itself from the
+  user's question, given the schema. Powerful for structured questions
+  ("how many engineers report to Alice?") but brittle: schema drift,
+  query failures, hallucinated edge types. Pair with a fallback mode.
+- **Community-summary GraphRAG (Microsoft style).** Build the graph
+  from documents using an LLM, run community detection, summarize each
+  community, and answer global questions ("what are the main themes?")
+  off the summaries. Heavy lift, big payoff for narrative corpora.
+
+## Graphs for agent context
+
+Agents are orchestration over state, and most of the state you care
+about is relational:
+
+- **Memory of past actions.** "Which tools have I called for this user,
+  with what arguments, in what order?" One node per action, edges back
+  to the prompts and outputs that fed it. Beats a flat conversation log
+  when the agent has to reason about its own history.
+- **Knowledge over structured data.** Org charts, codebases, products,
+  customer accounts. A vector store can find the right sentence but
+  can't answer "everyone two hops from this person" or "all services
+  depending on this library."
+- **Planning over a state graph.** Represent goals, subgoals, and
+  prerequisites as a DAG. The agent walks it forward, pruning branches
+  as new evidence comes in. Easier to debug than freeform prompt chains.
+
+The pragmatic split: vector store for "what was said?", graph for "how
+does it connect?". Most production GraphRAG systems use both.
+
+## When not to reach for a graph
+
+- **The data isn't relational.** Plain text corpora with no structured
+  relationships gain little.
+- **You can't name the edge types yet.** If you can't enumerate three
+  edge types your users will ask about, modeling will drift and queries
+  will be ad hoc.
+- **Latency budget is tight.** Graph traversal in Neo4j is fast but
+  never as fast as a single ANN lookup. Mixing a multi-hop traversal
+  into the hot path of a streaming chat reply costs visible tokens of
+  latency.
 
 ​​​Resources
 
