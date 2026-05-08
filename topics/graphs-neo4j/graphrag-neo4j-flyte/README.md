@@ -327,30 +327,39 @@ in one abstract, so the graph block adds little.
 - *"Explain Self-RAG."*
 - *"How does dense passage retrieval differ from BM25?"*
 
-**Mode 2 (Vector + Expand): relationship and lineage questions.** Force
-the model to walk citation edges. Visible thinking should reference
-edges like `[#3] → CITES [#1]`.
+**Mode 2 (Vector + Expand): exploring around the hits.** Mode 2 walks
+1-hop edges from the vector hits and dumps neighbor titles into the
+GRAPH RELATIONS block, but does *not* promote neighbors to retrieved
+entries. The model can mention neighbors as related work, but can't
+reason about them in depth (no abstracts).
 
-- *"Trace the citation lineage between the retrieved papers."*
-- *"How does Self-RAG extend RAG?"*
-- *"For each retrieved paper, what does it cite that's also retrieved?"*
-- *"Which papers build directly on the original RAG paper?"*
+- *"For each retrieved paper, what does it cite and what cites it?"*
+- *"Which authors appear across multiple retrieved papers?"*
+- *"What graph-related papers are connected to the retrieved set?"*
 
-**Mode 3 (Hybrid RRF): authority and canonicality questions.** The
-category-cohort lane surfaces foundational papers whose abstracts
-aren't tight semantic matches.
+**Mode 3 (Hybrid RRF): authority and lineage questions.** The
+category-cohort lane brings foundational papers (most-cited in the
+corpus) in as full retrieved entries with abstracts. Because recent
+papers cite those foundational ones, lineage traces actually work in
+this mode: both endpoints of a `CITES` edge typically end up retrieved,
+so Gemma can walk the chain.
 
+- *"Trace the citation lineage between the retrieved papers. What
+  builds on what?"* (canonical lineage demo): typically pulls the
+  original RAG paper in as `via graph (cited 100+x)` and Gemma traces
+  `[#1] (Chronicles) → CITES → [#2] (RAG)` in its visible thinking.
 - *"What are the most influential papers on retrieval-augmented
   generation in this corpus?"*
 - *"Which papers should I read first to understand modern RAG?"*
-- *"What is the canonical work on dense retrieval?"*
 
 **Mode 2 vs Mode 3 in one sentence.** Mode 2 walks edges *from* the
-papers vector retrieved, so it answers "what's connected to my hits?".
-Mode 3 fuses a separate graph-only ranking *alongside* the vector hits,
-so it answers "what's important in this neighborhood that vector
-missed?". Same query, different answer shape: try *"Influential papers
-on RAG"* in both modes and compare which papers each surfaces.
+vector hits but doesn't bring those neighbors into the retrieved set,
+so the model sees neighbor titles only. Mode 3 fuses a graph-only
+ranking *alongside* the vector hits, so foundational papers become
+first-class retrieved entries with abstracts and edges. That's why
+Mode 3 wins both authority demos *and* lineage demos: both endpoints of
+a citation tend to be retrieved, so Gemma can actually trace the chain
+instead of staring at unfamiliar titles.
 
 **Why a "What is X?" query won't show graph reasoning.** Mode 2 on a
 definition question still includes the graph block, but the model

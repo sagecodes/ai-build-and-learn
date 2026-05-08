@@ -40,30 +40,101 @@ three or four edge types you care about (`CITES`, `REPORTS_TO`,
 Cypher and which remain hard. If your domain has none of those, a graph
 probably isn't the right tool.
 
+## How a minimal Graph RAG works
+
+The simplest GraphRAG is just vector RAG with one extra hop. Side by
+side:
+
+```
+Vector RAG (baseline)
+─────────────────────
+
+  query ─▶ embed ─▶ ANN ─▶ top-k chunks ─▶ LLM ─▶ answer
+
+
+Graph RAG (vector + 1-hop expand)
+─────────────────────────────────
+
+  query ─▶ embed ─▶ ANN ─▶ top-k chunks ──┐
+                                          │
+                  ┌───────────────────────┘
+                  ▼
+          1-hop walk across
+          CITES, AUTHORED_BY,
+          IN_CATEGORY
+                  │
+                  ▼
+          chunks + neighbor                  answer with
+          titles + edges ─▶ LLM ─▶          lineage cited
+```
+
+The graph half costs one extra Cypher query and a few hundred extra
+tokens of context. The payoff is that the LLM now sees the *structure*
+around the retrieved chunks, not just the chunks themselves.
+
 ## Common GraphRAG patterns
 
 Worth holding in your head when you decide how much graph to bring:
 
-- **Vector + 1-hop expand.** Run a vector query, then walk one edge
-  from each hit and add the neighbors to the LLM context. Cheap,
-  predictable, surfaces direct dependencies (citations, prerequisites,
-  "see also"s). The lightest pattern to add to an existing vector RAG.
-- **Hybrid retrieval (Reciprocal Rank Fusion, RRF).** Run vector AND a
-  graph-only query (e.g. "most-cited papers in the same category"),
-  then fuse with reciprocal-rank fusion: for each list, score a doc as
-  `1 / (K + rank)`, sum across lists. Top items in either list win,
-  shared items win bigger, and raw scores on different scales (cosine
-  vs citation count) don't have to be normalized. Surfaces
-  authoritative-but-not-keyword-matching results. Good when authority
-  matters as much as topic.
-- **Text-to-Cypher.** The LLM writes the Cypher query itself from the
-  user's question, given the schema. Powerful for structured questions
-  ("how many engineers report to Alice?") but brittle: schema drift,
-  query failures, hallucinated edge types. Pair with a fallback mode.
-- **Community-summary GraphRAG (Microsoft style).** Build the graph
-  from documents using an LLM, run community detection, summarize each
-  community, and answer global questions ("what are the main themes?")
-  off the summaries. Heavy lift, big payoff for narrative corpora.
+**Vector + 1-hop expand.**
+
+```
+  query ─▶ vector top-k ─▶ 1-hop walk ─▶ chunks + edges ─▶ LLM
+```
+
+Run a vector query, then walk one edge from each hit and add the
+neighbors to the LLM context. Cheap, predictable, surfaces direct
+dependencies (citations, prerequisites, "see also"s). The lightest
+pattern to add to an existing vector RAG.
+
+**Hybrid retrieval (Reciprocal Rank Fusion, RRF).**
+
+```
+            ┌─▶ vector top-k     ─┐
+  query ────┤                     ├─▶ RRF fuse ─▶ LLM
+            └─▶ graph cohort      ─┘
+                (e.g. most-cited
+                 in category)
+```
+
+Run vector AND a graph-only query (e.g. "most-cited papers in the same
+category"), then fuse with reciprocal-rank fusion: for each list, score
+a doc as `1 / (K + rank)`, sum across lists. Top items in either list
+win, shared items win bigger, and raw scores on different scales
+(cosine vs citation count) don't have to be normalized. Surfaces
+authoritative-but-not-keyword-matching results. Good when authority
+matters as much as topic.
+
+**Text-to-Cypher.**
+
+```
+  query ─▶ LLM (with schema) ─▶ Cypher ─▶ Neo4j ─▶ rows ─▶ LLM ─▶ answer
+```
+
+The LLM writes the Cypher query itself from the user's question, given
+the schema. Powerful for structured questions ("how many engineers
+report to Alice?") but brittle: schema drift, query failures,
+hallucinated edge types. Pair with a fallback mode.
+
+**Community-summary GraphRAG (Microsoft style).**
+
+```
+  docs ─▶ LLM extract ─▶ knowledge graph
+                              │
+                              ▼  Leiden / community detection
+                         communities
+                              │
+                              ▼  LLM summary per community
+                         summaries
+                              │
+   query ──────────────────▶  ▼
+                              LLM ─▶ answer
+```
+
+Build the graph from documents using an LLM, run community detection,
+summarize each community, and answer global questions ("what are the
+main themes?") off the summaries. Heavy lift, big payoff for narrative
+corpora.
 
 ## Graphs for agent context
 
@@ -84,6 +155,52 @@ about is relational:
 
 The pragmatic split: vector store for "what was said?", graph for "how
 does it connect?". Most production GraphRAG systems use both.
+
+## Use cases: where graphs shine in practice
+
+A graph is the right tool when you can name the relationships up front.
+Concrete domains where this pays off, with the kinds of nodes and edges
+you'd typically model:
+
+- **Citation networks** (academic papers, legal precedents). Nodes:
+  papers, authors. Edges: `CITES`, `AUTHORED_BY`. Surfaces lineage and
+  authority. *(This is what the demo in this repo builds.)*
+- **Code intelligence.** Nodes: files, functions, classes. Edges:
+  `CALLS`, `IMPORTS`, `INHERITS`. Powers "what breaks if I change
+  this?" agents and impact-analysis tools.
+- **Org charts and access control.** Nodes: people, roles, teams.
+  Edges: `REPORTS_TO`, `MEMBER_OF`, `OWNS`. Answers "everyone who can
+  approve this" without parsing prose policies.
+- **Product knowledge graphs.** Nodes: products, features, customers,
+  tickets. Edges: `HAS_FEATURE`, `BOUGHT`, `RAN_INTO`. Customer-support
+  agents that route by topology, not just keyword match.
+- **Drug discovery and biomedical research.** Nodes: compounds,
+  proteins, diseases. Edges: `BINDS_TO`, `TREATS`, `INTERACTS_WITH`.
+  Multi-hop reasoning ("compounds that bind X via Y are linked to
+  disease Z") that flat embeddings can't do.
+- **Supply chain and logistics.** Nodes: parts, suppliers, factories.
+  Edges: `SUPPLIED_BY`, `ASSEMBLED_AT`, `SHIPS_TO`. "What breaks if
+  this supplier goes down for two weeks?"
+- **Recommendation systems.** Nodes: users, items, sessions. Edges:
+  `VIEWED`, `PURCHASED`, `FOLLOWED_BY`. Heterogeneous graphs beat
+  co-occurrence matrices in sparse domains.
+- **Healthcare records.** Nodes: patients, conditions, treatments.
+  Edges: `DIAGNOSED_WITH`, `TREATED_BY`, `RESPONDED_TO`. Differential
+  diagnosis, outcome paths, and cohort lookup.
+- **Security and fraud detection.** Nodes: accounts, transactions,
+  devices. Edges: `TRANSFERRED_TO`, `LOGGED_IN_FROM`, `SHARED_WITH`.
+  Multi-hop fraud rings invisible to flat tables.
+- **Conversation memory for agents.** Nodes: turns, tool calls,
+  observations. Edges: `PROMPTED_BY`, `RESULTED_IN`, `REFERENCES`.
+  Lets the agent answer "when did I last try X for this user?"
+
+What these have in common:
+
+- You can enumerate three or more edge types up front.
+- The interesting questions are multi-hop: "two steps from X",
+  "everything connected to Y through Z", "all paths from A to B".
+- A vector embedding can find the topic but not the structure. The
+  *shape* of the data is part of the answer.
 
 ## When not to reach for a graph
 
