@@ -2,9 +2,9 @@
 
 Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new topic and learn by building together.
 
-> **Up next: Vector Stores** (2026-05-01)
-> Embeddings and vector stores: how semantic search actually works under the hood and how to build RAG pipelines on top.
-> [RSVP](https://luma.com/00mp6be2) | [Join the Slack](https://slack.flyte.org/)
+> **Up next: Karpathy's LLM Wiki** (2026-05-15)
+> Andrej Karpathy's LLM Wiki concept: build a wiki-style knowledge base specifically structured for LLM consumption and retrieval.
+> [RSVP](https://luma.com/3y91h5a5) | [Join the Slack](https://slack.flyte.org/)
 
 ## Upcoming:
 
@@ -18,16 +18,6 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 <tbody>
 <tr><td>
       <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Vector Stores</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-01</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/vectorstore">code</a> • <a href="https://luma.com/00mp6be2">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Embeddings and vector stores: how semantic search actually works under the hood and how to build RAG pipelines on top.
-</div></td></tr>
-<tr><td>
-      <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Graph Data with Neo4j</strong></div>
         <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-08</div>
         <div style="font-size: 13px; color: #666;">
@@ -35,6 +25,36 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
         </div>
       </div>
     </td><td><div style="padding: 8px 0; line-height: 1.5;">Graph databases with Neo4j for GraphRAG and agent context. When to reach for knowledge graphs, and how to combine graph traversal with semantic search.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Karpathy's LLM Wiki</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-15</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/llm-wiki">code</a> • <a href="https://luma.com/3y91h5a5">register</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Andrej Karpathy's LLM Wiki concept: build a wiki-style knowledge base specifically structured for LLM consumption and retrieval.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Cognee: Memory Layer for Agents</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-22</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/cognee">code</a> • <a href="https://luma.com/1kd5i9x8">register</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Cognee is an open-source memory layer for AI agents. Persistent, queryable memory that survives across sessions and tools.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Ragas: Evals for RAG &amp; Memory</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-29</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/ragas">code</a> • <a href="https://luma.com/zs7v5rqj">register</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Ragas evaluates RAG and memory systems with structured metrics: retrieval quality, faithfulness, answer relevance, and more.
 </div></td></tr>
 </tbody>
 </table>
@@ -49,6 +69,16 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Vector Stores</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-01</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/vectorstore">code</a> • <a href="https://www.youtube.com/watch?v=y58jmsyx6Kw">watch</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Embeddings and vector stores: how semantic search actually works under the hood and how to build RAG pipelines on top.
+</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Gemma 4</strong></div>

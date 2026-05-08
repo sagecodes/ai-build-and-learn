@@ -1,0 +1,10 @@
+# Bare wrapper around the official Neo4j 5 community image.
+#
+# Why a Dockerfile at all (instead of `flyte.Image.from_base("neo4j:5.26-community")`):
+# the installed Flyte 2.2.3 image builder appends a `USER flyte` + `WORKDIR /home/flyte`
+# footer to every image it builds. The neo4j base image has no `flyte` user, so
+# containerd fails container creation with "no users found". `flyte.Image.from_dockerfile()`
+# skips the footer entirely (just runs `docker buildx build -f <file>`), so this file
+# is enough to give us a clean neo4j image in the local registry.
+
+FROM neo4j:5.26-community
