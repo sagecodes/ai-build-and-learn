@@ -1,7 +1,8 @@
 """
-Gemma 4 voice assistant: mic → Whisper STT → Gemma 4 → Edge TTS → audio out.
+Gemma 4 voice assistant: mic → STT (Whisper or Gemma 4 native) → Gemma 4 → Edge TTS.
 
-- STT: faster-whisper (local, CTranslate2). Downloads the model on first run.
+- STT: choose at runtime — faster-whisper (local, CTranslate2) or Gemma 4's
+  native audio encoder (E2B/E4B edge variants, via Ollama).
 - LLM: Gemma 4 via Ollama.
 - TTS: Microsoft Edge TTS (edge-tts). Online and free, no API key.
 
@@ -9,13 +10,15 @@ Swap TTS for a fully-local one (kokoro, piper) if you want — see README.
 
 Run (after `uv venv` + `uv pip install -r requirements.txt` + activating):
     ollama serve &
-    ollama pull gemma4:31b
+    ollama pull gemma4:31b      # reasoning
+    ollama pull gemma4:e4b      # optional, for native-audio STT
     python app.py
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import tempfile
 from pathlib import Path
@@ -29,6 +32,27 @@ DEFAULT_MODEL = os.environ.get("GEMMA_MODEL", "gemma4:31b")
 WHISPER_SIZE = os.environ.get("WHISPER_SIZE", "base.en")
 TTS_VOICE = os.environ.get("TTS_VOICE", "en-US-AriaNeural")
 
+WHISPER_PREFIX = "whisper:"
+GEMMA_AUDIO_PREFIX = "gemma4:"
+
+# STT models to expose in the UI. Whisper entries are faster-whisper sizes;
+# gemma4: entries are Ollama model tags with a native audio encoder (E2B/E4B).
+STT_CHOICES = [
+    f"{WHISPER_PREFIX}base.en",
+    f"{WHISPER_PREFIX}small.en",
+    f"{WHISPER_PREFIX}medium.en",
+    "gemma4:e2b",
+    "gemma4:e4b",
+]
+DEFAULT_STT = f"{WHISPER_PREFIX}{WHISPER_SIZE}"
+if DEFAULT_STT not in STT_CHOICES:
+    STT_CHOICES.insert(0, DEFAULT_STT)
+
+GEMMA_STT_PROMPT = (
+    "Transcribe the spoken audio verbatim. Output only the transcription text — "
+    "no quotes, no commentary, no labels."
+)
+
 # Rough chars-per-token heuristic for the thinking-budget cutoff.
 CHARS_PER_TOKEN = 3.5
 
@@ -38,18 +62,17 @@ DEFAULT_ROLE = (
     "no lists, no code blocks, natural speech."
 )
 
-# Load whisper once. int8 on CPU is fast enough for demo-length utterances;
-# if you have a CUDA build of ctranslate2 set WHISPER_DEVICE=cuda.
-_whisper: WhisperModel | None = None
+# Cache whisper models by size. int8 on CPU is fast enough for demo-length
+# utterances; if you have a CUDA build of ctranslate2 set WHISPER_DEVICE=cuda.
+_whisper_cache: dict[str, WhisperModel] = {}
 
 
-def get_whisper() -> WhisperModel:
-    global _whisper
-    if _whisper is None:
+def get_whisper(size: str) -> WhisperModel:
+    if size not in _whisper_cache:
         device = os.environ.get("WHISPER_DEVICE", "cpu")
         compute = "int8" if device == "cpu" else "float16"
-        _whisper = WhisperModel(WHISPER_SIZE, device=device, compute_type=compute)
-    return _whisper
+        _whisper_cache[size] = WhisperModel(size, device=device, compute_type=compute)
+    return _whisper_cache[size]
 
 
 def list_models() -> list[str]:
@@ -61,9 +84,34 @@ def list_models() -> list[str]:
         return [DEFAULT_MODEL]
 
 
-def transcribe(audio_path: str) -> str:
-    segments, _info = get_whisper().transcribe(audio_path, beam_size=1)
+def transcribe_whisper(audio_path: str, size: str) -> str:
+    segments, _info = get_whisper(size).transcribe(audio_path, beam_size=1)
     return "".join(seg.text for seg in segments).strip()
+
+
+def transcribe_gemma(audio_path: str, model: str) -> str:
+    """Transcribe using Gemma 4's native audio encoder via Ollama.
+    Ollama currently accepts audio bytes through the `images` field — same
+    multimodal channel, different encoder selected by the model's modality.
+    """
+    with open(audio_path, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode()
+    resp = ollama.chat(
+        model=model,
+        messages=[{
+            "role": "user",
+            "content": GEMMA_STT_PROMPT,
+            "images": [audio_b64],
+        }],
+        options={"temperature": 0.0},
+    )
+    return resp["message"]["content"].strip()
+
+
+def transcribe(audio_path: str, stt_choice: str) -> str:
+    if stt_choice.startswith(WHISPER_PREFIX):
+        return transcribe_whisper(audio_path, stt_choice[len(WHISPER_PREFIX):])
+    return transcribe_gemma(audio_path, stt_choice)
 
 
 async def _tts_to_file(text: str, voice: str, out_path: str) -> None:
@@ -79,14 +127,15 @@ def synthesize(text: str, voice: str) -> str:
 
 
 def converse(audio_path: str | None, history: list, model: str, voice: str,
-             role: str, think_budget: int):
+             role: str, think_budget: int, stt_choice: str):
     """One round-trip: transcribe, stream LLM (with optional thinking budget),
     then synthesize. Yields (history, audio, transcript, thinking) tuples."""
     if not audio_path:
         yield history, None, "No audio received.", ""
         return
 
-    user_text = transcribe(audio_path)
+    yield history, None, f"**You**: _transcribing with {stt_choice}..._", ""
+    user_text = transcribe(audio_path, stt_choice)
     if not user_text:
         yield history, None, "Didn't catch that — try again.", ""
         return
@@ -170,10 +219,14 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Gemma 4 Voice") as demo:
         gr.Markdown(
             "# Gemma 4 Voice Assistant\n"
-            "Speak → Whisper STT → Gemma 4 → Edge TTS → hear the reply."
+            "Speak → STT (Whisper or Gemma 4 native) → Gemma 4 → Edge TTS → hear the reply."
         )
         with gr.Row():
             model = gr.Dropdown(models, value=default, label="LLM")
+            stt = gr.Dropdown(
+                STT_CHOICES, value=DEFAULT_STT, label="Speech-to-text",
+                info="whisper:* = faster-whisper. gemma4:e2b/e4b = native audio encoder.",
+            )
             voice = gr.Dropdown(voices, value=TTS_VOICE, label="TTS voice")
             think_budget = gr.Slider(
                 0, 2000, value=200, step=50,
@@ -203,7 +256,7 @@ def build_ui() -> gr.Blocks:
 
         send.click(
             converse,
-            inputs=[mic, history_state, model, voice, role, think_budget],
+            inputs=[mic, history_state, model, voice, role, think_budget, stt],
             outputs=[history_state, reply_audio, transcript, thinking],
         )
         clear.click(clear_history, outputs=[history_state, reply_audio, transcript, thinking])
