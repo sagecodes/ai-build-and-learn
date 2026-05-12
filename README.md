@@ -18,16 +18,6 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 <tbody>
 <tr><td>
       <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Graph Data with Neo4j</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-08</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/graphs-neo4j">code</a> • <a href="https://luma.com/715oy297">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Graph databases with Neo4j for GraphRAG and agent context. When to reach for knowledge graphs, and how to combine graph traversal with semantic search.
-</div></td></tr>
-<tr><td>
-      <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Karpathy's LLM Wiki</strong></div>
         <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-15</div>
         <div style="font-size: 13px; color: #666;">
@@ -69,6 +59,16 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Graph Data with Neo4j</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-08</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/graphs-neo4j">code</a> • <a href="https://www.youtube.com/watch?v=z9cA5n5wXS0">watch</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Graph databases with Neo4j for GraphRAG and agent context. When to reach for knowledge graphs, and how to combine graph traversal with semantic search.
+</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Vector Stores</strong></div>
