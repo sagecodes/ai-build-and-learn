@@ -2,23 +2,27 @@
 
 AI Build & Learn series wiki. Read this first on every query and lint pass.
 
-Last updated: —
-Pages: 0 topics · 0 concepts · 0 tools
+Last updated: 2026-05-12
+Pages: 1 topic · 3 concepts · 3 tools
 
 ---
 
 ## Topics
-<!-- one line per week: [Title](topics/<slug>.md) — YYYY-MM-DD -->
+- [MCP with FastMCP](topics/mcp.md) — 2026-03-27
 
 ---
 
 ## Concepts
-<!-- one line per concept: [Title](concepts/<slug>.md) -->
+- [MCP Protocol](concepts/mcp-protocol.md)
+- [Tool Use](concepts/tool-use.md)
+- [Agents](concepts/agents.md)
 
 ---
 
 ## Tools
-<!-- one line per tool: [Title](tools/<slug>.md) -->
+- [FastMCP](tools/fastmcp.md)
+- [Gradio](tools/gradio.md)
+- [Flyte / Union](tools/flyte.md)
 
 ---
 
