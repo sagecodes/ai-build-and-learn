@@ -45,6 +45,23 @@ Key new idea: a system prompt as a first-class artifact. `system_prompt.py` is
 a standalone module imported by `agent.py` — the agent's strategy (which tool
 to use when, quality standards) is explicit and separately maintainable.
 
+### Week 3 — OpenEnv (2026-04-10)
+
+Two agents contrasted directly in the research demo:
+
+**Traditional RL agent** — fixed action space (`tavily_search` only), keyword-
+stuffing strategy, scalar keyword-match reward. High keyword score, low quality.
+Demonstrates what happens when you optimize the wrong metric.
+
+**Claude ReAct agent** — dynamic tool discovery (finds all 3 Tavily tools via
+the environment's tool registry), reason-then-act loop, LLM-as-judge reward.
+Consistently high quality score. Shows Claude acting as an RL agent inside a
+structured environment loop, not just as a chatbot.
+
+New pattern: agents running as parallel competitors in an "agent race" — three
+OpenEnv agents on the same question, first to finish wins. Each gets an isolated
+session in the same Docker container via `SUPPORTS_CONCURRENT_SESSIONS`.
+
 ## Open questions
 
 - What agent frameworks does the series explore beyond the Agents SDK? (LangGraph, custom loops?)

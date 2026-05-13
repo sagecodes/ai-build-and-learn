@@ -33,3 +33,19 @@ each `Send` becomes a separate container running a full ReAct agent.
 The pipeline graph accepts the Flyte task as a parameter, keeping LangGraph
 (logic) and Flyte (compute) cleanly separated. This is the first use of Flyte
 for parallel task fan-out rather than simple app deployment.
+
+### Week 3 — OpenEnv (2026-04-10)
+
+Used for three parallel execution patterns in the research agent demo:
+
+**Side-by-side** (`run_side_by_side`) — two agents (traditional + Claude) run
+as parallel sub-tasks on the same question. Results render when both complete.
+
+**Agent race** (`run_agent_race`) — three Claude agents run in parallel.
+`asyncio.as_completed` determines winner ordering.
+
+**Parallel question fan-out (Tab 3)** — one Flyte task per research question.
+Both agents run per task. Results stream as tasks complete.
+
+New this week: **result caching**. Tasks are cached by `(query, agent_type, max_steps)`. Identical runs return instantly from cache — demonstrated live in
+Tab 3. Each task pod starts its own local OpenEnv HTTP server on a random port.

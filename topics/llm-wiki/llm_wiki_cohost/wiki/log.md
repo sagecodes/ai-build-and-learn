@@ -9,6 +9,11 @@ Pages updated: …
 Notes: …
 -->
 
+## [2026-05-12] ingest | topics/openenv/
+Pages written: topics/openenv.md (new), concepts/reinforcement-learning.md (new), concepts/reward-functions.md (new), tools/openenv.md (new)
+Pages updated: concepts/agents.md, concepts/research-pipelines.md, tools/flyte.md, tools/gradio.md, tools/tavily.md, index.md
+Notes: 4 sub-project READMEs read. 11 files touched. New concepts: RL training paradigms, reward hacking, LLM-as-judge.
+
 ## [2026-05-12] ingest | topics/tavily/
 Pages written: topics/tavily.md (new), concepts/react-loop.md (new), concepts/research-pipelines.md (new), tools/tavily.md (new), tools/langgraph.md (new)
 Pages updated: concepts/agents.md, concepts/tool-use.md, tools/fastmcp.md, tools/flyte.md, tools/gradio.md, index.md

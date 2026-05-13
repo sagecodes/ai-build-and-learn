@@ -31,3 +31,11 @@ call it in a loop. Each researcher gets up to `max_searches` calls.
 
 The core value proposition in both cases: Tavily's structured output means the
 agent spends its token budget on reasoning rather than parsing noisy HTML.
+
+### Week 3 — OpenEnv (2026-04-10)
+
+Used as the action space inside the OpenEnv research environment. The three
+Tavily tools (`tavily_search`, `tavily_extract`, `tavily_crawl`) are registered
+as environment actions that agents discover and call via `step()`. The Claude
+ReAct agent discovers all three dynamically; the traditional agent is hardcoded
+to `tavily_search` only — this restriction is central to the reward hacking demo.

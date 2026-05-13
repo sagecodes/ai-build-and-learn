@@ -38,6 +38,24 @@ The quality gate is the architecturally novel part: it scores the synthesized
 report, identifies gaps, and re-fans out to fill them — the first feedback loop
 inside a pipeline in the series.
 
+### Week 3 — OpenEnv (2026-04-10)
+
+The research agent demo adds two new pipeline patterns on top of week 2's
+plan/fan-out/synthesize/quality-gate shape:
+
+**Parallel question fan-out (Tab 3).** Multiple research questions (one per
+line) each dispatch as a parallel Flyte task — both agents (traditional and
+Claude) run per question. Results stream in as tasks complete. Flyte caches by
+`(query, agent_type, max_steps)` — identical queries return instantly.
+
+**Agent race (Tab 2).** Three OpenEnv agents run the same question in parallel.
+First to finish wins. `asyncio.as_completed` ordering determines the winner.
+Demonstrates competitive parallelism rather than cooperative fan-out.
+
+The key addition vs week 2: Flyte result caching as a first-class feature.
+Running the same pipeline twice returns instantly from cache — shown live as a
+demo feature rather than a behind-the-scenes optimization.
+
 ## Open questions
 
 - How does this pattern scale when sub-topics are highly interdependent?
