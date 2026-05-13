@@ -29,3 +29,19 @@ is logged as `discard` and the loop moves on.
 Unified diffs were tried first (qwen3-coder-next: 0/3 applied). Switching to
 aider-style SEARCH/REPLACE blocks got 3/3 to apply. This is why Ollama-backed
 agents in the series use SEARCH/REPLACE, not diffs.
+
+### Week 5 — Gemma 4 (2026-04-24)
+
+Heaviest Ollama usage in the series — all seven local Gemma 4 demos run via
+Ollama. Model selectable at launch via `GEMMA_MODEL` env var; all demos default
+to `gemma4:31b` except `live-camera/` which defaults to `gemma4:e4b` for speed.
+
+New multimodal usage patterns this week:
+- **Vision**: images passed as base64 bytes in the `images` field
+- **Audio**: E2B/E4B native audio encoder — audio WAV also passed via `images`
+  field (Ollama routes all multimodal bytes the same way regardless of modality)
+- **JSON-schema constraint mode**: `extract/` demo forces structured JSON output
+  via Ollama's format parameter — model cannot produce invalid JSON
+
+`num_ctx` must be set explicitly for long-document use cases — Ollama's default
+of 4096 silently truncates. The `docs/` demo sizes it dynamically per document.

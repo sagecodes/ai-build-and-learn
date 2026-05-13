@@ -3,7 +3,7 @@
 AI Build & Learn series wiki. Read this first on every query and lint pass.
 
 Last updated: 2026-05-12
-Pages: 4 topics · 9 concepts · 7 tools
+Pages: 5 topics · 12 concepts · 8 tools
 
 ---
 
@@ -12,6 +12,7 @@ Pages: 4 topics · 9 concepts · 7 tools
 - [Agentic Search with Tavily](topics/tavily.md) — 2026-04-03
 - [OpenEnv — Environments for RL Training](topics/openenv.md) — 2026-04-10
 - [AutoResearch](topics/autoresearch.md) — 2026-04-17
+- [Gemma 4](topics/gemma4.md) — 2026-04-24
 
 ---
 
@@ -25,6 +26,9 @@ Pages: 4 topics · 9 concepts · 7 tools
 - [Reward Functions](concepts/reward-functions.md)
 - [Autonomous ML Research](concepts/autonomous-ml-research.md)
 - [Prompt Steering](concepts/prompt-steering.md)
+- [Multimodal LLMs](concepts/multimodal-llms.md)
+- [Long Context](concepts/long-context.md)
+- [Structured Output](concepts/structured-output.md)
 
 ---
 
@@ -36,6 +40,7 @@ Pages: 4 topics · 9 concepts · 7 tools
 - [LangGraph](tools/langgraph.md)
 - [OpenEnv](tools/openenv.md)
 - [Ollama](tools/ollama.md)
+- [Vertex AI](tools/vertex-ai.md)
 
 ---
 

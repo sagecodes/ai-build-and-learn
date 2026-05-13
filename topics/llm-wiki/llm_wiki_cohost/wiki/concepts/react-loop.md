@@ -38,6 +38,16 @@ Notable: the two ReAct implementations use different patterns — manual SDK loo
 vs. LangGraph graph — to achieve the same behavior. LangGraph's graph
 representation makes the loop structure explicit and inspectable.
 
+### Week 5 — Gemma 4 (2026-04-24)
+
+Third ReAct implementation in the series — the first using a local open-weight
+model. The `agent/` demo runs the same observe → reason → act loop as weeks 2
+and 3 but with Gemma 4 via Ollama instead of Claude or a LangGraph subgraph.
+
+Confirms the pattern is model-agnostic: the loop structure (send context +
+tools → check for tool call → execute → feed result back → repeat) is
+identical regardless of provider. The model changes; the scaffolding doesn't.
+
 ## Open questions
 
 - What's the practical difference between a manual SDK loop and a LangGraph

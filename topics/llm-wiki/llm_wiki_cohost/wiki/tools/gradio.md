@@ -37,6 +37,21 @@ UI components split into `ui_components.py` (Plotly chart builders, HTML card
 builders) and `styles.css` (CSS classes) — first week with a dedicated UI
 component module separate from `app.py`.
 
+### Week 5 — Gemma 4 (2026-04-24)
+
+Most Gradio-heavy week in the series — 8 separate apps, each on its own port
+(7860-7865, 7867). All follow the same pattern: `python app.py` → Gradio UI
+at localhost. `GRADIO_SHARE=1` enables a public HTTPS tunnel for remote dev
+boxes (required for webcam access, which browsers block on non-HTTPS origins).
+
+Notable UI patterns this week:
+- **Live streaming**: `live-camera/` uses `stream_every` for webcam frame
+  capture; `concurrency_limit=1` drops overlapping frames rather than queueing
+- **Model picker**: `chatbot/` exposes a runtime model selector so variant
+  (e2b/e4b/26b/31b) can be switched without restart
+- **Side-by-side STT**: `voice/` dropdown switches between Whisper and Gemma
+  native audio mid-session for A/B comparison
+
 ### Week 4 — AutoResearch (2026-04-17)
 
 Used as a monitoring dashboard for overnight runs (`dashboard/app.py`). Unlike

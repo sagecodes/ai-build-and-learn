@@ -9,6 +9,11 @@ Pages updated: …
 Notes: …
 -->
 
+## [2026-05-12] ingest | topics/gemma4/
+Pages written: topics/gemma4.md (new), concepts/multimodal-llms.md (new), concepts/long-context.md (new), concepts/structured-output.md (new), tools/vertex-ai.md (new)
+Pages updated: concepts/agents.md, concepts/react-loop.md, tools/ollama.md, tools/gradio.md, tools/flyte.md, index.md
+Notes: 8 sub-project sources read (README.md × 7 + RESEARCH.md × 1). 12 files touched. Biggest week yet. Long-context page seeds the RAG contrast for weeks 6-7.
+
 ## [2026-05-12] ingest | topics/autoresearch/
 Pages written: topics/autoresearch.md (new), concepts/autonomous-ml-research.md (new), concepts/prompt-steering.md (new), tools/ollama.md (new)
 Pages updated: concepts/reinforcement-learning.md, concepts/reward-functions.md, concepts/agents.md, tools/flyte.md, tools/gradio.md, index.md

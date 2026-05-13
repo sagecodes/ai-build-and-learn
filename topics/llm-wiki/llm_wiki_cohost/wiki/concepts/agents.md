@@ -83,6 +83,22 @@ Key insight: same harness, genuinely different research "personalities." The
 model is not just an interchangeable text predictor in this context —
 its training distribution shapes what hypothesis it forms first.
 
+### Week 5 — Gemma 4 (2026-04-24)
+
+Local open-weight agent via Ollama. The `agent/` demo runs a ReAct loop with
+Gemma 4 (31B by default) and five tools: calculator (AST-safe arithmetic),
+current_datetime, web_search (DuckDuckGo), list_files, and read_file (sandbox-
+scoped). Files dropped into `./sandbox/` become accessible to the agent.
+
+Key contrast with prior weeks: the agent runs entirely locally — no Anthropic
+API key, no cloud dependency. Demonstrates that the ReAct pattern is model-
+agnostic; the same loop structure works with Claude, OpenAI, or a local Gemma.
+
+The `gemma4-smart-gallary/` also behaves as an agent: it reasons about each
+image in a folder, decides whether it matches a search query, and returns
+structured results — but without an explicit ReAct loop. Vision + reasoning
+as a single API call rather than a tool-calling loop.
+
 ## Open questions
 
 - What agent frameworks does the series explore beyond the Agents SDK? (LangGraph, custom loops?)

@@ -50,6 +50,22 @@ Both agents run per task. Results stream as tasks complete.
 New this week: **result caching**. Tasks are cached by `(query, agent_type, max_steps)`. Identical runs return instantly from cache — demonstrated live in
 Tab 3. Each task pod starts its own local OpenEnv HTTP server on a random port.
 
+### Week 5 — Gemma 4 (2026-04-24)
+
+Used in `gemma4-smart-gallary/` for parallel vision task orchestration.
+`asyncio.gather()` + `.aio` method fans out one Flyte task per image —
+all visible simultaneously in the Flyte TUI. Two workflows:
+- `describe_workflow`: scan_images → describe_image (parallel) → save_to_db
+- `search_workflow`: load_images → check_image_match (parallel) → collect_results
+
+`flyte.init(local_persistence=True)` — same pattern established in AutoResearch.
+Results return synchronously; no polling needed.
+
+Local-to-Union porting surfaced new constraints: cluster containers can't read
+local file paths (solution: base64-encode image bytes, pass as `str`), Flyte
+doesn't natively support `bytes` task inputs (falls back to PickleFile — use
+`str` instead), and GCP credentials must be Union secrets not local `.env`.
+
 ### Week 4 — AutoResearch (2026-04-17)
 
 Used for per-experiment observability in `flyte_workflow.py`. Each experiment
