@@ -62,6 +62,27 @@ New pattern: agents running as parallel competitors in an "agent race" — three
 OpenEnv agents on the same question, first to finish wins. Each gets an isolated
 session in the same Docker container via `SUPPORTS_CONCURRENT_SESSIONS`.
 
+### Week 4 — AutoResearch (2026-04-17)
+
+Research agents — a new agent type in the series. The agent's action space is
+code edits to a single file; the reward is a measurable metric from running
+that code. Two agents compared directly:
+
+**Claude Sonnet** — first instinct is structural (depth axis). Diagnosed real
+GPU compatibility issues autonomously on a brand-new GB10 platform: Triton
+ptxas version mismatch, Flash Attention 3 kernel absence, MFU bottleneck —
+all diagnosed and worked around without human help across the first 4 iterations,
+before any ML research happened. val_bpb 1.819 → 1.395 in 7 kept changes.
+
+**Gemma 4 31B (via Ollama)** — first instinct is optimizer tuning (LR axis).
+Without a diversity prompt, never touched model depth across 10 iterations.
+With a diversity prompt, found the depth trick on its own as its first change
+and ran 78 iterations to val_bpb 1.239 — best result across all experiments.
+
+Key insight: same harness, genuinely different research "personalities." The
+model is not just an interchangeable text predictor in this context —
+its training distribution shapes what hypothesis it forms first.
+
 ## Open questions
 
 - What agent frameworks does the series explore beyond the Agents SDK? (LangGraph, custom loops?)

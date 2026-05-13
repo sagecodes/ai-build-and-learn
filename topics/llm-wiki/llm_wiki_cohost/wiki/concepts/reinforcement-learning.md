@@ -42,6 +42,24 @@ is faster and more efficient for numeric/spatial problems. LLM-based RL (GRPO/
 RLHF) is better when observations are language and actions require reasoning.
 OpenEnv supports both with the same environment API.
 
+### Week 4 — AutoResearch (2026-04-17)
+
+Autoresearch is RL applied to ML research. The mapping is direct:
+- **State** — current `train.py` + recent `results.tsv`
+- **Action** — one proposed code change
+- **Reward** — `val_bpb_before - val_bpb_after` (positive = improvement)
+- **Policy** — the agent's strategy, shaped by `program.md`
+- **Episode** — one propose → train → evaluate cycle
+
+Key difference from classic RL: the "episode" takes 5 real-world minutes. The
+agent cannot explore millions of states — it must propose good changes based on
+prior results logged to `results.tsv`. The context window is the replay buffer.
+
+The ~21% success rate (1 in 5 changes improves val_bpb) matches the expected
+difficulty of random-walk hill-climbing near a local minimum. Both T4 overnight
+runs reached this rate independently, suggesting it's a property of the problem
+space rather than a particular agent.
+
 ## Open questions
 
 - How does GRPO compare to PPO for LLM fine-tuning in production?

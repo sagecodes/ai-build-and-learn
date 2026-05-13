@@ -39,6 +39,25 @@ step rather than only at episode end. The sign of each component matters —
 small negative rewards for bad moves train avoidance faster than sparse
 end-of-episode penalties.
 
+### Week 4 — AutoResearch (2026-04-17)
+
+**val_bpb as a reward signal.** Validation bits per byte is theoretically
+grounded (Shannon information theory), vocab-size independent (so architectural
+changes are fairly compared), and produces a real scalar from every 5-minute
+run. It is the ideal autoresearch metric: honest, fast, and uncheatable given
+the fixed training harness.
+
+The keep/revert threshold (0.001 improvement required) is an implicit reward
+shaping decision. Too tight: good changes get discarded due to run noise.
+Too loose: regressions accumulate. The T4 results suggest 0.001 is well-
+calibrated — 21% success rate with monotonic overall improvement over 80 runs.
+
+Connection to week 3's LLM-as-judge: both are examples of choosing a reward
+signal that captures the real goal rather than a proxy. val_bpb captures
+"how much did the model learn" in a single number that can't be gamed within
+the fixed harness. LLM-as-judge captures research quality that keyword counts
+cannot.
+
 ## Open questions
 
 - When does LLM-as-judge reward scale to production RL training loops, given

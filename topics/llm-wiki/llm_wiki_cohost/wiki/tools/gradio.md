@@ -36,3 +36,13 @@ Most complex Gradio UI in the series to this point. Three tabs:
 UI components split into `ui_components.py` (Plotly chart builders, HTML card
 builders) and `styles.css` (CSS classes) — first week with a dedicated UI
 component module separate from `app.py`.
+
+### Week 4 — AutoResearch (2026-04-17)
+
+Used as a monitoring dashboard for overnight runs (`dashboard/app.py`). Unlike
+prior weeks where Gradio is the primary UI, here it's a read-only viewer that
+polls Google Firestore every 60 seconds. Shows val_bpb progression chart
+(green=kept, red=reverted), experiment log table, stat row (current val_bpb,
+total experiments, kept count, success rate), and run summary. Run dropdown
+lets you toggle between `agent.py` and `flyte_workflow.py` runs stored in
+the same Firestore database.

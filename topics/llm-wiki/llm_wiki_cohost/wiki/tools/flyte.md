@@ -49,3 +49,17 @@ Both agents run per task. Results stream as tasks complete.
 
 New this week: **result caching**. Tasks are cached by `(query, agent_type, max_steps)`. Identical runs return instantly from cache — demonstrated live in
 Tab 3. Each task pod starts its own local OpenEnv HTTP server on a random port.
+
+### Week 4 — AutoResearch (2026-04-17)
+
+Used for per-experiment observability in `flyte_workflow.py`. Each experiment
+cycle runs as 3 sequential Flyte tasks: `propose_change_task` (Claude API call,
+~5-15s), `run_training_task` (write train.py + 5-min training run, ~350s),
+`evaluate_task` (keep/revert + Firestore log, ~1s). If Claude returns an
+unparseable response, only `propose_change_task` fails — the others are skipped,
+making failures diagnosable by task.
+
+Both modes (`agent.py` and `flyte_workflow.py`) produced equivalent ML results
+(~21% success rate), confirming Flyte's orchestration overhead doesn't affect
+outcomes. Flyte TUI shows a live node per iteration with status, duration, and
+per-experiment HTML reports with Plotly charts.

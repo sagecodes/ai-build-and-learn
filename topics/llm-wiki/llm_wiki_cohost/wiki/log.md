@@ -9,6 +9,11 @@ Pages updated: …
 Notes: …
 -->
 
+## [2026-05-12] ingest | topics/autoresearch/
+Pages written: topics/autoresearch.md (new), concepts/autonomous-ml-research.md (new), concepts/prompt-steering.md (new), tools/ollama.md (new)
+Pages updated: concepts/reinforcement-learning.md, concepts/reward-functions.md, concepts/agents.md, tools/flyte.md, tools/gradio.md, index.md
+Notes: 4 source files read (README + 2 sub-project READMEs + RESULTS.md). 11 files touched. Karpathy entity page born. Prompt-steering concept captures week's deepest insight.
+
 ## [2026-05-12] ingest | topics/openenv/
 Pages written: topics/openenv.md (new), concepts/reinforcement-learning.md (new), concepts/reward-functions.md (new), tools/openenv.md (new)
 Pages updated: concepts/agents.md, concepts/research-pipelines.md, tools/flyte.md, tools/gradio.md, tools/tavily.md, index.md
