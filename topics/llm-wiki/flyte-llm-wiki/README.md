@@ -168,6 +168,16 @@ URL is logged at the end:
 LLM Wiki chat UI deployed: http://llm-wiki-chat-flytesnacks-development.localhost:30081/
 ```
 
+By default the app **seeds itself from the most recent `wiki_pipeline` run** via `RunOutput(task_name="llm-wiki-pipeline.wiki_pipeline", type="directory")`: Flyte mounts the latest output Dir into the pod, the server copies it into `/tmp/llm-wiki/` before launching Gradio. Run the pipeline first (or you'll deploy against an empty resolver).
+
+Pin to a specific historical run with an env var:
+
+```bash
+WIKI_RUN_NAME=<pipeline-run-name> python chat_app.py
+```
+
+Re-running the pipeline doesn't auto-refresh the live UI — redeploy the chat app to pick up a newer run.
+
 Four tabs:
 
 - **📥 Ingest** Paste a URL or a chunk of text; the LLM summarizes it and integrates it into concept pages. Status box shows the three steps (fetch → summarize → integrate).
@@ -198,15 +208,24 @@ Ingest a couple of sources in the chat app first, then try these queries.
 
 ## Known limitations
 
-- **Ephemeral chat app state.** `/tmp/llm-wiki/` is wiped on pod restart and scale-to-zero. The pipeline path doesn't have this problem (rustfs survives `flyte stop devbox`). A future improvement is to mount a `RunOutput(directory)` from a pipeline run into the chat app, the same way `rag-chroma-flyte` does.
+- **Ephemeral chat app state.** `/tmp/llm-wiki/` is wiped on pod restart and scale-to-zero. The pipeline path doesn't have this problem (rustfs survives `flyte stop devbox`). The chat app auto-seeds from the latest `wiki_pipeline` run on startup via `RunOutput`, but in-UI edits made after seeding still don't survive scale-to-zero, and the live UI doesn't auto-refresh when a newer pipeline run completes.
 - **Trafilatura best-effort.** Some sites (paywalled news, heavy SPAs) extract poorly. If `fetch_to_markdown` returns junk, paste the article text directly into the Ingest tab instead.
 - **Gemma 4 26B is the bottleneck on latency.** Each ingest does two LLM calls (~10-15s each on the GB10) and one query does two more. Three seed sources end-to-end takes about 90 seconds. Swap to a smaller / faster model for tight demo cycles.
 - **No caching.** Re-ingesting the same URL re-fetches and re-summarizes every time. Cheap to add (`@env.task(cache="auto")` on a fetcher subtask) but not worth it for the v1 demo.
 
 ## Next ideas
 
-- **Persist the chat app's wiki.** Mount a `flyte.io.Dir` as `RunOutput(directory)` and persist edits on shutdown via SIGTERM handler. Then the chat app survives scale-to-zero.
+- **Persist the chat app's wiki bidirectionally.** Seeding from a `RunOutput(directory)` is in place; the missing half is *writing back*. A SIGTERM handler on the chat container could upload `/tmp/llm-wiki/` as a new `flyte.io.Dir` so in-UI edits survive scale-to-zero.
 - **Schema-guided ingest.** Right now every ingest uses the same prompt. Reading `AGENTS.md` into the prompt at ingest time would let users customize how the LLM structures pages per wiki (research vs personal vs team).
 - **Diff view in the chat UI.** After an ingest, show a side-by-side diff of which pages changed and how, instead of just the touched list.
 - **`qmd` search backend.** As the wiki grows past ~50 pages, swap "give the LLM the whole index" for `qmd`'s hybrid BM25/vector search (CLI or MCP) so the picker stays fast.
 - **Re-ingest detection.** Hash the source URL/text; if the same source comes in twice, prompt the LLM to *update* its existing `raw/` summary rather than overwrite it blindly.
+
+## Future work: a scheduled, source-driven wiki
+
+The current setup is two manual surfaces (pipeline + chat app). A more interesting target is a wiki that maintains itself from the things you already write or save:
+
+1. **Obsidian (or any markdown vault) as a source.** Point `ingest_source` at a local vault path or a synced cloud folder; treat each note as a source the same way URLs are treated today. A periodic scan picks up new and modified notes since the last run.
+2. **Lint-driven gap filling with Tavily.** When `lint_wiki` flags a missing or thin concept page, hand the slug to Tavily web search, fetch the top result, and feed it back through `ingest_source`. The lint pass becomes an active "go learn this" step instead of just a report.
+3. **Schedule it.** Wire `wiki_pipeline` to a Flyte schedule (e.g. nightly). Each run produces a fresh wiki Dir; the chat app's `WIKI_RUN_NAME` parameter gets updated to the latest run via a small redeploy job. Wake up to yesterday's notes already cross-linked into the wiki, with gaps filled overnight.
+4. **Chat app as the only daily-driver surface.** Open the URL, the wiki is current, ingest anything new that comes up during the day. The pipeline becomes the housekeeper rather than the primary interface.

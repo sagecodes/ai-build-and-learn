@@ -26,6 +26,10 @@ import flyte.app
 VLLM_APP_NAME = "gemma4-26b-a4b-it-vllm"
 VLLM_MODEL_ID = "gemma-4-26b-a4b-it"
 
+# Fully-qualified task name used by Flyte to resolve the latest pipeline run.
+# Must match `<TaskEnvironment.name>.<function-name>` from config.py + pipeline.py.
+PIPELINE_TASK = "llm-wiki-pipeline.wiki_pipeline"
+
 
 chat_image = (
     flyte.Image.from_debian_base(
@@ -59,6 +63,19 @@ env = flyte.app.AppEnvironment(
         ),
         flyte.app.Parameter(name="model_id", value=VLLM_MODEL_ID),
         flyte.app.Parameter(name="wiki_root", value="/tmp/llm-wiki"),
+        # Mount the wiki Dir from the most recent wiki_pipeline run. Flyte
+        # downloads it inside the pod and exposes the local path on
+        # $WIKI_SEED_DIR. Override with WIKI_RUN_NAME=<run> python chat_app.py
+        # to pin to a specific run.
+        flyte.app.Parameter(
+            name="wiki_seed_dir",
+            type="directory",
+            value=flyte.app.RunOutput(
+                task_name=PIPELINE_TASK, type="directory"
+            ),
+            download=True,
+            env_var="WIKI_SEED_DIR",
+        ),
     ],
     scaling=flyte.app.Scaling(replicas=(0, 1), scaledown_after=300),
 )
@@ -79,6 +96,7 @@ def chat_server(vllm_url: str, model_id: str, wiki_root: str):
 
 def _run(vllm_url: str, model_id: str, wiki_root: str):
     import logging
+    import os
     import shutil
     import time
     from pathlib import Path
@@ -100,6 +118,17 @@ def _run(vllm_url: str, model_id: str, wiki_root: str):
     )
 
     root = Path(wiki_root)
+    seed = os.environ.get("WIKI_SEED_DIR", "").strip()
+    if seed:
+        seed_path = Path(seed)
+        if seed_path.is_dir():
+            log.info(f"Seeding wiki from mounted pipeline output: {seed_path}")
+            root.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(seed_path, root, dirs_exist_ok=True)
+        else:
+            log.warning(
+                f"WIKI_SEED_DIR={seed_path} is not a directory; starting empty."
+            )
     wiki_lib.init_layout(root)
     wiki_lib.regenerate_index(root)
 
@@ -458,8 +487,22 @@ def _run(vllm_url: str, model_id: str, wiki_root: str):
 
 
 if __name__ == "__main__":
+    import os
     import pathlib
 
     flyte.init_from_config(root_dir=pathlib.Path(__file__).parent)
-    app = flyte.with_servecontext(interactive_mode=True).serve(env)
+
+    deploy_env = env
+    wiki_run = os.environ.get("WIKI_RUN_NAME", "").strip()
+    if wiki_run:
+        print(f"Pinning chat UI to pipeline run: {wiki_run}")
+        deploy_env = env.clone_with(
+            wiki_seed_dir=flyte.app.RunOutput(
+                type="directory", run_name=wiki_run
+            ),
+        )
+    else:
+        print(f"Seeding chat UI from latest run of: {PIPELINE_TASK}")
+
+    app = flyte.with_servecontext(interactive_mode=True).serve(deploy_env)
     print(f"LLM Wiki chat UI deployed: {app.url}")
