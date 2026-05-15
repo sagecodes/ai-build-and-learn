@@ -26,7 +26,7 @@ GEMMA_4_26B_A4B = ModelChoice(
     model_id="gemma-4-26b-a4b-it",
     app_name="gemma4-26b-a4b-it-vllm",
     gpu=1,
-    max_model_len=8192,
+    max_model_len=32768,
 )
 
 GEMMA_4_31B = ModelChoice(
