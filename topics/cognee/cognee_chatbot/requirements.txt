@@ -1,0 +1,15 @@
+# Cognee with pgvector support
+cognee[postgres-binary]>=0.1.0
+
+# Anthropic (answer generation)
+anthropic>=0.40.0
+
+# Orchestration
+flyte>=2.1.2
+union>=0.1.194
+
+# UI
+gradio>=4.44.0
+
+# Config
+python-dotenv>=1.0.0
