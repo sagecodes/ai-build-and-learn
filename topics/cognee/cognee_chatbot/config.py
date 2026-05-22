@@ -80,10 +80,24 @@ def configure_cognee() -> str:
     os.environ["LLM_API_KEY"]        = api_key
     os.environ["VECTOR_DB_PROVIDER"] = "pgvector"
 
+    # Local embeddings via sentence-transformers — no OpenAI key required
+    os.environ["EMBEDDING_PROVIDER"]   = "sentence_transformers"
+    os.environ["EMBEDDING_MODEL"]      = "sentence-transformers/all-MiniLM-L6-v2"
+    os.environ["EMBEDDING_DIMENSIONS"] = "384"
+
+    # Skip the embedding connection test on startup
+    os.environ["COGNEE_SKIP_CONNECTION_TEST"] = "true"
+
     # DB_* vars are already injected by as_env_var in task_env secrets,
     # but we set them explicitly here so local .env also works.
     for key in ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USERNAME", "DB_PASSWORD"):
         os.environ[key] = _secret(key)
+
+    # Single-user mode: no per-dataset DB creation, PGVectorAdapter reuses the
+    # relational engine (which already has SSL via DATABASE_CONNECT_ARGS).
+    os.environ["ENABLE_BACKEND_ACCESS_CONTROL"] = "false"
+    os.environ["DB_PROVIDER"] = "postgres"
+    os.environ["DATABASE_CONNECT_ARGS"] = '{"ssl": "require"}'
 
     return api_key
 
