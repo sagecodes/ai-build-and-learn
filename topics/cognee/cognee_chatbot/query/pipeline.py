@@ -18,8 +18,11 @@ async def query_pipeline(question: str) -> str:
     import cognee
     from cognee.api.v1.search import SearchType
 
+    # CHUNKS returns raw document chunks via vector similarity —
+    # better recall for factual Q&A than GRAPH_COMPLETION (which
+    # returns a single synthesized graph node).
     results = await cognee.search(
-        query_type=SearchType.GRAPH_COMPLETION,
+        query_type=SearchType.CHUNKS,
         query_text=question,
     )
 

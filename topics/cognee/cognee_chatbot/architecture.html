@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cognee Chatbot — Architecture Walkthrough</title>
+<style>
+:root {
+  --bg:       #0a0c10;
+  --surface:  #111418;
+  --card:     #161b22;
+  --border:   #21262d;
+  --border2:  #30363d;
+  --text:     #e6edf3;
+  --muted:    #7d8590;
+  --muted2:   #484f58;
+  --accent:   #388bfd;
+  --hi:       #e3a008;
+  --hi-glow:  rgba(227,160,8,0.22);
+  --hi-text:  #fbbf24;
+  --code-bg:  #0d1117;
+  --code-fg:  #79c0ff;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:24px 20px 40px;}
+
+.header{text-align:center;margin-bottom:20px;}
+.header h1{font-size:1.4em;font-weight:700;letter-spacing:-.02em;}
+.header .badge{display:inline-block;margin-left:10px;background:var(--border2);color:var(--muted);font-size:.68em;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:3px 10px;border-radius:4px;vertical-align:middle;}
+
+.tabs{display:flex;justify-content:center;gap:8px;margin-bottom:18px;}
+.tab{padding:7px 22px;border-radius:6px;border:1px solid var(--border2);background:var(--card);color:var(--muted);font-size:.83em;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:6px;}
+.tab.active{background:var(--hi);color:#000;border-color:var(--hi);}
+.tab:hover:not(.active){background:var(--surface);color:var(--text);}
+
+.diagram-outer{max-width:1140px;margin:0 auto 18px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;}
+.diagram-grid{display:grid;grid-template-columns:152px 600px 152px;gap:0;position:relative;z-index:1;justify-content:space-between;}
+
+#svg-arrows{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:0;}
+.arrow-path{fill:none;stroke:var(--border2);stroke-width:1.5;transition:stroke .35s,stroke-width .35s,opacity .35s;opacity:.45;marker-end:url(#arr-dim);}
+.arrow-path.lit{stroke:var(--hi);stroke-width:2.5;opacity:1;marker-end:url(#arr-lit);}
+
+.col{display:flex;flex-direction:column;gap:12px;justify-content:space-around;padding:10px 0;}
+
+.node{background:var(--card);border:1.5px solid var(--border2);border-radius:9px;padding:13px 14px;transition:border-color .35s,box-shadow .35s,background .35s;}
+.node.active{border-color:var(--hi);box-shadow:0 0 16px var(--hi-glow);background:#19160a;}
+.node-icon{font-size:1.4em;margin-bottom:6px;}
+.node-name{font-weight:700;font-size:.83em;margin-bottom:3px;}
+.node-sub{color:var(--muted);font-size:.72em;line-height:1.4;}
+.node-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-top:8px;}
+
+.cluster{border:1.5px dashed var(--border2);border-radius:10px;padding:14px;transition:border-color .35s;align-self:center;}
+.cluster.active{border-color:var(--accent);}
+.cluster-hdr{font-size:.65em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:6px;}
+.section-label{font-size:.62em;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted2);margin:8px 0 6px 2px;}
+.cluster-div{border-top:1px solid var(--border);margin:10px 0;}
+
+.task{display:flex;align-items:center;gap:9px;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 10px;margin-bottom:8px;transition:border-color .35s,background .35s,box-shadow .35s;}
+.task:last-child{margin-bottom:0;}
+.task.active{border-color:var(--hi);background:#130e00;box-shadow:0 0 10px var(--hi-glow);}
+.task-ico{font-size:1em;flex-shrink:0;}
+.task-body{flex:1;min-width:0;}
+.task-name{font-weight:700;font-size:.78em;}
+.task-detail{color:var(--muted);font-size:.68em;margin-top:2px;line-height:1.3;}
+.tbadge{flex-shrink:0;background:var(--border);color:var(--muted);font-size:.62em;font-weight:700;padding:2px 7px;border-radius:8px;transition:background .35s,color .35s;white-space:nowrap;}
+.task.active .tbadge{background:var(--hi);color:#000;}
+
+.nav-row{display:flex;justify-content:center;align-items:center;gap:12px;max-width:1140px;margin:0 auto 16px;}
+.nav-row .btn{padding:6px 16px;font-size:.78em;}
+.dots{display:flex;gap:6px;align-items:center;}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--border2);cursor:pointer;transition:background .3s,transform .3s;}
+.dot.cur{background:var(--hi);transform:scale(1.4);}
+.dot.past{background:var(--accent);}
+
+.step-panel{max-width:1140px;margin:0 auto 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.step-top{display:flex;align-items:center;gap:10px;padding:14px 18px 12px;border-bottom:1px solid var(--border);}
+.step-num{background:var(--hi);color:#000;font-size:.72em;font-weight:800;padding:3px 11px;border-radius:11px;flex-shrink:0;}
+.step-ttl{font-weight:700;font-size:1em;color:var(--hi-text);}
+.step-body{display:grid;grid-template-columns:1fr 1fr;gap:0;}
+.step-left{padding:14px 18px;border-right:1px solid var(--border);}
+.step-right{padding:14px 18px;background:var(--code-bg);}
+.panel-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-bottom:7px;}
+.step-desc{color:var(--muted);font-size:.83em;line-height:1.65;margin-bottom:14px;white-space:pre-line;}
+.comp-tags{display:flex;flex-wrap:wrap;gap:5px;}
+.comp-tag{background:var(--border);color:var(--text);font-size:.72em;font-weight:600;padding:3px 9px;border-radius:5px;font-family:'SFMono-Regular',Consolas,monospace;}
+.step-code{font-family:'SFMono-Regular',Consolas,monospace;font-size:.75em;color:var(--code-fg);line-height:1.65;white-space:pre;overflow-x:auto;min-height:80px;}
+.step-code .kw{color:#ff7b72;}
+.step-code .fn{color:#d2a8ff;}
+.step-code .str{color:#a5d6ff;}
+.step-code .cm{color:#8b949e;font-style:italic;}
+
+.btn{padding:9px 26px;border-radius:7px;border:none;font-weight:700;font-size:.85em;cursor:pointer;transition:background .2s;}
+.btn-p{background:var(--hi);color:#000;}
+.btn-p:hover:not(:disabled){background:#c88a00;}
+.btn-s{background:var(--card);color:var(--text);border:1px solid var(--border2);}
+.btn-s:hover:not(:disabled){background:var(--border);}
+.btn:disabled{opacity:.28;cursor:not-allowed;}
+.step-ct{color:var(--muted);font-size:.83em;font-weight:600;min-width:56px;text-align:center;}
+.hint{text-align:center;color:var(--muted2);font-size:.72em;margin-top:12px;}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Cognee Chatbot <span class="badge">Architecture Walkthrough</span></h1>
+</div>
+
+<div class="tabs">
+  <button class="tab active" id="tab-ingest" onclick="setFlow('ingest')">↑ Ingest Flow</button>
+  <button class="tab"        id="tab-query"  onclick="setFlow('query')">↻ Query Flow</button>
+</div>
+
+<div class="diagram-outer" id="diagram-outer">
+
+  <svg id="svg-arrows">
+    <defs>
+      <marker id="arr-dim" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+        <path d="M0,0 L7,3.5 L0,7 Z" fill="#30363d"/>
+      </marker>
+      <marker id="arr-lit" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+        <path d="M0,0 L7,3.5 L0,7 Z" fill="#e3a008"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <div class="diagram-grid" id="diagram-grid">
+
+    <!-- Left column -->
+    <div class="col">
+      <div class="node" id="n-user">
+        <div class="node-icon">👤</div>
+        <div class="node-name">User</div>
+        <div class="node-sub">Browser — uploads PDFs or asks questions</div>
+        <div class="node-label">User</div>
+      </div>
+      <div class="node" id="n-gradio">
+        <div class="node-icon">🖥️</div>
+        <div class="node-name">Gradio UI</div>
+        <div class="node-sub">app.py — Ingest / Chat / Graph tabs. Calls flyte.run() to dispatch Union tasks</div>
+        <div class="node-label">Gradio</div>
+      </div>
+    </div>
+
+    <!-- Center: Union Cluster -->
+    <div class="cluster" id="n-union">
+      <div class="cluster-hdr">☁️ Union Cluster</div>
+
+      <div class="section-label ingest-only">Ingest</div>
+      <div class="task ingest-only" id="n-ingest-pipe">
+        <div class="task-ico">🔀</div>
+        <div class="task-body">
+          <div class="task-name">ingest_pipeline</div>
+          <div class="task-detail">Decodes PDFs to temp dir, calls cognee.add() then cognee.cognify()</div>
+        </div>
+        <span class="tbadge">orchestrator</span>
+      </div>
+      <div class="task ingest-only" id="n-add">
+        <div class="task-ico">📄</div>
+        <div class="task-body">
+          <div class="task-name">cognee.add()</div>
+          <div class="task-detail">Registers each PDF path with Cognee's data layer — no manual parse or chunk</div>
+        </div>
+        <span class="tbadge">×15 files</span>
+      </div>
+      <div class="task ingest-only" id="n-cognify">
+        <div class="task-ico">🧠</div>
+        <div class="task-body">
+          <div class="task-name">cognee.cognify()</div>
+          <div class="task-detail">Full graph build: chunk → extract entities (Claude) → embed (fastembed) → write graph (pgvector)</div>
+        </div>
+        <span class="tbadge">auto-pipeline</span>
+      </div>
+
+      <div class="cluster-div query-only"></div>
+      <div class="section-label query-only">Query</div>
+
+      <div class="task query-only" id="n-query-pipe">
+        <div class="task-ico">🔀</div>
+        <div class="task-body">
+          <div class="task-name">query_pipeline</div>
+          <div class="task-detail">Calls cognee.search(GRAPH_COMPLETION) then passes results to Claude</div>
+        </div>
+        <span class="tbadge">orchestrator</span>
+      </div>
+      <div class="task query-only" id="n-search">
+        <div class="task-ico">🔍</div>
+        <div class="task-body">
+          <div class="task-name">cognee.search()</div>
+          <div class="task-detail">GRAPH_COMPLETION — embeds query, traverses knowledge graph, returns ranked results</div>
+        </div>
+        <span class="tbadge">step 1/2</span>
+      </div>
+      <div class="task query-only" id="n-generate">
+        <div class="task-ico">✍️</div>
+        <div class="task-body">
+          <div class="task-name">generate_answer</div>
+          <div class="task-detail">Assembles context from Cognee results · Claude Sonnet → grounded answer</div>
+        </div>
+        <span class="tbadge">step 2/2</span>
+      </div>
+    </div>
+
+    <!-- Right column -->
+    <div class="col">
+      <div class="node" id="n-claude">
+        <div class="node-icon">🤖</div>
+        <div class="node-name">Claude Sonnet</div>
+        <div class="node-sub">claude-sonnet-4-6 · entity extraction inside cognify() · answer generation</div>
+        <div class="node-label">Claude</div>
+      </div>
+      <div class="node" id="n-fastembed">
+        <div class="node-icon">🧮</div>
+        <div class="node-name">fastembed</div>
+        <div class="node-sub">BAAI/bge-small-en-v1.5 · 384D ONNX embeddings · no API key · baked into task image</div>
+        <div class="node-label">Embedding</div>
+      </div>
+      <div class="node" id="n-pgvector">
+        <div class="node-icon">🐘</div>
+        <div class="node-name">Supabase pgvector</div>
+        <div class="node-sub">Postgres + pgvector · vector storage · relational graph data · SSL · pool capped at 10</div>
+        <div class="node-label">Vector DB</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="nav-row">
+  <button class="btn btn-s" id="btn-prev" onclick="prev()">← Prev</button>
+  <div class="dots" id="dots"></div>
+  <button class="btn btn-p" id="btn-next" onclick="next()">Next →</button>
+  <span class="step-ct" id="s-ct">1 / 8</span>
+</div>
+
+<div class="step-panel" id="step-panel">
+  <div class="step-top">
+    <span class="step-num" id="s-num">Step 1</span>
+    <span class="step-ttl" id="s-ttl"></span>
+  </div>
+  <div class="step-body">
+    <div class="step-left">
+      <div class="panel-label">Description</div>
+      <div class="step-desc" id="s-desc"></div>
+      <div class="panel-label">Active Components</div>
+      <div class="comp-tags" id="s-tags"></div>
+    </div>
+    <div class="step-right">
+      <div class="panel-label">Code</div>
+      <pre class="step-code" id="s-code"></pre>
+    </div>
+  </div>
+</div>
+
+<p class="hint">← → arrow keys to navigate between steps</p>
+
+<script>
+const ARROWS = [
+  { id:'user-gradio',       from:'n-user',       fS:'bottom', to:'n-gradio',    tS:'top'  },
+  { id:'gradio-ingest',     from:'n-gradio',      fS:'right',  to:'n-ingest-pipe', tS:'left' },
+  { id:'gradio-query',      from:'n-gradio',      fS:'right',  to:'n-query-pipe',  tS:'left' },
+  { id:'ingest-add',        from:'n-ingest-pipe', fS:'bottom', to:'n-add',       tS:'top'  },
+  { id:'add-cognify',       from:'n-add',         fS:'bottom', to:'n-cognify',   tS:'top'  },
+  { id:'cognify-claude',    from:'n-cognify',     fS:'right',  to:'n-claude',    tS:'left', fOff:-6, tOff:-12 },
+  { id:'cognify-fastembed', from:'n-cognify',     fS:'right',  to:'n-fastembed', tS:'left', fOff:0,  tOff:0   },
+  { id:'cognify-pgvector',  from:'n-cognify',     fS:'right',  to:'n-pgvector',  tS:'left', fOff:6,  tOff:12  },
+  { id:'query-search',      from:'n-query-pipe',  fS:'bottom', to:'n-search',    tS:'top'  },
+  { id:'search-fastembed',  from:'n-search',      fS:'right',  to:'n-fastembed', tS:'left', fOff:-6, tOff:8   },
+  { id:'search-pgvector',   from:'n-search',      fS:'right',  to:'n-pgvector',  tS:'left', fOff:6,  tOff:16  },
+  { id:'search-generate',   from:'n-search',      fS:'bottom', to:'n-generate',  tS:'top'  },
+  { id:'generate-claude',   from:'n-generate',    fS:'right',  to:'n-claude',    tS:'left', fOff:0,  tOff:16  },
+  { id:'answer-gradio',     from:'n-claude',      fS:'top',    to:'n-gradio',    tS:'top',  bend:'arc' },
+];
+
+const FLOWS = {
+  ingest: [
+    {
+      nodes:['n-user'], arrows:[],
+      ttl:'User uploads PDFs',
+      desc:'In the Ingest tab, the user selects the Everstorm Outfitters policy PDFs — or leaves the upload empty to use the bundled data/ directory. Files are base64-encoded before dispatch so no file handles cross Union task boundaries.',
+      tags:['user','Gradio Ingest tab'],
+      code:`<span class="cm"># app.py — Ingest tab</span>
+file_upload = gr.File(
+    file_types=[<span class="str">".pdf"</span>],
+    file_count=<span class="str">"multiple"</span>,
+    label=<span class="str">"Upload PDFs (optional)"</span>,
+)
+<span class="cm"># If nothing uploaded, data/ directory is used:
+# pdf_paths = sorted(_DATA_DIR.glob("*.pdf"))</span>`,
+    },
+    {
+      nodes:['n-user','n-gradio'], arrows:['user-gradio'],
+      ttl:'Gradio encodes PDFs and dispatches to Union',
+      desc:'app.py reads each uploaded file, base64-encodes the bytes, then calls flyte.run(ingest_pipeline) with the filenames and encoded content. run.wait() blocks until the full pipeline finishes on the Union cluster.',
+      tags:['gradio','flyte.run()','base64'],
+      code:`<span class="cm"># app.py — run_ingest()</span>
+filenames, pdf_bytes_b64 = [], []
+<span class="kw">for</span> file_path <span class="kw">in</span> uploaded_files:
+    src = Path(file_path)
+    filenames.append(src.name)
+    pdf_bytes_b64.append(
+        base64.b64encode(src.read_bytes()).decode()
+    )
+
+run = flyte.run(
+    ingest_pipeline,
+    filenames=filenames,
+    pdf_bytes_b64=pdf_bytes_b64,
+)
+run.wait()
+summary = json.loads(run.outputs().o0)`,
+    },
+    {
+      nodes:['n-union','n-ingest-pipe'], arrows:['gradio-ingest'],
+      ttl:'ingest_pipeline starts on the Union cluster',
+      desc:'The Union cluster picks up the execution and schedules ingest_pipeline. configure_cognee() runs first — it sets all Cognee env vars (LLM provider, embedding provider, pgvector credentials, SSL, pool size) before cognee is imported, because Cognee reads its config at import time.',
+      tags:['ingest_pipeline','configure_cognee()','Union','task image'],
+      code:`<span class="cm"># ingest/pipeline.py</span>
+<span class="kw">@</span>task_env.task
+<span class="kw">async def</span> <span class="fn">ingest_pipeline</span>(
+    filenames: list[str],
+    pdf_bytes_b64: list[str],
+) -> str:
+    <span class="cm"># Must run before importing cognee</span>
+    configure_cognee()
+    <span class="kw">import</span> cognee
+
+    <span class="kw">with</span> tempfile.TemporaryDirectory() <span class="kw">as</span> tmpdir:
+        <span class="kw">for</span> name, b64 <span class="kw">in</span> zip(filenames, pdf_bytes_b64):
+            path = Path(tmpdir) / name
+            path.write_bytes(base64.b64decode(b64))
+            <span class="kw">await</span> cognee.add(str(path))
+
+    <span class="kw">await</span> cognee.cognify()`,
+    },
+    {
+      nodes:['n-add'], arrows:['ingest-add'],
+      ttl:'cognee.add() — register PDFs with Cognee',
+      desc:'For each PDF, the task decodes the base64 bytes into a temporary file and calls cognee.add(path). This registers the file with Cognee\'s internal data layer — nothing is parsed or chunked yet. Cognee tracks the data source and prepares it for the pipeline step.',
+      tags:['cognee.add()','tempfile','base64.b64decode','data registration'],
+      code:`<span class="cm"># ingest/pipeline.py — inside ingest_pipeline</span>
+<span class="kw">with</span> tempfile.TemporaryDirectory() <span class="kw">as</span> tmpdir:
+    <span class="kw">for</span> name, b64 <span class="kw">in</span> zip(filenames, pdf_bytes_b64):
+        path = Path(tmpdir) / name
+        path.write_bytes(base64.b64decode(b64))
+
+        <span class="cm"># Register the PDF path with Cognee</span>
+        <span class="kw">await</span> cognee.add(str(path))
+
+<span class="cm"># At this point: 15 PDFs are registered.
+# No chunking, no parsing, no embeddings yet —
+# that all happens inside cognify().</span>`,
+    },
+    {
+      nodes:['n-cognify','n-claude','n-fastembed','n-pgvector'], arrows:['add-cognify','cognify-claude','cognify-fastembed','cognify-pgvector'],
+      ttl:'cognee.cognify() — the 10-line pipeline',
+      desc:`cognee.cognify() runs the full knowledge graph build in a single call. Internally it executes the same steps that took 300+ lines in the manual graph RAG project:
+
+  1. Parse + chunk the PDFs (text extraction, overlap splitting)
+  2. Extract entities and relationships using Claude Sonnet (LLM_PROVIDER=anthropic)
+  3. Compute 384D embeddings using fastembed BAAI/bge-small-en-v1.5 (ONNX, no API key)
+  4. Write the knowledge graph to Supabase pgvector: TextSummary, Entity, and DocumentChunk nodes
+
+The entire 6-step manual pipeline (parse → extract → load → index → resolve → detect → summarize) is replaced by two function calls.`,
+      tags:['cognee.cognify()','Claude Sonnet','fastembed','pgvector','TextSummary','Entity','DocumentChunk'],
+      code:`<span class="cm"># ingest/pipeline.py — the key two lines</span>
+<span class="kw">await</span> cognee.cognify()
+
+<span class="cm"># Internally cognify() runs:
+#   chunk      — text extraction + overlap splitting
+#   extract    — Claude Sonnet extracts entities + relationships
+#   embed      — fastembed BAAI/bge-small-en-v1.5 (384D, ONNX)
+#   graph      — writes nodes: TextSummary, Entity, DocumentChunk
+#
+# What this replaced from graph_rag_chatbot:
+#   parse_and_chunk()        (PyMuPDF + RecursiveCharacterTextSplitter)
+#   extract_entities()       (Claude tool use per chunk)
+#   load_graph()             (MERGE queries to Neo4j)
+#   create_vector_index()    (HNSW index on Chunk.embedding)
+#   resolve_entities()       (cosine dedup of near-duplicate nodes)
+#   detect_communities()     (Louvain algorithm over RELATED edges)
+#   summarize_communities()  (Claude summary per entity cluster)</span>`,
+    },
+    {
+      nodes:['n-union','n-ingest-pipe'], arrows:[],
+      ttl:'configure_cognee() — how Cognee is wired to the right providers',
+      desc:'Every task calls configure_cognee() at the top before importing cognee, because Cognee reads its configuration at import time. This is how the task image knows to use fastembed (not the default LiteLLM embedder), pgvector (not the default local SQLite), Claude Sonnet for entity extraction, and how to reach Supabase with SSL and the correct pool size.',
+      tags:['configure_cognee()','EMBEDDING_PROVIDER','DB_PROVIDER','ENABLE_BACKEND_ACCESS_CONTROL','SSL','POOL_ARGS'],
+      code:`<span class="cm"># config.py — configure_cognee()</span>
+os.environ[<span class="str">"LLM_PROVIDER"</span>]       = <span class="str">"anthropic"</span>
+os.environ[<span class="str">"LLM_MODEL"</span>]          = CLAUDE_MODEL
+os.environ[<span class="str">"LLM_API_KEY"</span>]        = api_key
+
+<span class="cm"># Local ONNX embeddings — no API key required</span>
+os.environ[<span class="str">"EMBEDDING_PROVIDER"</span>]   = <span class="str">"fastembed"</span>
+os.environ[<span class="str">"EMBEDDING_MODEL"</span>]      = <span class="str">"BAAI/bge-small-en-v1.5"</span>
+os.environ[<span class="str">"EMBEDDING_DIMENSIONS"</span>] = <span class="str">"384"</span>
+
+<span class="cm"># Single-user mode: no per-dataset DB creation.
+# PGVectorAdapter reuses the relational engine (SSL).</span>
+os.environ[<span class="str">"ENABLE_BACKEND_ACCESS_CONTROL"</span>] = <span class="str">"false"</span>
+os.environ[<span class="str">"DB_PROVIDER"</span>]          = <span class="str">"postgres"</span>
+os.environ[<span class="str">"DATABASE_CONNECT_ARGS"</span>] = <span class="str">'{"ssl": "require"}'</span>
+
+<span class="cm"># Supabase Session Pooler cap: 15. Stay well under.</span>
+os.environ[<span class="str">"POOL_ARGS"</span>] = <span class="str">'{"pool_size": 5, "max_overflow": 5}'</span>`,
+    },
+    {
+      nodes:['n-gradio','n-user'], arrows:[],
+      ttl:'Ingest complete — knowledge graph ready',
+      desc:`Supabase pgvector now holds the full Everstorm knowledge graph built by Cognee:
+
+  TextSummary nodes   — document-level summaries
+  DocumentChunk nodes — overlapping text chunks with 384D embeddings
+  Entity nodes        — named concepts and relationships extracted by Claude
+
+Switch to the Chat tab. The query pipeline uses cognee.search(GRAPH_COMPLETION) — Cognee handles retrieval routing internally, no manual hybrid/entity/community mode selection needed.`,
+      tags:['knowledge graph','TextSummary','Entity','DocumentChunk','Supabase pgvector','ready'],
+      code:`<span class="cm"># Cognee graph schema now in pgvector:
+#
+#   TextSummary  — document-level summary nodes
+#   DocumentChunk — overlapping chunks + 384D embeddings
+#   Entity        — concepts + relationships from Claude
+#
+# Cognee's GRAPH_COMPLETION search combines:
+#   vector similarity  (fastembed query embedding)
+#   graph traversal    (entity relationships)
+#   LLM synthesis      (structured answer generation)
+#
+# Query pipeline next:</span>
+<span class="kw">await</span> cognee.search(
+    query_type=SearchType.GRAPH_COMPLETION,
+    query_text=question,
+)`,
+    },
+  ],
+
+  query: [
+    {
+      nodes:['n-user'], arrows:[],
+      ttl:'User asks a question',
+      desc:'A customer types a natural-language question into the Gradio chat interface. The question travels to the Union cluster as a query_pipeline execution — visible in the Union console as a distinct execution node.',
+      tags:['user','Gradio Chat tab'],
+      code:`<span class="cm"># app.py — Chat tab</span>
+query_input = gr.Textbox(
+    placeholder=<span class="str">"What is the return window for sale items?"</span>,
+    label=<span class="str">"Question"</span>,
+    submit_btn=True,
+)
+<span class="cm"># Answer includes: answer, result_count</span>`,
+    },
+    {
+      nodes:['n-user','n-gradio'], arrows:['user-gradio'],
+      ttl:'Gradio dispatches the query to Union',
+      desc:'app.py calls flyte.run(query_pipeline) which submits a new execution to the Union cluster and returns immediately with a run handle. run.wait() blocks until the cluster finishes, then the answer is read from run.outputs().o0.',
+      tags:['gradio','flyte.run()','run.wait()'],
+      code:`<span class="cm"># app.py — chat()</span>
+run = flyte.run(
+    query_pipeline,
+    question=question,
+)
+run.wait()
+result = json.loads(run.outputs().o0)
+
+answer       = result[<span class="str">"answer"</span>]
+result_count = result.get(<span class="str">"result_count"</span>, 0)`,
+    },
+    {
+      nodes:['n-union','n-query-pipe'], arrows:['gradio-query'],
+      ttl:'query_pipeline starts on the Union cluster',
+      desc:'The Union cluster schedules query_pipeline. configure_cognee() runs first — same provider wiring as the ingest task. Two steps run in sequence: cognee.search(GRAPH_COMPLETION) retrieves context, then generate_answer calls Claude with that context.',
+      tags:['query_pipeline','configure_cognee()','Union cluster','sequential tasks'],
+      code:`<span class="cm"># query/pipeline.py</span>
+<span class="kw">@</span>task_env.task
+<span class="kw">async def</span> <span class="fn">query_pipeline</span>(question: str) -> str:
+    api_key = configure_cognee()
+    <span class="kw">import</span> cognee
+    <span class="kw">from</span> cognee.api.v1.search <span class="kw">import</span> SearchType
+
+    results = <span class="kw">await</span> cognee.search(
+        query_type=SearchType.GRAPH_COMPLETION,
+        query_text=question,
+    )
+    answer = <span class="kw">await</span> generate_answer(
+        question=question,
+        cognee_results=results <span class="kw">or</span> [],
+        api_key=api_key,
+    )
+    <span class="kw">return</span> json.dumps({
+        <span class="str">"answer"</span>:       answer,
+        <span class="str">"result_count"</span>: len(results) <span class="kw">if</span> results <span class="kw">else</span> 0,
+    })`,
+    },
+    {
+      nodes:['n-search','n-fastembed','n-pgvector'], arrows:['query-search','search-fastembed','search-pgvector'],
+      ttl:'cognee.search(GRAPH_COMPLETION) — graph traversal and retrieval',
+      desc:`SearchType.GRAPH_COMPLETION is Cognee's highest-level retrieval mode. It combines three steps internally:
+
+  1. Embed the question using fastembed BAAI/bge-small-en-v1.5 (same model used at ingest)
+  2. Vector similarity search over DocumentChunk embeddings in pgvector
+  3. Graph traversal: follow Entity relationship edges to expand context
+
+Cognee handles routing internally — no manual hybrid/entity/community mode selection like the Neo4j project. The result is a ranked list of graph-aware context objects.`,
+      tags:['cognee.search()','GRAPH_COMPLETION','fastembed','pgvector','vector similarity','graph traversal'],
+      code:`<span class="cm"># query/pipeline.py — search step</span>
+<span class="kw">from</span> cognee.api.v1.search <span class="kw">import</span> SearchType
+
+results = <span class="kw">await</span> cognee.search(
+    query_type=SearchType.GRAPH_COMPLETION,
+    query_text=question,
+)
+<span class="cm"># results: ranked list of context objects
+# Each combines: text chunk + entity relationships
+# Cognee routes internally — no manual mode select needed.
+# Cap to first 10 results in generate_answer to stay
+# within Claude's context budget.</span>`,
+    },
+    {
+      nodes:['n-generate','n-claude'], arrows:['search-generate','generate-claude'],
+      ttl:'generate_answer — Claude builds a grounded answer',
+      desc:'generate_answer assembles the top-10 Cognee results into a context string and calls Claude Sonnet. The system prompt instructs Claude to stay grounded in the provided context and acknowledge gaps rather than guess. The result is the final answer text returned to Gradio.',
+      tags:['generate_answer','Claude Sonnet','RAG prompt','grounded answer','result_count'],
+      code:`<span class="cm"># query/generation.py — generate_answer</span>
+context = <span class="str">"\n\n"</span>.join(str(r) <span class="kw">for</span> r <span class="kw">in</span> cognee_results[:10])
+
+system = (
+    <span class="str">"You are a helpful customer support assistant "</span>
+    <span class="str">"for Everstorm Outfitters. Answer using only "</span>
+    <span class="str">"the provided context. If the context doesn't "</span>
+    <span class="str">"fully address the question, share what you know "</span>
+    <span class="str">"and note the gap."</span>
+)
+prompt = <span class="str">f"Context from knowledge graph:\n{context}\n\nQuestion: {question}"</span>
+
+response = client.messages.create(
+    model=CLAUDE_MODEL,
+    max_tokens=1024,
+    system=system,
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: prompt}],
+)
+<span class="kw">return</span> response.content[0].text`,
+    },
+    {
+      nodes:['n-gradio','n-user'], arrows:['answer-gradio'],
+      ttl:'Answer returned to the user',
+      desc:'The answer and result count travel back through run.outputs().o0. Gradio renders the answer in the chatbot component with a small result count badge. The Chat sidebar shows a description of the Cognee knowledge graph for context.',
+      tags:['gradio','chatbot','result_count','run.outputs()'],
+      code:`<span class="cm"># app.py — chat() final steps</span>
+result       = json.loads(run.outputs().o0)
+answer       = result[<span class="str">"answer"</span>]
+result_count = result.get(<span class="str">"result_count"</span>, 0)
+
+meta = (
+    <span class="str">f'\n\n&lt;span class="result-count"&gt;'</span>
+    <span class="str">f'Retrieved {result_count} graph result(s)'</span>
+    <span class="str">f'&lt;/span&gt;'</span>
+)
+history.append({
+    <span class="str">"role"</span>:    <span class="str">"assistant"</span>,
+    <span class="str">"content"</span>: answer + meta,
+})
+<span class="kw">return</span> history, <span class="str">""</span>`,
+    },
+  ],
+};
+
+let flow = 'ingest', step = 0;
+
+function rect(id) {
+  const el  = document.getElementById(id);
+  const svg = document.getElementById('diagram-outer');
+  const er  = el.getBoundingClientRect();
+  const sr  = svg.getBoundingClientRect();
+  return {
+    l: er.left - sr.left, t: er.top - sr.top,
+    r: er.right - sr.left, b: er.bottom - sr.top,
+    cx: er.left - sr.left + er.width/2,
+    cy: er.top  - sr.top  + er.height/2,
+    w: er.width, h: er.height,
+  };
+}
+
+function edge(r, side, off=0) {
+  if (side==='top')    return { x: r.cx+off, y: r.t };
+  if (side==='bottom') return { x: r.cx+off, y: r.b };
+  if (side==='left')   return { x: r.l, y: r.cy+off };
+  if (side==='right')  return { x: r.r, y: r.cy+off };
+}
+
+function buildPath(def) {
+  const fr = rect(def.from), tr = rect(def.to);
+  const p1 = edge(fr, def.fS, def.fOff||0);
+  const p2 = edge(tr, def.tS, def.tOff||0);
+  let c1, c2;
+
+  if (def.bend === 'arc') {
+    const top = Math.min(p1.y, p2.y) - 60;
+    c1 = { x: p1.x, y: top };
+    c2 = { x: p2.x, y: top };
+  } else {
+    const dx = Math.max(Math.abs(p2.x - p1.x) * 0.5, 40);
+    const dy = Math.max(Math.abs(p2.y - p1.y) * 0.5, 40);
+    if      (def.fS==='right')  c1 = { x: p1.x+dx, y: p1.y };
+    else if (def.fS==='left')   c1 = { x: p1.x-dx, y: p1.y };
+    else if (def.fS==='bottom') c1 = { x: p1.x,    y: p1.y+dy };
+    else                        c1 = { x: p1.x,    y: p1.y-dy };
+    if      (def.tS==='left')   c2 = { x: p2.x-dx, y: p2.y };
+    else if (def.tS==='right')  c2 = { x: p2.x+dx, y: p2.y };
+    else if (def.tS==='top')    c2 = { x: p2.x,    y: p2.y-dy };
+    else                        c2 = { x: p2.x,    y: p2.y+dy };
+  }
+  return `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
+}
+
+function isVisible(id) {
+  const el = document.getElementById(id);
+  return el ? window.getComputedStyle(el).display !== 'none' : false;
+}
+
+function drawArrows() {
+  const svg = document.getElementById('svg-arrows');
+  [...svg.querySelectorAll('.arrow-path')].forEach(p => p.remove());
+  ARROWS.forEach(def => {
+    if (!isVisible(def.from) || !isVisible(def.to)) return;
+    try {
+      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('id', 'a-' + def.id);
+      path.setAttribute('d', buildPath(def));
+      path.setAttribute('class', 'arrow-path');
+      svg.appendChild(path);
+    } catch(e) {}
+  });
+  const outer = document.getElementById('diagram-outer');
+  svg.setAttribute('width',  outer.offsetWidth);
+  svg.setAttribute('height', outer.offsetHeight);
+}
+
+const ALL_NODES = [
+  'n-user','n-gradio','n-union','n-claude','n-fastembed','n-pgvector',
+  'n-ingest-pipe','n-add','n-cognify',
+  'n-query-pipe','n-search','n-generate',
+];
+
+const CLUSTER_TASKS = new Set([
+  'n-ingest-pipe','n-add','n-cognify',
+  'n-query-pipe','n-search','n-generate',
+]);
+
+function render() {
+  const steps = FLOWS[flow];
+  const s = steps[step];
+  const total = steps.length;
+
+  ALL_NODES.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+  document.querySelectorAll('.arrow-path').forEach(p => p.classList.remove('lit'));
+
+  s.nodes.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
+    if (CLUSTER_TASKS.has(id))
+      document.getElementById('n-union').classList.add('active');
+  });
+
+  s.arrows.forEach(aid => {
+    const el = document.getElementById('a-'+aid);
+    if (el) el.classList.add('lit');
+  });
+
+  document.getElementById('s-num').textContent  = `Step ${step+1}`;
+  document.getElementById('s-ttl').textContent  = s.ttl;
+  document.getElementById('s-desc').textContent = s.desc;
+  document.getElementById('s-code').innerHTML   = s.code;
+
+  const tagsEl = document.getElementById('s-tags');
+  tagsEl.innerHTML = s.tags.map(t=>`<span class="comp-tag">${t}</span>`).join('');
+
+  document.getElementById('s-ct').textContent = `${step+1} / ${total}`;
+  document.getElementById('btn-prev').disabled = step===0;
+  document.getElementById('btn-next').disabled = step===total-1;
+  document.getElementById('btn-next').textContent = step===total-1 ? '✓ Done' : 'Next →';
+
+  const dotsEl = document.getElementById('dots');
+  dotsEl.innerHTML = '';
+  for (let i=0; i<total; i++) {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i===step ? ' cur' : i<step ? ' past' : '');
+    d.title = FLOWS[flow][i].ttl;
+    d.onclick = () => { step=i; render(); };
+    dotsEl.appendChild(d);
+  }
+}
+
+function next() { if (step < FLOWS[flow].length-1) { step++; render(); } }
+function prev() { if (step > 0) { step--; render(); } }
+
+function setFlow(f) {
+  flow=f; step=0;
+  document.getElementById('tab-ingest').classList.toggle('active', f==='ingest');
+  document.getElementById('tab-query').classList.toggle('active',  f==='query');
+  const showIngest = f === 'ingest';
+  document.querySelectorAll('.ingest-only').forEach(el => el.style.display = showIngest ? '' : 'none');
+  document.querySelectorAll('.query-only').forEach(el  => el.style.display = showIngest ? 'none' : '');
+  render();
+  requestAnimationFrame(drawArrows);
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key==='ArrowRight'||e.key==='ArrowDown') next();
+  if (e.key==='ArrowLeft' ||e.key==='ArrowUp')   prev();
+});
+
+window.addEventListener('load', () => {
+  setFlow('ingest');
+  requestAnimationFrame(() => { drawArrows(); render(); });
+});
+window.addEventListener('resize', () => { drawArrows(); });
+</script>
+</body>
+</html>

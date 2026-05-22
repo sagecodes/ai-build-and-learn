@@ -8,6 +8,8 @@ RUN pip install --no-cache-dir \
     "cognee[postgres-binary]>=0.1.0" \
     "anthropic>=0.40.0" \
     "gradio>=4.44.0" \
+    "fastembed>=0.8.0" \
+    "pyvis>=0.3.2" \
     "python-dotenv>=1.0.0"
 
 WORKDIR /app

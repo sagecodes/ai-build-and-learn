@@ -13,11 +13,29 @@ async def generate_answer(question: str, cognee_results: list, api_key: str) -> 
 
     client = Anthropic(api_key=api_key)
 
+    def _extract(r) -> str:
+        # With ENABLE_BACKEND_ACCESS_CONTROL=false, CHUNKS search returns payload
+        # dicts directly: {"text": "...", ...}. The "text" key is the chunk text.
+        # We also try .search_result and common attrs as fallbacks.
+        sr = getattr(r, "search_result", r)
+        if isinstance(sr, str):
+            return sr
+        if isinstance(sr, dict):
+            for key in ("text", "content", "chunk_text", "description", "summary"):
+                v = sr.get(key)
+                if v and isinstance(v, str):
+                    return v
+        for attr in ("text", "content", "chunk_text", "description", "summary"):
+            v = getattr(sr, attr, None)
+            if v and isinstance(v, str):
+                return v
+        return str(sr)
+
     if not cognee_results:
         context = "No relevant information found in the knowledge graph."
     else:
-        # Cap context to first 10 results to stay within token limits
-        context = "\n\n".join(str(r) for r in cognee_results[:10])
+        texts = [_extract(r) for r in cognee_results[:10]]
+        context = "\n\n---\n\n".join(t for t in texts if t)
 
     system = (
         "You are a helpful customer support assistant for Everstorm Outfitters, "

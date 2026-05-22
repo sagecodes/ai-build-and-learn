@@ -102,6 +102,13 @@ def configure_cognee() -> str:
     # Supabase Session Pooler caps at 15 connections; keep well under that.
     os.environ["POOL_ARGS"] = '{"pool_size": 5, "max_overflow": 5}'
 
+    # Union injects LOG_LEVEL as a numeric string (e.g. "30"). Cognee's
+    # setup_logging() looks it up by name in a dict — numeric strings are
+    # not valid keys and cause a KeyError at import time. Force a name.
+    raw_log = os.environ.get("LOG_LEVEL", "")
+    if raw_log.isdigit():
+        os.environ["LOG_LEVEL"] = "WARNING"
+
     return api_key
 
 
