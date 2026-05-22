@@ -4,6 +4,9 @@ cognee[postgres-binary]>=0.1.0
 # Local ONNX embeddings (no API key required)
 fastembed>=0.8.0
 
+# Graph visualization
+pyvis>=0.3.2
+
 # Anthropic (answer generation)
 anthropic>=0.40.0
 
