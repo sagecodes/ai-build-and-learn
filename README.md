@@ -29,7 +29,7 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Ragas: Evals for RAG &amp; Memory</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-29</div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-06-05</div>
         <div style="font-size: 13px; color: #666;">
           <a href="topics/ragas">code</a> • <a href="https://luma.com/zs7v5rqj">register</a>
         </div>
