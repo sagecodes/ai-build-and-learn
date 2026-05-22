@@ -1,0 +1,21 @@
+# Local deps for `flyte run pipeline.py ...` and `python chat_app.py`.
+# The pod images are built from these via `with_pip_packages` in config.py /
+# chat_app.py, so keep the two in sync.
+flyte[tui]>=2.0
+
+# cognee is the memory layer. remember/recall/forget land in the 1.x line;
+# the granular add/cognify/search API the pipeline uses works on every recent
+# release. Pin the floor up if a needed call is missing.
+cognee>=0.1.40
+
+# Embeddings run locally via fastembed (onnxruntime) so we don't need a second
+# endpoint next to the chat-only Gemma vLLM. Pulled in by cognee, listed here
+# so the intent is explicit and the image caches the wheel.
+fastembed>=0.3.0
+
+gradio>=5.0.0
+openai>=1.50.0
+httpx>=0.27.0
+trafilatura>=1.12.0
+huggingface_hub>=0.24.0
+python-dotenv
