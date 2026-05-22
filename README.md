@@ -2,9 +2,9 @@
 
 Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new topic and learn by building together.
 
-> **Up next: Karpathy's LLM Wiki** (2026-05-15)
-> Andrej Karpathy's LLM Wiki concept: build a wiki-style knowledge base specifically structured for LLM consumption and retrieval.
-> [RSVP](https://luma.com/3y91h5a5) | [Join the Slack](https://slack.flyte.org/)
+> **Up next: Cognee: Memory Layer for Agents** (2026-05-22)
+> Cognee is an open-source memory layer for AI agents. Persistent, queryable memory that survives across sessions and tools.
+> [RSVP](https://luma.com/1kd5i9x8) | [Join the Slack](https://slack.flyte.org/)
 
 ## Upcoming:
 
@@ -16,16 +16,6 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
-<tr><td>
-      <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Karpathy's LLM Wiki</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-15</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/llm-wiki">code</a> • <a href="https://luma.com/3y91h5a5">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Andrej Karpathy's LLM Wiki concept: build a wiki-style knowledge base specifically structured for LLM consumption and retrieval.
-</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Cognee: Memory Layer for Agents</strong></div>
@@ -59,6 +49,16 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Karpathy's LLM Wiki</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-15</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/llm-wiki">code</a> • <a href="https://www.youtube.com/watch?v=zaLD4DUg-hM">watch</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Andrej Karpathy's LLM Wiki concept: build a wiki-style knowledge base specifically structured for LLM consumption and retrieval.
+</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Graph Data with Neo4j</strong></div>
