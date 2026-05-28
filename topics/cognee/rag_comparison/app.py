@@ -2,7 +2,7 @@ import asyncio
 import gradio as gr
 
 from backends.vector import query as vector_query
-from backends.graph import query as graph_query
+from backends.graph import query as graph_query        # graph/ package
 from backends.cognee_backend import query as cognee_query
 
 

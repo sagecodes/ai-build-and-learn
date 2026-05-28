@@ -21,18 +21,18 @@ EMBEDDING_DIMS     = 384
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 # ── Supabase / pgvector (Vector RAG) ──────────────────────────────────────────
+# Use the Session Pooler URL (not direct connection — Supabase direct uses IPv6)
+# Format: postgresql://postgres.<project-ref>:<password>@<pooler-host>:5432/postgres
 
-PG_HOST     = os.environ["PG_HOST"]
-PG_PORT     = os.environ.get("PG_PORT", "5432")
-PG_DB       = os.environ["PG_DB"]
-PG_USER     = os.environ["PG_USER"]
-PG_PASSWORD = os.environ["PG_PASSWORD"]
+PG_URL     = os.environ["PG_URL"]
+COLLECTION = "everstorm_docs"
 
 # ── Neo4j AuraDB Free (Graph RAG) ─────────────────────────────────────────────
 
-NEO4J_URI      = os.environ["NEO4J_URI"]
-NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "neo4j")
-NEO4J_PASSWORD = os.environ["NEO4J_PASSWORD"]
+NEO4J_URI         = os.environ["NEO4J_URI"]
+NEO4J_USERNAME    = os.environ.get("NEO4J_USERNAME", "neo4j")
+NEO4J_PASSWORD    = os.environ["NEO4J_PASSWORD"]
+VECTOR_INDEX_NAME = "chunk-embeddings"
 
 # ── Cognee (local LanceDB + SQLite) ───────────────────────────────────────────
 # No credentials needed — Cognee stores data locally under .cognee_data/

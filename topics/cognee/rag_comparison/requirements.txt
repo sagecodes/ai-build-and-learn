@@ -11,7 +11,7 @@ gradio>=4.44.0
 python-dotenv>=1.0.0
 
 # ── Backend: Vector RAG ───────────────────────────────────────────────────────
-psycopg2-binary>=2.9.0
+psycopg[binary]>=3.1.0
 pgvector>=0.3.0
 
 # ── Backend: Graph RAG ────────────────────────────────────────────────────────
