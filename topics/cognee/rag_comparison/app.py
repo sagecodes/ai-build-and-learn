@@ -105,7 +105,6 @@ async def run_comparison(question: str):
 
 with gr.Blocks(
     title="RAG Comparison",
-    theme=gr.themes.Soft(),
 ) as demo:
 
     gr.Markdown(
@@ -161,7 +160,6 @@ with gr.Blocks(
         label="Evaluation",
         lines=10,
         interactive=False,
-        show_copy_button=True,
     )
 
     outputs = [vector_ctx, vector_ans, graph_ctx, graph_ans, cognee_ctx, cognee_ans, summary_box]
@@ -171,4 +169,4 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(server_name="0.0.0.0", server_port=7860, theme=gr.themes.Soft())

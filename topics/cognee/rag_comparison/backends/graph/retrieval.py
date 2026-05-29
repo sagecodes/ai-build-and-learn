@@ -20,7 +20,6 @@ from config import (
 )
 
 _TOP_K = 3
-_HYBRID_THRESHOLD = 0.75
 
 _ENTITY_TOOL = {
     "name": "extract_entities",
@@ -59,7 +58,6 @@ async def hybrid_retrieve(question: str) -> dict:
                 """
                 CALL db.index.vector.queryNodes($index, $top_k, $embedding)
                 YIELD node AS chunk, score
-                WHERE score >= $threshold
                 RETURN chunk.id        AS chunk_id,
                        chunk.source_doc AS source_doc,
                        chunk.text       AS text,
@@ -69,7 +67,6 @@ async def hybrid_retrieve(question: str) -> dict:
                 index=VECTOR_INDEX_NAME,
                 top_k=_TOP_K,
                 embedding=query_vec,
-                threshold=_HYBRID_THRESHOLD,
             )
             chunks = await chunk_result.data()
 
