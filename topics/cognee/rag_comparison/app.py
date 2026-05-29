@@ -7,6 +7,7 @@ has Claude evaluate all three and name a winner.
 """
 
 import asyncio
+from pathlib import Path
 
 import gradio as gr
 
@@ -111,12 +112,7 @@ async def run_comparison(question: str):
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 
-_CSS = """
-.answer-panel { min-height: 220px; }
-.answer-panel .prose { max-height: 280px; overflow-y: auto; padding-right: 4px; font-size: 14px; }
-.summary-panel { min-height: 160px; }
-.summary-panel .prose { max-height: 400px; overflow-y: auto; padding-right: 4px; font-size: 14px; }
-"""
+_CSS = (Path(__file__).parent / "static" / "app.css").read_text()
 
 with gr.Blocks(
     title="RAG Comparison",
