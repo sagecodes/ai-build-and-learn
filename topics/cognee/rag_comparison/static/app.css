@@ -32,8 +32,12 @@
 }
 
 /* ── Backend subtitle lines under column headers ────────────────────────────── */
+.backend-subtitle {
+    padding-top: 6px;
+}
 .backend-subtitle p {
     font-style: italic;
     opacity: 0.75;
-    margin-top: -8px;
+    margin-top: 0;
+    margin-bottom: 0;
 }

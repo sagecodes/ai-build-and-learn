@@ -69,6 +69,9 @@ async def _rag_comparison_summary(
         f"Sort rows by score descending — winner on top. "
         f"Prefix the winning system name with 🏆 and the runner-up with 🥈. "
         f"After the table, one bold sentence naming the winner and the single biggest reason it won.\n\n"
+        f"Then add a second smaller table titled **Score Breakdown** with these columns: "
+        f"System | Retrieval (1pt) | Accuracy (1pt) | Completeness (1pt) | Clarity (1pt) | No Hallucinations (1pt) | Total. "
+        f"Score each criterion 0–1 (decimals allowed). Same row order as the verdict table above.\n\n"
         f"## Recommended Strategy\n"
         f"One sentence: which retrieval strategy you would recommend for questions like this one.\n\n"
         f"## System Breakdown\n"
@@ -121,6 +124,9 @@ async def _model_comparison_summary(
         f"Sort rows by score descending — winner on top. "
         f"Prefix the winning model name with 🏆 and the runner-up with 🥈. "
         f"After the table, one bold sentence naming the winner and the single biggest reason it won.\n\n"
+        f"Then add a second smaller table titled **Score Breakdown** with these columns: "
+        f"Model | Accuracy (1pt) | Completeness (1pt) | Clarity (1pt) | Context Usage (1pt) | No Hallucinations (1pt) | Total. "
+        f"Score each criterion 0–1 (decimals allowed). Same row order as the verdict table above.\n\n"
         f"## Analysis\n"
         f"For each model evaluate:\n"
         f"1. Accuracy — did it correctly use the provided context?\n"
@@ -310,7 +316,7 @@ with gr.Blocks(
                 with gr.Column():
                     gr.Markdown(f"### Claude")
                     gr.Markdown(
-                        f"*{CLAUDE_MODEL}*",
+                        "*Claude Sonnet 4.6 via Anthropic API*",
                         elem_classes="backend-subtitle",
                     )
                     claude_ans = gr.Markdown(label="Answer", container=True, elem_classes="model-panel")
@@ -318,7 +324,7 @@ with gr.Blocks(
                 with gr.Column():
                     gr.Markdown("### Gemma 4")
                     gr.Markdown(
-                        "*gemma-4-26b-a4b-it via Vertex AI*",
+                        "*Gemma 4 26B via Vertex AI MaaS*",
                         elem_classes="backend-subtitle",
                     )
                     gemma_ans = gr.Markdown(label="Answer", container=True, elem_classes="model-panel")
