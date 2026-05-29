@@ -1,0 +1,31 @@
+# Answer generation
+anthropic>=0.49.0
+google-genai>=0.8.0
+
+# Local ONNX embeddings — shared across all three backends
+fastembed>=0.8.0
+
+# UI
+gradio>=4.44.0
+
+# Config
+python-dotenv>=1.0.0
+
+# ── Backend: Vector RAG ───────────────────────────────────────────────────────
+psycopg[binary]>=3.1.0
+pgvector>=0.3.0
+
+# ── Backend: Graph RAG ────────────────────────────────────────────────────────
+neo4j>=5.0.0
+
+# ── Backend: Cognee ───────────────────────────────────────────────────────────
+# Base install — no postgres extra needed (using local LanceDB storage)
+cognee>=0.1.0
+lancedb>=0.6.0
+
+# ── Ingest ────────────────────────────────────────────────────────────────────
+pymupdf>=1.24.0                  # PDF text extraction
+langchain-text-splitters>=0.2.0  # Recursive character chunking
+numpy>=1.26.0                    # Vector math for entity resolution + community similarity
+networkx>=3.0                    # Entity graph for Louvain community detection
+python-louvain>=0.16             # Louvain community detection algorithm (imports as `community`)
