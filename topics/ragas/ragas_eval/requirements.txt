@@ -1,0 +1,10 @@
+# Ragas and LangChain integration
+# Base image (rag-comparison:latest) already has:
+#   anthropic, gradio, fastembed, pymupdf, python-dotenv,
+#   psycopg, pgvector, neo4j, cognee, lancedb, numpy, networkx
+ragas>=0.2.0
+langchain-anthropic>=0.3.0
+langchain-community>=0.3.0
+langchain-core>=0.3.0
+datasets>=2.20.0
+pandas>=2.0.0
