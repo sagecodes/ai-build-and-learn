@@ -10,3 +10,4 @@ datasets>=2.20.0
 pandas>=2.0.0
 langchain-google-vertexai>=1.0.0
 rapidfuzz>=3.0.0
+instructor>=1.0.0

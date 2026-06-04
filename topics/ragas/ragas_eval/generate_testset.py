@@ -25,6 +25,7 @@ if str(_here) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv()
 
+import compat  # noqa: F401 — stubs broken ragas deps before any ragas import
 import config  # noqa: F401 — triggers env var check early
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, DATA_DIR
 
