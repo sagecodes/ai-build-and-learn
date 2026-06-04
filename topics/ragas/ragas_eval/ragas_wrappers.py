@@ -73,6 +73,7 @@ def get_ragas_llm():
         model=EVAL_LLM_MODEL,
         provider="anthropic",
         client=AsyncAnthropic(api_key=ANTHROPIC_API_KEY),
+        top_p=None,  # Anthropic rejects requests with both temperature and top_p set
     )
 
 
