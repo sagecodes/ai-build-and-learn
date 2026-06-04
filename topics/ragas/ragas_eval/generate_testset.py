@@ -68,7 +68,7 @@ def _generate(docs, llm, emb):
         return generator.generate_with_langchain_docs(
             documents=docs,
             test_size=TESTSET_SIZE,
-            raise_exceptions=False,
+            raise_exceptions=True,
         )
     except TypeError:
         # Older ragas 0.2.x — distributions kwarg not supported
