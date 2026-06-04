@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import compat  # noqa: F401 — must be before ragas; stubs broken deps
 import config  # noqa: F401 — triggers missing-env-var check before anything else
 from config import DATA_DIR
 from ragas_wrappers import get_ragas_llm

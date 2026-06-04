@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 
+import compat  # noqa: F401 — must be first; stubs broken ragas deps before import
 import pandas as pd
 from datasets import Dataset
 from ragas import evaluate

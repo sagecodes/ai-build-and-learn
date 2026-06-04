@@ -24,11 +24,6 @@ NEO4J_URI         = os.environ["NEO4J_URI"]
 NEO4J_PASSWORD    = os.environ["NEO4J_PASSWORD"]
 NEO4J_USERNAME    = os.environ.get("NEO4J_USERNAME", "neo4j")
 
-# ── Google Cloud ───────────────────────────────────────────────────────────────
-# Used for Vertex AI embeddings (text-embedding-004). VM uses ADC — no key needed.
-
-GCP_PROJECT = os.environ.get("GCP_PROJECT", "")
-
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
 DATA_DIR = Path(__file__).parent / "data"

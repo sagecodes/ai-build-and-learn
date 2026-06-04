@@ -15,6 +15,8 @@ _here = Path(__file__).parent
 if str(_here) not in sys.path:
     sys.path.insert(0, str(_here))
 
+import compat  # noqa: F401 — must be before ragas; stubs broken deps
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
