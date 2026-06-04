@@ -69,12 +69,16 @@ def get_ragas_llm():
     """ragas 0.4.x native LLM via llm_factory + AsyncAnthropic."""
     from anthropic import AsyncAnthropic
     from ragas.llms import llm_factory
-    return llm_factory(
+    llm = llm_factory(
         model=EVAL_LLM_MODEL,
         provider="anthropic",
         client=AsyncAnthropic(api_key=ANTHROPIC_API_KEY),
-        top_p=None,  # Anthropic rejects requests with both temperature and top_p set
     )
+    # Anthropic rejects requests with both temperature and top_p.
+    # InstructorLLM includes top_p in model_args by default — remove it.
+    if hasattr(llm, "model_args"):
+        llm.model_args.pop("top_p", None)
+    return llm
 
 
 def get_ragas_embeddings() -> HuggingFaceRagasEmbeddings:
