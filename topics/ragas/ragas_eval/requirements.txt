@@ -9,3 +9,4 @@ langchain-core>=0.3.0
 datasets>=2.20.0
 pandas>=2.0.0
 langchain-google-vertexai>=1.0.0
+rapidfuzz>=3.0.0
