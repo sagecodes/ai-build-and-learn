@@ -10,7 +10,7 @@ from config import DATA_DIR
 from eval.backends import BACKENDS, generate_answer
 from eval.metrics import METRIC_NAMES, METRICS, configure_metrics
 from eval.testset import load_testset
-from ragas_wrappers import get_ragas_llm
+from ragas_wrappers import get_ragas_embeddings, get_ragas_llm
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +23,12 @@ def _run_ragas(dataset: Dataset) -> dict:
     Returns a flat dict of {metric_name: float}.
     """
     llm = get_ragas_llm()
+    emb = get_ragas_embeddings()
     try:
-        result = evaluate(dataset=dataset, metrics=METRICS, llm=llm)
+        result = evaluate(dataset=dataset, metrics=METRICS, llm=llm, embeddings=emb)
     except TypeError:
-        # Older ragas 0.2.x does not accept llm= kwarg
-        configure_metrics(llm)
+        # Older ragas 0.2.x does not accept llm=/embeddings= kwargs
+        configure_metrics(llm, emb)
         result = evaluate(dataset=dataset, metrics=METRICS)
 
     row = result.to_pandas().iloc[0].to_dict()
