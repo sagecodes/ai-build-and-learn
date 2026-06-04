@@ -6,7 +6,7 @@ from app.handlers import handle_batch_eval, handle_single_eval
 from eval.metrics import METRIC_NAMES
 
 _BACKEND_NAMES = ["Vector RAG", "Graph RAG", "Cognee"]
-_BATCH_COLS    = ["backend"] + METRIC_NAMES
+_BATCH_COLS = ["backend"] + METRIC_NAMES
 
 
 def build_demo() -> gr.Blocks:
