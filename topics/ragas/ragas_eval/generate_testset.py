@@ -26,7 +26,7 @@ load_dotenv()
 import compat  # noqa: F401 — must be before ragas; stubs broken deps
 import config  # noqa: F401 — triggers missing-env-var check before anything else
 from config import DATA_DIR
-from ragas_wrappers import get_ragas_llm
+from ragas_wrappers import get_ragas_embeddings, get_ragas_llm
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -57,12 +57,13 @@ def _load_documents():
     return docs
 
 
-def _generate(docs, llm):
+def _generate(docs, llm, emb):
     from ragas.testset import TestsetGenerator
 
     generator = TestsetGenerator.from_langchain(
         generator_llm=llm,
         critic_llm=llm,
+        embeddings=emb,
     )
     try:
         return generator.generate_with_langchain_docs(
@@ -81,9 +82,10 @@ def _generate(docs, llm):
 def main():
     docs = _load_documents()
     llm  = get_ragas_llm()
+    emb  = get_ragas_embeddings()
 
     logger.info("Generating testset (size=%d) — this may take several minutes...", TESTSET_SIZE)
-    testset = _generate(docs, llm)
+    testset = _generate(docs, llm, emb)
 
     df = testset.to_pandas()
     logger.info("Generated %d rows. Columns: %s", len(df), list(df.columns))
