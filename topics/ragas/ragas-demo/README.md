@@ -91,6 +91,43 @@ That last row is the point: Ragas lets you write your own pass/fail metric in
 two lines (`AspectCritic(name=..., definition=...)`), so evals can encode
 whatever "good" means for your app.
 
+## Reading the scores: a worked example
+
+A correct answer can score 0.0 on some metrics. That is not a bug; it is the
+single most important thing to understand about evals. Here is a real run from
+the playground.
+
+> **Question:** What did Cleveland's opponents say in 1884 to counter his
+> innocent image?
+>
+> **Answer** (gemma, top_k=4): To counter Cleveland's image of purity, his
+> opponents reported that he had fathered an illegitimate child while working as
+> a lawyer in Buffalo.
+>
+> **Ground truth:** That he had fathered an illegitimate child
+
+The answer is plainly correct: it matches the ground truth and is grounded
+word-for-word in retrieved chunk #3. Yet the scorecard is all over the place.
+
+| Metric | Score | How to read it |
+|--------|------:|----------------|
+| Faithfulness | 1.000 | Every claim is grounded in the context. Correct. |
+| Context Recall | 1.000 | The chunk holding the answer was retrieved. Correct. |
+| Response Relevancy | 0.807 | The answer addresses the question. Correct. |
+| Semantic Similarity | 0.695 | Close in meaning to the reference. Correct. |
+| Context Precision | 0.333 | Only 1 of the 4 retrieved chunks is about the slander; the rest are general Cleveland bio. Low precision with perfect recall: a textbook split, not a failure. |
+| Factual Correctness | 0.000 | Claim-by-claim F1 against a five-word reference. The answer adds true but unmatched claims (purity, lawyer, Buffalo), and a terse reference wrecks claim-level F1. |
+| Context Entity Recall | 0.000 | Counts how many of the reference's named entities appear in the context. The reference has no proper nouns, so there is nothing to recall: 0 by construction. |
+| Noise Sensitivity | 1.000 | Flags that 3 of 4 chunks were irrelevant noise. But Faithfulness is 1.0, so the answer was not actually corrupted: here the metric is more pessimistic than reality. |
+
+The takeaway: a correct answer scored 0.0 on two metrics and 1.0 (worst) on a
+third. Trust any single number and you would "fix" a system that is working
+perfectly. You have to know what each metric compares and where it breaks, which
+is why you run the whole suite and read it next to the retrieved context, never a
+lone number out of context. (The terse, sometimes yes/no answers in
+mini-wikipedia make the reference-based metrics especially harsh; a dataset with
+fuller reference answers would soften factual correctness and entity recall.)
+
 ## Prereqs
 
 The gemma4 vLLM server from the sibling project should already be deployed and
