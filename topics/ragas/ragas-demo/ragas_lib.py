@@ -122,9 +122,13 @@ class MetricSpec:
     col: str = ""        # the column name Ragas emits for it (set at build time)
 
 
-def build_metrics() -> list[MetricSpec]:
+def build_metrics(reference: bool = True) -> list[MetricSpec]:
     """Instantiate the metric suite. The judge LLM + embeddings are injected by
     evaluate(), so metrics that need them take no args here.
+
+    With `reference=False` (e.g. a free-typed question with no ground truth),
+    the reference-based metrics are dropped, leaving the reference-free ones
+    (faithfulness, response relevancy, conciseness).
     """
     from ragas.metrics import (
         AspectCritic,
@@ -191,6 +195,8 @@ def build_metrics() -> list[MetricSpec]:
             ),
         ),
     ]
+    if not reference:
+        specs = [s for s in specs if not s.needs_ref]
     for s in specs:
         s.col = getattr(s.instance, "name", s.label)
     return specs
@@ -203,9 +209,11 @@ def build_metrics() -> list[MetricSpec]:
 INPUT_COLS = {"user_input", "retrieved_contexts", "response", "reference"}
 
 
-def run_eval(samples: list[dict], judge: str = "gemma", max_workers: int = 8):
-    """Score `samples` with the full metric suite.
+def run_eval(samples: list[dict], judge: str = "gemma", max_workers: int = 8,
+             reference: bool = True):
+    """Score `samples` with the metric suite.
 
+    `reference=False` drops the ground-truth metrics (for free-typed questions).
     Returns (specs, per_sample_records, aggregate) where aggregate maps each
     emitted metric column to its mean over the questions.
     """
@@ -213,7 +221,7 @@ def run_eval(samples: list[dict], judge: str = "gemma", max_workers: int = 8):
     from ragas import EvaluationDataset, evaluate
     from ragas.run_config import RunConfig
 
-    specs = build_metrics()
+    specs = build_metrics(reference=reference)
     judge_llm = build_judge(judge)
     emb = build_embeddings()
 
@@ -240,6 +248,27 @@ def run_eval(samples: list[dict], judge: str = "gemma", max_workers: int = 8):
 
     records = df.to_dict(orient="records")
     return specs, records, aggregate
+
+
+def evaluate_one(question: str, contexts: list[str], answer: str,
+                 reference: str | None = None, judge: str = "gemma"):
+    """Score a single RAG response. Powers the live Gradio playground.
+
+    With a `reference` (a test-set question), runs the full suite; without one
+    (a free-typed question), runs only the reference-free metrics.
+    Returns (specs, record, metric_cols) where record carries the metric scores.
+    """
+    sample = {
+        "user_input": question,
+        "retrieved_contexts": list(contexts or []),
+        "response": answer or "",
+    }
+    has_ref = bool(reference and str(reference).strip())
+    if has_ref:
+        sample["reference"] = reference
+    specs, records, aggregate = run_eval([sample], judge=judge, reference=has_ref)
+    record = records[0] if records else {}
+    return specs, record, list(aggregate.keys())
 
 
 def spec_for_col(col: str, specs: list[MetricSpec]) -> MetricSpec | None:
@@ -338,6 +367,24 @@ def _chip_class(score, higher_better=True) -> str:
     return "sc-chip sc-chip-bad"
 
 
+def render_chips(specs, record: dict, metric_cols) -> str:
+    """A row of color-coded metric chips for one scored sample.
+
+    Shared by the per-question scorecard cards and the live Gradio playground.
+    """
+    chips = []
+    for c in metric_cols:
+        spec = spec_for_col(c, specs)
+        label = spec.label if spec else c
+        hb = spec.higher_better if spec else True
+        chips.append(
+            f'<span class="{_chip_class(record.get(c), hb)}">'
+            f'<span class="sc-chip-k">{label}</span>'
+            f'<span class="sc-chip-v">{_fmt(record.get(c))}</span></span>'
+        )
+    return f'<div class="sc-chips">{"".join(chips)}</div>'
+
+
 def render_scorecard(specs, records, aggregate, meta: dict) -> str:
     """Aggregate scorecard (grouped) + a compact per-question table."""
     grouped: dict[str, list] = {g: [] for g in GROUP_ORDER}
@@ -388,16 +435,7 @@ def render_scorecard(specs, records, aggregate, meta: dict) -> str:
     html.append('<div class="sc-group">Per-question</div>')
     for i, r in enumerate(records, 1):
         ans = _esc(r.get("response")) or "<em>(empty)</em>"
-        chips = []
-        for c in metric_cols:
-            spec = spec_for_col(c, specs)
-            label = spec.label if spec else c
-            hb = spec.higher_better if spec else True
-            chips.append(
-                f'<span class="{_chip_class(r.get(c), hb)}">'
-                f'<span class="sc-chip-k">{label}</span>'
-                f'<span class="sc-chip-v">{_fmt(r.get(c))}</span></span>'
-            )
+        chips_html = render_chips(specs, r, metric_cols)
         ctxs = list(r.get("retrieved_contexts") or [])
         ctx_items = "".join(
             f'<div class="sc-ctx-item"><span class="sc-ctx-n">#{j}</span>{_esc(c)}</div>'
@@ -414,7 +452,7 @@ def render_scorecard(specs, records, aggregate, meta: dict) -> str:
             f'<div class="sc-qtext">{ans}</div></div>'
             f'<div class="sc-qa"><span class="sc-qlabel">Reference</span>'
             f'<div class="sc-qtext sc-qref">{_esc(r.get("reference"))}</div></div>'
-            f'<div class="sc-chips">{"".join(chips)}</div>'
+            f'{chips_html}'
             f'{details}'
             '</div>'
         )

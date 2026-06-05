@@ -35,7 +35,8 @@ Ragas LLM-as-judge. So the whole eval stays self-hosted on the devbox.
 |------|--------------|
 | `config.py` | Flyte `TaskEnvironment` + image, vLLM/dataset/embedding constants. DGX-Spark-pinned (arm64, local registry). |
 | `ragas_lib.py` | Pure helpers: judge + embeddings wiring, the metric suite (`build_metrics`), `run_eval`, and the HTML scorecards. No Flyte. |
-| `eval_pipeline.py` | Flyte tasks — `load_qa`, `build_index`, `run_rag`, `ragas_score` — wrapped by `ragas_eval` and `ragas_compare`. |
+| `eval_pipeline.py` | Flyte tasks — `load_qa`, `build_index`, `run_rag`, `ragas_score` — wrapped by `ragas_eval`, `ragas_compare`, `ragas_compare_chunking`. |
+| `eval_app.py` | Gradio **live eval playground** (`flyte.app.AppEnvironment`). Ask a question, watch RAG answer it, watch Ragas grade it live. |
 | `requirements.txt` | Local deps (`flyte`, `ragas`, `langchain-openai`, `langchain-huggingface`, `sentence-transformers`, `chromadb`, `datasets`). |
 
 ## Dataset
@@ -207,6 +208,31 @@ Both render a **side-by-side scorecard** with the winner highlighted per metric.
 Small chunks tend to retrieve more precisely but fragment context; large chunks
 carry more context per hit but blur precision. The same compare shape generalizes
 to any knob: embedding model, system prompt, even the answering LLM.
+
+## 4. Live eval playground (Gradio)
+
+An interactive app: pick a test-set question (full 9-metric suite, since it has a
+ground-truth answer) or type your own (reference-free metrics only), drag the
+`top_k` slider, and watch RAG answer it and Ragas grade that single response live
+with color-coded metric chips and the retrieved contexts.
+
+It mounts the Chroma index from a standalone `build_index` run, so build one
+first, then deploy pinned to it:
+
+```bash
+# 1. build (or reuse) an index as a top-level run
+flyte run eval_pipeline.py build_index --max_docs 0
+# -> copy the run name
+
+# 2. deploy the app pinned to that index run
+RAGAS_INDEX_RUN=<build_index-run-name> python eval_app.py
+```
+
+With no `RAGAS_INDEX_RUN`, the app falls back to the latest succeeded
+`build_index` run. The deployed URL is printed at the end (a `*.localhost:30081`
+Knative address, same as the other devbox apps). The app scales to zero after 5
+minutes idle. It reuses `ragas_lib.evaluate_one` + `render_chips`, so the chips
+match the pipeline scorecard exactly.
 
 ## Swapping the judge live
 

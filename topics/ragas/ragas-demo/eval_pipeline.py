@@ -165,6 +165,8 @@ async def build_index(
     log.info(f"Chroma collection '{COLLECTION_NAME}' has {coll.count()} chunks")
     await flyte.report.replace.aio(
         f"<h2>Built Chroma index</h2>"
+        f"<p><b>chunk_size:</b> {chunk_size} chars · "
+        f"<b>overlap:</b> {chunk_overlap}</p>"
         f"<p><b>Embedding model:</b> {EMBEDDING_MODEL}</p>"
         f"<p><b>Chunks indexed:</b> {coll.count()}</p>"
         f"<p><b>Collection:</b> {COLLECTION_NAME}</p>"
