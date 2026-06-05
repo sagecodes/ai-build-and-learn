@@ -45,6 +45,76 @@ This project extends `johndellenbaugh/rag-comparison:latest`. That base image sh
 
 ---
 
+## GCP VM Setup
+
+This project runs on a GCP Compute Engine VM that also hosts the `rag_comparison` app (port 7860). Both containers run on the same VM because Cognee's LanceDB is stored on the local filesystem and must be volume-mounted.
+
+### VM specification
+
+| Setting | Value |
+|---|---|
+| Machine type | e2-standard-2 (2 vCPU, 8 GB RAM) or larger |
+| OS | Ubuntu 22.04 LTS |
+| Boot disk | 30 GB SSD minimum (Cognee LanceDB grows with ingestion) |
+| Region | Match your Neo4j AuraDB region to reduce latency |
+
+> **CPU note:** GCP's default e2 and n1 Xeon CPUs do not support AVX512. This is expected — the workarounds in the Dockerfile handle it. Do not use a GPU instance; this project does not need one.
+
+### Initial VM setup
+
+```bash
+# Install Docker
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+sudo usermod -aG docker $USER
+# Log out and back in for group change to take effect
+```
+
+### Place your .env file
+
+```bash
+# On the VM, create ~/.env with all required variables
+nano ~/.env
+```
+
+The Cognee volume path must match what was used when the `rag_comparison` container ingested data. Check the existing `rag-comparison.service` on your VM to confirm the volume mount path, then use the same path here.
+
+### Firewall rules
+
+```bash
+# Run from your local machine (gcloud authenticated)
+gcloud compute firewall-rules create allow-rag-ragas \
+  --allow tcp:7861 \
+  --project <your-gcp-project-id>
+
+# The rag_comparison app uses port 7860 (separate rule)
+# gcloud compute firewall-rules create allow-rag-comparison --allow tcp:7860 ...
+```
+
+> **GCP project ID:** Check which project your VM belongs to with:
+> ```bash
+> curl -s "http://metadata.google.internal/computeMetadata/v1/project/project-id" \
+>   -H "Metadata-Flavor: Google"
+> ```
+> The firewall rule must be in the **same project as the VM** — creating it in any other project has no effect.
+
+### Updating a running deployment
+
+```bash
+# On the VM — pull new image and restart
+docker pull <your-dockerhub-username>/rag-comparison-ragas:latest
+sudo systemctl restart rag-comparison-ragas
+sudo journalctl -u rag-comparison-ragas -n 20 --no-pager
+```
+
+The app is healthy when the journal shows `* Running on local URL: http://0.0.0.0:7861`.
+
+---
+
 ## Quickstart
 
 ### 1. Clone and configure
