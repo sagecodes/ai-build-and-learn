@@ -12,10 +12,11 @@ logger = logging.getLogger(__name__)
 _EMPTY_DF = pd.DataFrame(columns=["backend"] + METRIC_NAMES)
 
 
-def handle_batch_eval():
+def handle_batch_eval(progress=gr.Progress(track_tqdm=True)):
     """
     Generator — yields button-disabled state first so the UI locks immediately,
     then yields results (or error) and re-enables the button.
+    track_tqdm=True forwards ragas's internal tqdm bars to the Gradio progress bar.
     """
     yield gr.update(interactive=False, value="Running... this takes 5-10 min"), _EMPTY_DF, gr.update(visible=False)
     try:

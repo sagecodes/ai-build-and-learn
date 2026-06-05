@@ -28,8 +28,9 @@ def build_demo() -> gr.Blocks:
                     "Runs all 20 testset questions against all 3 backends and returns "
                     "mean scores. Takes ~5–10 minutes."
                 )
-                batch_btn = gr.Button("Run Batch Evaluation", variant="primary")
-                batch_df  = gr.Dataframe(
+                batch_btn    = gr.Button("Run Batch Evaluation", variant="primary")
+                batch_status = gr.Markdown(visible=False)
+                batch_df     = gr.Dataframe(
                     headers=_BATCH_COLS,
                     label="Mean Scores by Backend",
                     interactive=False,
@@ -70,6 +71,7 @@ def build_demo() -> gr.Blocks:
             fn=handle_batch_eval,
             inputs=[],
             outputs=[batch_btn, batch_df, batch_err],
+            show_progress="full",
         )
 
         single_btn.click(
