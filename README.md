@@ -2,9 +2,9 @@
 
 Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new topic and learn by building together.
 
-> **Up next: Cognee: Memory Layer for Agents** (2026-05-22)
-> Cognee is an open-source memory layer for AI agents. Persistent, queryable memory that survives across sessions and tools.
-> [RSVP](https://luma.com/1kd5i9x8) | [Join the Slack](https://slack.flyte.org/)
+> **Up next: Ragas: Evals for RAG & Memory** (2026-06-05)
+> Ragas evaluates RAG and memory systems with structured metrics: retrieval quality, faithfulness, answer relevance, and more.
+> [RSVP](https://luma.com/zs7v5rqj) | [Join the Slack](https://slack.flyte.org/)
 
 ## Upcoming:
 
@@ -18,16 +18,6 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 <tbody>
 <tr><td>
       <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Cognee: Memory Layer for Agents</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-22</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/cognee">code</a> • <a href="https://luma.com/1kd5i9x8">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Cognee is an open-source memory layer for AI agents. Persistent, queryable memory that survives across sessions and tools.
-</div></td></tr>
-<tr><td>
-      <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Ragas: Evals for RAG &amp; Memory</strong></div>
         <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-06-05</div>
         <div style="font-size: 13px; color: #666;">
@@ -35,6 +25,16 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
         </div>
       </div>
     </td><td><div style="padding: 8px 0; line-height: 1.5;">Ragas evaluates RAG and memory systems with structured metrics: retrieval quality, faithfulness, answer relevance, and more.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Arize Phoenix: LLM Observability</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-06-12</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/arize-phoenix">code</a> • <a href="https://luma.com/ko4wy983">register</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Arize Phoenix is an open-source observability tool for LLM apps: trace, evaluate, and debug your RAG and agent pipelines.
 </div></td></tr>
 </tbody>
 </table>
@@ -49,6 +49,16 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Cognee: Memory Layer for Agents</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-22</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/cognee">code</a> • <a href="https://www.youtube.com/watch?v=cQ71lfvacK4">watch</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Cognee is an open-source memory layer for AI agents. Persistent, queryable memory that survives across sessions and tools.
+</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Karpathy's LLM Wiki</strong></div>
