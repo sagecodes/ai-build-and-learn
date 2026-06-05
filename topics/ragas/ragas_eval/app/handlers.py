@@ -17,13 +17,13 @@ def handle_batch_eval():
     Generator — yields button-disabled state first so the UI locks immediately,
     then yields results (or error) and re-enables the button.
     """
-    yield gr.update(interactive=False), _EMPTY_DF, gr.update(visible=False)
+    yield gr.update(interactive=False, value="Running... this takes 5-10 min"), _EMPTY_DF, gr.update(visible=False)
     try:
         df = asyncio.run(run_batch_eval())
-        yield gr.update(interactive=True), df, gr.update(visible=False)
+        yield gr.update(interactive=True, value="Run Batch Evaluation"), df, gr.update(visible=False)
     except Exception as e:
         logger.exception("Batch eval failed")
-        yield gr.update(interactive=True), _EMPTY_DF, gr.update(
+        yield gr.update(interactive=True, value="Run Batch Evaluation"), _EMPTY_DF, gr.update(
             value=str(e), visible=True
         )
 
@@ -34,11 +34,11 @@ def handle_single_eval(question: str, ground_truth: str):
     Returns 10 values: [single_btn] + [ctx, answer, scores] × 3 backends.
     """
     _empty = ("", "", "")
-    empty_outputs = (gr.update(interactive=False),) + _empty * 3
+    empty_outputs = (gr.update(interactive=False, value="Evaluating..."),) + _empty * 3
     yield empty_outputs
 
     if not question.strip():
-        yield (gr.update(interactive=True),) + _empty * 3
+        yield (gr.update(interactive=True, value="Evaluate"),) + _empty * 3
         return
 
     try:
@@ -46,10 +46,10 @@ def handle_single_eval(question: str, ground_truth: str):
     except Exception as e:
         logger.exception("Single eval failed")
         error_scores = f"**Error:** {e}"
-        yield (gr.update(interactive=True),) + ("", "", error_scores) * 3
+        yield (gr.update(interactive=True, value="Evaluate"),) + ("", "", error_scores) * 3
         return
 
-    outputs = [gr.update(interactive=True)]
+    outputs = [gr.update(interactive=True, value="Evaluate")]
     for r in results:
         ctx    = r.get("context_summary", "")
         answer = r.get("answer", "")
