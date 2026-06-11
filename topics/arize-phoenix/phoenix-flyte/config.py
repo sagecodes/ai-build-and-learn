@@ -38,8 +38,9 @@ PHOENIX_COLLECTOR_ENDPOINT = (
     f"http://{PHOENIX_APP_NAME}-flytesnacks-development.flyte.svc.cluster.local"
 )
 
-# Phoenix UI groups traces by project. The agent tags its spans with this.
-PHOENIX_PROJECT_NAME = "langgraph-tavily-agent"
+# Phoenix UI groups traces by project. Every pipeline task tags its spans with
+# this, so plan/research/synthesize/quality traces land together.
+PHOENIX_PROJECT_NAME = "research-pipeline"
 
 # ── gemma4 vLLM sibling app (the LLM_PROVIDER=vllm path) ────────────────────────
 # Same in-cluster app the rag-chroma-flyte / cognee / ragas demos talk to. It is
@@ -70,6 +71,7 @@ AGENT_PIP_PACKAGES = (
     "tavily-python",
     "arize-phoenix-otel>=0.16",
     "openinference-instrumentation-langchain>=0.1.66",
+    "markdown",            # Flyte report HTML
     "python-dotenv",
     "unionai-reuse",
 )

@@ -6,6 +6,7 @@ openinference-instrumentation-langchain>=0.1.66
 langgraph>=1.0.7
 langchain-openai
 tavily-python
+markdown
 
 # Server side (phoenix_app.py): the full platform, ships the `phoenix` CLI.
 arize-phoenix>=17,<18
