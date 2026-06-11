@@ -1,0 +1,14 @@
+flyte[tui]>=2.0
+
+# Agent (client) side: light OTLP exporter + the LangChain/LangGraph instrumentor.
+arize-phoenix-otel>=0.16
+openinference-instrumentation-langchain>=0.1.66
+langgraph>=1.0.7
+langchain-openai
+tavily-python
+
+# Server side (phoenix_app.py): the full platform, ships the `phoenix` CLI.
+arize-phoenix>=17,<18
+
+python-dotenv
+unionai-reuse
