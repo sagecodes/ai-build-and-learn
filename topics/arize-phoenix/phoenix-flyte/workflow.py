@@ -31,7 +31,7 @@ from config import agent_env, LLM_PROVIDER
 from models import TopicReport, QualityResult, PipelineResult
 from graph import build_pipeline_graph, build_research_subgraph
 from llm import build_llm
-from tracing import setup_tracing, flush, get_tracer
+from tracing import setup_tracing, flush, get_tracer, session_scope, run_session_id
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -67,10 +67,11 @@ async def plan_topics(query: str, num_topics: int = 3, provider: str = LLM_PROVI
 
     llm = build_llm(provider)
     try:
-        response = llm.invoke(
-            f"Break this research question into exactly {num_topics} focused sub-topics. "
-            f"Return ONLY a JSON array of strings, nothing else.\n\nQuestion: {query}"
-        )
+        with session_scope():
+            response = llm.invoke(
+                f"Break this research question into exactly {num_topics} focused sub-topics. "
+                f"Return ONLY a JSON array of strings, nothing else.\n\nQuestion: {query}"
+            )
         try:
             topics = json.loads(response.content)
         except json.JSONDecodeError:
@@ -109,9 +110,10 @@ async def research_topic(topic: str, max_searches: int = 2, provider: str = LLM_
         max_searches=max_searches,
     )
     try:
-        result = await graph.ainvoke(
-            {"messages": [{"role": "user", "content": f"Research this topic: {topic}"}]}
-        )
+        with session_scope():
+            result = await graph.ainvoke(
+                {"messages": [{"role": "user", "content": f"Research this topic: {topic}"}]}
+            )
         report = result["messages"][-1].content
     finally:
         flush()
@@ -138,13 +140,14 @@ async def synthesize(query: str, results: list[TopicReport], provider: str = LLM
 
     llm = build_llm(provider)
     try:
-        response = llm.invoke(
-            f"You have research reports on sub-topics of this question:\n\n{query}\n\n"
-            f"Sub-topic reports:\n\n{sections}\n\n"
-            f"Write a comprehensive report that synthesizes all findings. "
-            f"Organize by theme, highlight connections between sub-topics, "
-            f"and end with key takeaways."
-        )
+        with session_scope():
+            response = llm.invoke(
+                f"You have research reports on sub-topics of this question:\n\n{query}\n\n"
+                f"Sub-topic reports:\n\n{sections}\n\n"
+                f"Write a comprehensive report that synthesizes all findings. "
+                f"Organize by theme, highlight connections between sub-topics, "
+                f"and end with key takeaways."
+            )
         synthesis = response.content
     finally:
         flush()
@@ -169,14 +172,15 @@ async def quality_check(query: str, synthesis: str, provider: str = LLM_PROVIDER
 
     llm = build_llm(provider)
     try:
-        response = llm.invoke(
-            f'Evaluate this research report for the question: {query}\n\n'
-            f'Report:\n{synthesis}\n\n'
-            f'Rate the report quality from 1-10 and identify any gaps or missing perspectives. '
-            f'Return JSON: {{"score": <int>, "gaps": [<string>, ...]}}\n'
-            f'If the report is comprehensive (score >= 8) or there are no significant gaps, '
-            f'return an empty gaps list.'
-        )
+        with session_scope():
+            response = llm.invoke(
+                f'Evaluate this research report for the question: {query}\n\n'
+                f'Report:\n{synthesis}\n\n'
+                f'Rate the report quality from 1-10 and identify any gaps or missing perspectives. '
+                f'Return JSON: {{"score": <int>, "gaps": [<string>, ...]}}\n'
+                f'If the report is comprehensive (score >= 8) or there are no significant gaps, '
+                f'return an empty gaps list.'
+            )
         try:
             evaluation = json.loads(response.content)
             score = evaluation.get("score", 8)
@@ -283,6 +287,7 @@ async def research_pipeline(
         tracer = get_tracer()
         with tracer.start_as_current_span("research_report") as span:
             span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("session.id", run_session_id())
             span.set_attribute("input.mime_type", "text/plain")
             span.set_attribute("input.value", query)
             span.set_attribute("output.mime_type", "text/plain")

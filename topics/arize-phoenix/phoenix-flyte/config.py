@@ -31,12 +31,20 @@ REGISTRY = "localhost:30000"
 PHOENIX_APP_NAME = "phoenix-server"
 PHOENIX_PORT = 6006
 
-# Cluster-internal address the agent task uses to reach the collector. Same
-# Knative DNS shape the cognee/ragas demos use for the vLLM app; the app's
-# port 6006 is fronted by the Knative service on port 80, so no port suffix.
-PHOENIX_COLLECTOR_ENDPOINT = (
+# Cluster-internal address of the collector. Same Knative DNS shape the
+# cognee/ragas demos use for the vLLM app; the app's port 6006 is fronted by the
+# Knative service on port 80, so no port suffix. Remote task pods use this (it is
+# injected into their env below).
+PHOENIX_CLUSTER_ENDPOINT = (
     f"http://{PHOENIX_APP_NAME}-flytesnacks-development.flyte.svc.cluster.local"
 )
+
+# What the code actually uses at runtime. A remote pod has PHOENIX_COLLECTOR_ENDPOINT
+# injected as the cluster endpoint (see agent_env / eval_env). For a `flyte run
+# --local` run, the cluster DNS is not resolvable from your machine, so set this in
+# .env to the host URL and spans still reach Phoenix:
+#   PHOENIX_COLLECTOR_ENDPOINT=http://phoenix-server-flytesnacks-development.localhost:30081
+PHOENIX_COLLECTOR_ENDPOINT = os.getenv("PHOENIX_COLLECTOR_ENDPOINT", PHOENIX_CLUSTER_ENDPOINT)
 
 # Phoenix UI groups traces by project. Every pipeline task tags its spans with
 # this, so plan/research/synthesize/quality traces land together.
@@ -92,9 +100,10 @@ agent_env = flyte.TaskEnvironment(
         flyte.Secret(key="OPENAI_API_KEY", as_env_var="OPENAI_API_KEY"),
         flyte.Secret(key="TAVILY_API_KEY", as_env_var="TAVILY_API_KEY"),
     ],
-    # Point the OpenInference exporter at the hosted Phoenix collector. Set here
-    # so it lands in the pod env before workflow.py calls register().
-    env_vars={"PHOENIX_COLLECTOR_ENDPOINT": PHOENIX_COLLECTOR_ENDPOINT},
+    # Point the OpenInference exporter at the hosted Phoenix collector. Inject the
+    # CLUSTER endpoint (not the env-derived one) so a remote pod always uses the
+    # in-cluster DNS even if .env overrides the endpoint for local runs.
+    env_vars={"PHOENIX_COLLECTOR_ENDPOINT": PHOENIX_CLUSTER_ENDPOINT},
     resources=flyte.Resources(cpu=2, memory="2Gi"),
 )
 
@@ -120,5 +129,7 @@ eval_env = flyte.TaskEnvironment(
     ).with_pip_packages(*EVAL_PIP_PACKAGES),
     # The judge defaults to OpenAI; the vLLM judge path needs no key.
     secrets=[flyte.Secret(key="OPENAI_API_KEY", as_env_var="OPENAI_API_KEY")],
+    # Reach Phoenix's REST API at the in-cluster DNS from a remote eval pod.
+    env_vars={"PHOENIX_COLLECTOR_ENDPOINT": PHOENIX_CLUSTER_ENDPOINT},
     resources=flyte.Resources(cpu=2, memory="2Gi"),
 )
