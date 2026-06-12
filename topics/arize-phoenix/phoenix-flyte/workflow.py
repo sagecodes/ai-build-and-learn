@@ -31,7 +31,7 @@ from config import agent_env, LLM_PROVIDER
 from models import TopicReport, QualityResult, PipelineResult
 from graph import build_pipeline_graph, build_research_subgraph
 from llm import build_llm
-from tracing import setup_tracing, flush
+from tracing import setup_tracing, flush, get_tracer
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -275,6 +275,21 @@ async def research_pipeline(
     sub_reports = [TopicReport(**r) for r in result["research_results"]]
     score = result.get("score", 0)
     iteration = result.get("iteration", 1) - 1
+
+    # Emit a clean span for the full report (query in, final report out) so
+    # Phoenix can judge the whole report as one unit, alongside the per-topic
+    # research-answer spans. Best-effort: never fail the run over telemetry.
+    try:
+        tracer = get_tracer()
+        with tracer.start_as_current_span("research_report") as span:
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            span.set_attribute("input.mime_type", "text/plain")
+            span.set_attribute("input.value", query)
+            span.set_attribute("output.mime_type", "text/plain")
+            span.set_attribute("output.value", final_report)
+        flush()
+    except Exception as e:
+        log.warning(f"final-report span skipped: {type(e).__name__}: {e}")
 
     await flyte.report.replace.aio(
         f'<h2>Research Report</h2>'

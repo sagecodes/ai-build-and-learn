@@ -45,6 +45,16 @@ def setup_tracing(project_name: str = PHOENIX_PROJECT_NAME):
     return _tracer_provider
 
 
+def get_tracer(name: str = "research-pipeline"):
+    """A tracer bound to the Phoenix provider, for emitting custom spans.
+
+    Used to mark the final synthesized report as its own span (query in, report
+    out) so Phoenix can evaluate it as a unit. Bound to our provider (not the
+    global one) so it exports to Phoenix like the instrumented spans.
+    """
+    return setup_tracing().get_tracer(name)
+
+
 def flush():
     """Drain the batch exporter before a short-lived task pod exits."""
     if _tracer_provider is not None:

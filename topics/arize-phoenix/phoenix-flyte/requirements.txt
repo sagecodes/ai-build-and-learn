@@ -8,6 +8,11 @@ langchain-openai
 tavily-python
 markdown
 
+# Eval task (evaluate.py): LLM-as-a-judge over captured traces (post-v14 API).
+arize-phoenix-client>=2
+arize-phoenix-evals>=3
+pandas
+
 # Server side (phoenix_app.py): the full platform, ships the `phoenix` CLI.
 arize-phoenix>=17,<18
 

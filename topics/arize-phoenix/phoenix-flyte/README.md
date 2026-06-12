@@ -51,6 +51,7 @@ The tasks reach the collector at the app's cluster-internal Knative DNS name
 | --- | --- |
 | `phoenix_app.py` | The self-hosted Phoenix server, as a Flyte app. |
 | `workflow.py` | The four pipeline tasks + the `research_pipeline` orchestrator. |
+| `evaluate.py` | LLM-as-a-judge Flyte task: scores captured traces, writes annotations. |
 | `graph.py` | The LangGraph pipeline graph + the ReAct research subgraph. |
 | `models.py` | Pydantic models passed between tasks. |
 | `llm.py` | Provider-switchable chat model (`openai` or `vllm`). |
@@ -212,6 +213,46 @@ The same `web_search` and `agent` steps appear in both, because they are both
 use OpenTelemetry; `tracing.py` registers Phoenix with
 `set_global_tracer_provider=False` so Flyte's own orchestration spans stay in the
 Flyte UI and do not leak into Phoenix.
+
+## Evaluate the traces: LLM-as-a-judge
+
+This is where Phoenix earns its keep beyond what the trace view gives you: it
+turns captured traces into evaluations. `evaluate.py` is a Flyte task that reads
+the research-answer spans back out of Phoenix, scores them with an LLM judge, and
+writes the scores onto the spans as annotations, all inside your own stack.
+
+```bash
+flyte run evaluate.py evaluate_traces
+```
+
+It judges two kinds of span: the **full synthesized report** (the
+`research_report` span the orchestrator emits, query in / final report out) and
+each **per-topic research answer** (the `LangGraph` subgraph roots). Over each it
+runs two reference-free judges, `answer_relevance` and `answer_completeness`, and
+logs the results back. Refresh Phoenix and open the `research_report` span (or any
+`LangGraph` span): it now carries both annotations with a label, a 0/1 score, and
+the judge's written explanation. The run also returns a summary (mean score and
+label counts per metric, plus a breakdown of how many of each span type it
+judged).
+
+The judge is provider-switchable, same as the pipeline. Use your in-cluster
+gemma4 vLLM as a local, no-cost judge:
+
+```bash
+flyte run evaluate.py evaluate_traces --provider vllm
+```
+
+The loop is fully closed in your stack: the pipeline (Flyte) writes traces to
+Phoenix, this task (Flyte) reads them back, judges them (OpenAI or local vLLM),
+and annotates them in Phoenix. It uses the post-v14 evals API
+(`phoenix.client` + `create_classifier` + `evaluate_dataframe`); the judge and
+annotation calls go over Phoenix's REST API at `PHOENIX_BASE_URL`.
+
+To judge a different slice, point it at another project or span type:
+
+```bash
+flyte run evaluate.py evaluate_traces --project_name research-pipeline --span_name LangGraph
+```
 
 ## Options
 

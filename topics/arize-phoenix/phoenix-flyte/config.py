@@ -42,6 +42,11 @@ PHOENIX_COLLECTOR_ENDPOINT = (
 # this, so plan/research/synthesize/quality traces land together.
 PHOENIX_PROJECT_NAME = "research-pipeline"
 
+# The Phoenix REST base URL (used by the eval task's phoenix.client to pull spans
+# and write annotations). Same host as the OTLP collector: Knative fronts the
+# app's port 6006 on port 80, so the base URL is the bare DNS name, no path.
+PHOENIX_BASE_URL = PHOENIX_COLLECTOR_ENDPOINT
+
 # ── gemma4 vLLM sibling app (the LLM_PROVIDER=vllm path) ────────────────────────
 # Same in-cluster app the rag-chroma-flyte / cognee / ragas demos talk to. It is
 # OpenAI-compatible, so the agent reaches it through ChatOpenAI with a base_url.
@@ -90,5 +95,30 @@ agent_env = flyte.TaskEnvironment(
     # Point the OpenInference exporter at the hosted Phoenix collector. Set here
     # so it lands in the pod env before workflow.py calls register().
     env_vars={"PHOENIX_COLLECTOR_ENDPOINT": PHOENIX_COLLECTOR_ENDPOINT},
+    resources=flyte.Resources(cpu=2, memory="2Gi"),
+)
+
+
+# ── Eval task (LLM-as-a-judge over captured traces) ────────────────────────────
+# A separate, lean image: it talks to Phoenix over REST (pull spans, write
+# annotations) and calls an LLM judge. It does NOT need langgraph/tavily.
+EVAL_PIP_PACKAGES = (
+    "arize-phoenix-client>=2",
+    "arize-phoenix-evals>=3",     # the post-v14 evals API (create_classifier, evaluate_dataframe)
+    "openai>=1.50.0",
+    "pandas",
+    "python-dotenv",
+    "unionai-reuse",
+)
+
+eval_env = flyte.TaskEnvironment(
+    name="phoenix-eval",
+    image=flyte.Image.from_debian_base(
+        name="phoenix-eval-image",
+        registry=REGISTRY,
+        platform=PLATFORM,
+    ).with_pip_packages(*EVAL_PIP_PACKAGES),
+    # The judge defaults to OpenAI; the vLLM judge path needs no key.
+    secrets=[flyte.Secret(key="OPENAI_API_KEY", as_env_var="OPENAI_API_KEY")],
     resources=flyte.Resources(cpu=2, memory="2Gi"),
 )
