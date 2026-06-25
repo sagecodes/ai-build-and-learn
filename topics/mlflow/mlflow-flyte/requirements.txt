@@ -1,0 +1,16 @@
+flyte[tui]>=2.0
+
+# Classic ML
+mlflow>=3.1
+scikit-learn
+pandas
+
+# LLM agent
+langgraph>=1.0.7
+langchain
+langchain-openai
+tavily-python
+markdown
+
+python-dotenv
+unionai-reuse
