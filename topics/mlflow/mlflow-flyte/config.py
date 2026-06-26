@@ -41,6 +41,8 @@ ML_PIP_PACKAGES = (
     "mlflow>=3.1",
     "scikit-learn",
     "pandas",
+    "matplotlib",  # confusion matrix / metric plots from mlflow.evaluate
+    "shap",        # feature-importance explanations from mlflow.evaluate
     "python-dotenv",
     "unionai-reuse",
 )
@@ -60,8 +62,10 @@ ml_env = flyte.TaskEnvironment(
 AGENT_PIP_PACKAGES = (
     "mlflow>=3.1",
     "langgraph>=1.0.7",
+    "langchain",
     "langchain-openai",
     "tavily-python",
+    "litellm",  # backs mlflow.genai LLM-as-a-judge scorers for openai:/ models
     "python-dotenv",
     "markdown",
     "unionai-reuse",

@@ -4,12 +4,15 @@ flyte[tui]>=2.0
 mlflow>=3.1
 scikit-learn
 pandas
+matplotlib   # mlflow.evaluate() plots
+shap         # mlflow.evaluate() feature importances
 
-# LLM agent
+# LLM agent + LLM-as-a-judge
 langgraph>=1.0.7
 langchain
 langchain-openai
 tavily-python
+litellm      # backs mlflow.genai judges for openai:/ models
 markdown
 
 python-dotenv

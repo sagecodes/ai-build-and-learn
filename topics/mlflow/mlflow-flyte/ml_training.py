@@ -34,6 +34,7 @@ class TrainResult:
 def train_model(model_type: str = "random_forest", n_estimators: int = 100, max_depth: int = 5) -> TrainResult:
     """Train a single sklearn model and log everything to MLflow."""
     import mlflow
+    import pandas as pd
     from sklearn.datasets import load_iris
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import accuracy_score, f1_score
@@ -41,7 +42,8 @@ def train_model(model_type: str = "random_forest", n_estimators: int = 100, max_
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment("classic-ml-iris")
 
-    X, y = load_iris(return_X_y=True)
+    iris = load_iris()
+    X, y, feature_names = iris.data, iris.target, iris.feature_names
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # Build the model
@@ -74,7 +76,19 @@ def train_model(model_type: str = "random_forest", n_estimators: int = 100, max_
         mlflow.log_metric("f1_score", f1)
 
         # Log the model
-        mlflow.sklearn.log_model(model, "model")
+        model_info = mlflow.sklearn.log_model(model, name="model")
+
+        # Full evaluation report: confusion matrix, per-class metrics, SHAP
+        # feature importances — all auto-logged as artifacts to this run.
+        eval_df = pd.DataFrame(X_test, columns=feature_names)
+        eval_df["label"] = y_test
+        mlflow.evaluate(
+            model_info.model_uri,
+            data=eval_df,
+            targets="label",
+            model_type="classifier",
+            evaluators=["default"],
+        )
 
         print(f"[ml] {model_type}: accuracy={acc:.4f}, f1={f1:.4f}")
 
@@ -101,10 +115,14 @@ def train_model(model_type: str = "random_forest", n_estimators: int = 100, max_
 @ml_env.task(report=True)
 async def train_and_compare() -> str:
     """Train multiple models and compare them. Each train_model call dispatches as a separate Flyte task."""
-    # Dispatch all training tasks (they show up as child tasks in the Flyte DAG)
-    rf = await train_model(model_type="random_forest", n_estimators=100, max_depth=5)
-    gb = await train_model(model_type="gradient_boosting", n_estimators=100, max_depth=3)
-    lr = await train_model(model_type="logistic_regression")
+    # Dispatch all training tasks concurrently (they show up as child tasks in the Flyte DAG)
+    import asyncio
+
+    rf, gb, lr = await asyncio.gather(
+        train_model.aio(model_type="random_forest", n_estimators=100, max_depth=5),
+        train_model.aio(model_type="gradient_boosting", n_estimators=100, max_depth=3),
+        train_model.aio(model_type="logistic_regression"),
+    )
     results = [rf, gb, lr]
 
     best = max(results, key=lambda r: r.f1)

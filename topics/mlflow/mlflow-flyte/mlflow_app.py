@@ -55,7 +55,12 @@ def mlflow_server():
             "--host", "0.0.0.0",
             "--port", str(MLFLOW_PORT),
             "--backend-store-uri", f"sqlite:///{WORKING_DIR}/mlflow.db",
-            "--default-artifact-root", f"{WORKING_DIR}/artifacts",
+            # Proxy artifacts through the tracking server. Clients get an
+            # `mlflow-artifacts:/` URI and upload via the server, so model
+            # files actually land here instead of in the ephemeral task pod.
+            "--serve-artifacts",
+            "--artifacts-destination", f"{WORKING_DIR}/artifacts",
+            "--default-artifact-root", "mlflow-artifacts:/",
             "--allowed-hosts", "*",
             "--cors-allowed-origins", "*",
         ],
