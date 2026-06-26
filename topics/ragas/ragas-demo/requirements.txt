@@ -1,0 +1,20 @@
+flyte[tui]>=2.0
+flyteplugins-vllm
+# ragas 0.3.x eagerly imports langchain_community.chat_models.vertexai, which
+# LangChain 1.x removed. Cap the whole langchain stack to the 0.3 generation.
+ragas>=0.2,<0.4
+langchain-core>=0.3,<0.4
+langchain-community>=0.3,<0.4
+langchain-openai>=0.2,<0.4
+langchain-huggingface>=0.1,<0.4
+sentence-transformers>=3.0.0
+chromadb>=0.5.0
+# Pin otel forward: chromadb's loose lower bound lets the resolver backtrack
+# opentelemetry-proto to an ancient 1.11.1 whose generated _pb2 is incompatible
+# with modern protobuf, which breaks `import chromadb`. Force a modern otel.
+opentelemetry-proto>=1.27
+opentelemetry-exporter-otlp-proto-grpc>=1.27
+datasets>=3.0.0
+pandas
+openai>=1.50.0
+python-dotenv

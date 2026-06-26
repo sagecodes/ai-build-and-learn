@@ -2,9 +2,9 @@
 
 Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new topic and learn by building together.
 
-> **Up next: Cognee: Memory Layer for Agents** (2026-05-22)
-> Cognee is an open-source memory layer for AI agents. Persistent, queryable memory that survives across sessions and tools.
-> [RSVP](https://luma.com/1kd5i9x8) | [Join the Slack](https://slack.flyte.org/)
+> **Up next: MLflow: ML Tracking, LLM Tracing & LLM-as-a-Judge** (2026-06-26)
+> MLflow for the full ML lifecycle — experiment tracking, model registry & evaluation, LLM tracing, prompt registry, and LLM-as-a-judge — all running on Flyte.
+> [RSVP](https://luma.com/m5fdmott) | [Join the Slack](https://slack.flyte.org/)
 
 ## Upcoming:
 
@@ -18,23 +18,13 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 <tbody>
 <tr><td>
       <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Cognee: Memory Layer for Agents</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-22</div>
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>MLflow: ML Tracking, LLM Tracing &amp; LLM-as-a-Judge</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-06-26</div>
         <div style="font-size: 13px; color: #666;">
-          <a href="topics/cognee">code</a> • <a href="https://luma.com/1kd5i9x8">register</a>
+          <a href="topics/mlflow">code</a> • <a href="https://luma.com/m5fdmott">register</a>
         </div>
       </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Cognee is an open-source memory layer for AI agents. Persistent, queryable memory that survives across sessions and tools.
-</div></td></tr>
-<tr><td>
-      <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Ragas: Evals for RAG &amp; Memory</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-06-05</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/ragas">code</a> • <a href="https://luma.com/zs7v5rqj">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Ragas evaluates RAG and memory systems with structured metrics: retrieval quality, faithfulness, answer relevance, and more.
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">MLflow for the full ML lifecycle: experiment tracking, model registry &amp; evaluation, LLM tracing, prompt registry, and LLM-as-a-judge — all on Flyte.
 </div></td></tr>
 </tbody>
 </table>
@@ -49,6 +39,36 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Arize Phoenix: LLM Observability</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-06-12</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/arize-phoenix">code</a> • <a href="https://www.youtube.com/watch?v=Hh7K0aSlU7w">watch</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Arize Phoenix is an open-source observability tool for LLM apps: trace, evaluate, and debug your RAG and agent pipelines.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Ragas: Evals for RAG &amp; Memory</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-06-05</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/ragas">code</a> • <a href="https://www.youtube.com/watch?v=JEDzmM-8rrM">watch</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Ragas evaluates RAG and memory systems with structured metrics: retrieval quality, faithfulness, answer relevance, and more.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Cognee: Memory Layer for Agents</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-05-22</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/cognee">code</a> • <a href="https://www.youtube.com/watch?v=cQ71lfvacK4">watch</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Cognee is an open-source memory layer for AI agents. Persistent, queryable memory that survives across sessions and tools.
+</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Karpathy's LLM Wiki</strong></div>
