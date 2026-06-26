@@ -1,0 +1,43 @@
+/* ── Answer panels (per-backend RAG + model comparison columns) ─────────────── */
+.answer-panel {
+    min-height: 220px;
+}
+.answer-panel .prose {
+    max-height: 280px;
+    overflow-y: auto;
+    padding-right: 4px;
+    font-size: 14px;
+}
+
+/* ── Summary / evaluation panel ─────────────────────────────────────────────── */
+.summary-panel {
+    min-height: 160px;
+}
+.summary-panel .prose {
+    max-height: 400px;
+    overflow-y: auto;
+    padding-right: 4px;
+    font-size: 14px;
+}
+
+/* ── Model comparison answer panels (Tab 2) ─────────────────────────────────── */
+.model-panel {
+    min-height: 240px;
+}
+.model-panel .prose {
+    max-height: 320px;
+    overflow-y: auto;
+    padding-right: 4px;
+    font-size: 14px;
+}
+
+/* ── Backend subtitle lines under column headers ────────────────────────────── */
+.backend-subtitle {
+    padding-top: 6px;
+}
+.backend-subtitle p {
+    font-style: italic;
+    opacity: 0.75;
+    margin-top: 0;
+    margin-bottom: 0;
+}
