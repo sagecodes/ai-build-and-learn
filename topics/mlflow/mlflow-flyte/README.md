@@ -25,19 +25,6 @@ Two pipelines, built as proper Flyte workflows — each step is its own task in 
 
 **LLM research pipeline** (`research_pipeline`) — `plan_topics` → `research_topic` (fan-out: one ReAct + Tavily agent per sub-topic) → `judge_research`. Every LLM call, tool use, and graph step is captured by `mlflow.langchain.autolog()`; the agent's system prompt comes from the **MLflow Prompt Registry**; and the synthesized answer is scored with **LLM-as-a-judge** using all three judge types — **built-in LLM judges** (`RelevanceToQuery`, `Guidelines`, `Safety`), a **custom LLM judge** (`make_judge`), and a **custom code judge** (`@scorer` → `Feedback`, deterministic, no LLM call).
 
-### Flyte vs MLflow — two views of the same run
-
-We split the work into multiple Flyte tasks on purpose: it mirrors how you'd really build these, and it makes visible what each tool records.
-
-| | Flyte | MLflow |
-|---|---|---|
-| **Unit of record** | a task in a DAG | a run / trace / evaluation |
-| **ML pipeline** | `prepare_data` + 3×(`train` → `eval`) tasks, each with its own compute, logs, report | 3 runs (train+eval share one run each); `prepare_data` is invisible to MLflow |
-| **LLM pipeline** | `plan` + N×`research` + `judge` tasks | N research traces + 1 evaluation run + prompt versions |
-| **Best at** | orchestration, compute, retries, fan-out, lineage across steps | deep per-step detail: params, metrics, model artifacts, LLM traces, judge scores |
-
-Flyte answers *"what ran, in what order, on what compute, and did it succeed?"* MLflow answers *"what were the params / metrics / prompts / traces / scores inside each step?"* The demo's point is the side-by-side — neither replaces the other.
-
 ## Feature breakdown — what we tested and why it matters
 
 Each piece below is something we ran and verified against the self-hosted server.
