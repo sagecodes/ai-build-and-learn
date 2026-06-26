@@ -19,13 +19,24 @@ MLflow uses a familiar `log_param` / `log_metric` API for classic ML, and OpenTe
 
 ## What we're building
 
-Three demos, one MLflow server:
+Two pipelines, built as proper Flyte workflows — each step is its own task in the DAG — both tracked in one self-hosted MLflow server:
 
-**Part 1: Classic ML** — Train three sklearn classifiers (Random Forest, Gradient Boosting, Logistic Regression) on Iris, log params/metrics/models, and run `mlflow.evaluate()` for a full evaluation report (confusion matrix, ROC/PR curves, SHAP feature importances). Compare runs in the UI.
+**Classic ML pipeline** (`ml_pipeline`) — `prepare_data` → `train_model` → `evaluate_model`, fanned out across three sklearn classifiers (Random Forest, Gradient Boosting, Logistic Regression) on Iris. Logs params/metrics/models to MLflow and runs `mlflow.evaluate()` for a full report (confusion matrix, ROC/PR curves, SHAP). `train` and `eval` share **one** MLflow run.
 
-**Part 2: LLM Agent Tracing** — Trace a LangGraph research agent with `mlflow.langchain.autolog()`. Every LLM call, tool use, and graph step is captured automatically. The agent's system prompt is pulled from the **MLflow Prompt Registry**, so each run links to a versioned prompt.
+**LLM research pipeline** (`research_pipeline`) — `plan_topics` → `research_topic` (fan-out: one ReAct + Tavily agent per sub-topic) → `judge_research`. Every LLM call, tool use, and graph step is captured by `mlflow.langchain.autolog()`; the agent's system prompt comes from the **MLflow Prompt Registry**; and the synthesized answer is scored with **LLM-as-a-judge** using all three judge types — **built-in LLM judges** (`RelevanceToQuery`, `Guidelines`, `Safety`), a **custom LLM judge** (`make_judge`), and a **custom code judge** (`@scorer` → `Feedback`, deterministic, no LLM call).
 
-**Part 3: LLM-as-a-Judge** — Score answers with `mlflow.genai.evaluate()` using all three judge types: **built-in LLM judges** (`Correctness`, `RelevanceToQuery`, `Guidelines`, `Safety`), a **custom LLM judge** built with `make_judge`, and a **custom code judge** (`@scorer` returning a `Feedback` — deterministic Python, no LLM call). Per-row scores and rationales show up in the MLflow Evaluations UI.
+### Flyte vs MLflow — two views of the same run
+
+We split the work into multiple Flyte tasks on purpose: it mirrors how you'd really build these, and it makes visible what each tool records.
+
+| | Flyte | MLflow |
+|---|---|---|
+| **Unit of record** | a task in a DAG | a run / trace / evaluation |
+| **ML pipeline** | `prepare_data` + 3×(`train` → `eval`) tasks, each with its own compute, logs, report | 3 runs (train+eval share one run each); `prepare_data` is invisible to MLflow |
+| **LLM pipeline** | `plan` + N×`research` + `judge` tasks | N research traces + 1 evaluation run + prompt versions |
+| **Best at** | orchestration, compute, retries, fan-out, lineage across steps | deep per-step detail: params, metrics, model artifacts, LLM traces, judge scores |
+
+Flyte answers *"what ran, in what order, on what compute, and did it succeed?"* MLflow answers *"what were the params / metrics / prompts / traces / scores inside each step?"* The demo's point is the side-by-side — neither replaces the other.
 
 ## Feature breakdown — what we tested and why it matters
 
@@ -57,19 +68,19 @@ Why it matters: LLM quality can't be measured with accuracy/F1. We scored answer
 
 - **Built-in LLM judges** — `Correctness`, `RelevanceToQuery`, `Guidelines`, `Safety`. Cover the common quality axes out of the box; the `Guidelines` judge takes a plain-English rule (we used "must be factual, avoid speculation").
 - **Custom LLM judge** (`make_judge`) — encode any domain rubric in natural language; we built a `conciseness` judge that returns a boolean so MLflow rolls up a pass-rate.
-- **Custom code judge** (`@scorer` → `Feedback`) — deterministic Python, **no LLM call** (fast, free, perfectly repeatable). We built `substantive_answer` (answer must be ≥ 20 words); it scored `0.67` — caught a too-thin answer an LLM judge might wave through.
+- **Custom code judge** (`@scorer` → `Feedback`) — deterministic Python, **no LLM call** (fast, free, perfectly repeatable). We built `substantive_answer`, which fails answers below a word-count floor — catching a too-thin answer an LLM judge might wave through.
 
 This turns "the demo looked good" into a repeatable, scored regression test you can run on every prompt or model change. Reach for code judges when a rule is objective (length, format, required keywords, valid JSON) and LLM judges when it needs understanding (correctness, tone, relevance).
 
-Judges passed inline to `evaluate()` score answers but don't appear in the experiment's **Judges** UI — that section lists *registered* scorers. `register_judges` (Step 7) registers them so they're visible and reusable.
+Judges passed inline to `evaluate()` score answers but don't appear in the experiment's **Judges** UI — that section lists *registered* scorers. `register_judges` (Step 6) registers them so they're visible and reusable.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `mlflow_app.py` | Self-hosted MLflow server (Flyte app), with artifact proxying so models are stored on the server |
-| `ml_training.py` | Classic ML: train sklearn models, log to MLflow, run `mlflow.evaluate()` |
-| `agent_tracing.py` | LLM tracing + evaluation: `traced_research` (agent + prompt registry) and `evaluate_agent` (LLM-as-a-judge) |
+| `ml_training.py` | Classic ML pipeline: `prepare_data` → `train_model` → `evaluate_model` tasks + `ml_pipeline` orchestrator |
+| `agent_tracing.py` | LLM pipeline: `plan_topics` → `research_topic` → `judge_research` tasks + `research_pipeline` orchestrator; `register_judges` |
 | `config.py` | Flyte environments, endpoints, constants |
 
 ## The MLflow API by example
@@ -178,7 +189,7 @@ mlflow.artifacts.download_artifacts(artifact_uri=models[0].artifact_location)
 
 - A running Flyte 2 devbox (`flyte get project` to confirm)
 - [uv](https://docs.astral.sh/uv/)
-- API keys: [OpenAI](https://platform.openai.com/api-keys), [Tavily](https://app.tavily.com/) (for Parts 2 & 3)
+- API keys: [OpenAI](https://platform.openai.com/api-keys), [Tavily](https://app.tavily.com/) (for the LLM pipeline)
 
 ```bash
 flyte create secret OPENAI_API_KEY
@@ -225,45 +236,35 @@ Open the MLflow UI at: `http://mlflow-server-flytesnacks-development.localhost:3
 
 > The server proxies artifacts (`--serve-artifacts`), so models logged from tasks are actually stored on the server and are downloadable/reloadable from the UI. The store is SQLite and session-scoped — redeploying resets experiments.
 
-## Step 4: Run classic ML experiment tracking
+## Step 4: Run the classic ML pipeline
 
 ```bash
 # Remote (on the cluster)
-flyte run ml_training.py train_and_compare
+flyte run ml_training.py ml_pipeline
 
 # Local
-flyte run --local ml_training.py train_and_compare
+flyte run --local ml_training.py ml_pipeline
 ```
 
-Open the MLflow UI and check the `classic-ml-iris` experiment. You'll see three runs (one per model) with logged parameters, metrics, the trained model, and a full `mlflow.evaluate()` report — confusion matrix, ROC/PR curves, calibration curve, and SHAP plots. Compare them side-by-side.
+In the Flyte UI you'll see the DAG: `prepare_data`, then `train_model` + `evaluate_model` per model, then the comparison — each task with its own logs and report. In the MLflow UI, the `classic-ml-iris` experiment shows three runs (one per model), each with params, metrics, the trained model, and a full `mlflow.evaluate()` report — confusion matrix, ROC/PR curves, calibration curve, SHAP plots. Note that `train` and `eval` land in the **same** MLflow run.
 
-## Step 5: Run LLM agent tracing
+## Step 5: Run the LLM research pipeline
 
 ```bash
 # Remote
-flyte run agent_tracing.py traced_research --query "What is MLflow and how does it compare to other ML tools?"
+flyte run agent_tracing.py research_pipeline --query "What is MLflow and how does it compare to other ML tools?"
 
 # Local
-flyte run --local agent_tracing.py traced_research --query "What is MLflow?"
+flyte run --local agent_tracing.py research_pipeline --query "What is MLflow?"
 ```
 
-Check the `llm-agent-tracing` experiment in the MLflow UI. Click into the run to see the full trace: every LLM call, tool invocation, and graph step with inputs/outputs. The run links to the `research-agent-prompt` version it used (Prompts tab).
+Flyte shows the `plan_topics` → `research_topic` (one per sub-topic) → `judge_research` DAG. In the `llm-agent-tracing` experiment:
+- **Traces** tab — one trace per research task: every LLM call, Tavily tool invocation, and graph step, linked to the `research-agent-prompt` version (Prompts tab).
+- **Evaluations** tab — the `judge_research` run, where the synthesized answer is scored by five judges across all three types (built-in LLM, custom `make_judge`, custom `@scorer` code), each with a rationale plus aggregate metrics.
 
-## Step 6: Run LLM-as-a-judge evaluation
+## Step 6: Register judges (populate the Judges UI)
 
-```bash
-# Remote
-flyte run agent_tracing.py evaluate_agent
-
-# Local
-flyte run --local agent_tracing.py evaluate_agent
-```
-
-In the `llm-agent-tracing` experiment, open the **Evaluations** tab. Each answer is scored by six judges spanning all three types — four built-in LLM judges (Correctness, RelevanceToQuery, Guidelines, Safety), a custom LLM judge (conciseness via `make_judge`), and a custom code judge (substantive_answer via `@scorer`) — with each judge's rationale per row, plus aggregate metrics on the run (e.g. `substantive_answer/mean`).
-
-## Step 7: Register judges (populate the Judges UI)
-
-The judges in Step 6 are passed *inline* to `evaluate()` — they score answers but don't appear in the experiment's **Judges** section, which lists *registered* scorers. Register them so they show up and are reusable:
+The judges in Step 5 are passed *inline* to `evaluate()` — they score answers but don't appear in the experiment's **Judges** section, which lists *registered* scorers. Register them so they show up and are reusable:
 
 ```bash
 # Remote
@@ -276,7 +277,7 @@ flyte run --local agent_tracing.py register_judges
 Open the `llm-agent-tracing` experiment → **Judges** tab. You'll see the registered judges (`relevance_to_query`, `safety`, `factual_tone`, `conciseness`).
 
 > **OSS MLflow caveats:**
-> - Built-in scorers and `make_judge` (LLM) judges can be registered. Custom `@scorer` **code** judges are **Databricks-only** — self-hosted servers block them (they'd run arbitrary code), so the code judge from Step 6 stays inline.
+> - Built-in scorers and `make_judge` (LLM) judges can be registered. Custom `@scorer` **code** judges are **Databricks-only** — self-hosted servers block them (they'd run arbitrary code), so the code judge from Step 5 stays inline.
 > - **Automatic/scheduled scoring** (`scorer.start()`, which runs judges on live traces) requires an **MLflow AI Gateway** model, not a raw `openai:/` model. We register the judges but don't start scheduled scoring in this setup.
 
 ## Teardown

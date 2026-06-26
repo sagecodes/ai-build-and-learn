@@ -1,16 +1,25 @@
-"""LLM agent tracing + evaluation with MLflow + Flyte.
+"""LLM research pipeline as a Flyte workflow, traced + judged in MLflow.
 
-Two tasks:
-  - traced_research: trace a LangGraph research agent (every LLM call, tool
-    use, and graph step) with MLflow autologging. The agent's system prompt
-    is pulled from the MLflow Prompt Registry so runs link to a prompt version.
-  - evaluate_agent: score answers with MLflow's LLM-as-a-judge scorers —
-    built-in (Correctness, RelevanceToQuery, Guidelines, Safety) plus a
-    custom judge built with make_judge — via mlflow.genai.evaluate.
+Decomposed the way you'd normally build it in Flyte — each step is its own
+task, visible in the Flyte UI with its own compute, logs, and report:
+
+    plan_topics ──> research_topic(t1) ──┐
+                ├─> research_topic(t2) ──┤─> judge_research ──> research_pipeline
+                └─> research_topic(tN) ──┘
+
+Side-by-side of what each tool records:
+  - Flyte  stitches the DAG: plan → research (fan-out) → judge.
+  - MLflow gives the deep per-step detail via autolog: every LLM call, tool
+    use, and graph step is a trace, and judge_research logs an evaluation run
+    with LLM-as-a-judge scores. The agent's system prompt comes from the
+    MLflow Prompt Registry, so research traces link to a prompt version.
 
 Run remote:
-    flyte run agent_tracing.py traced_research --query "What is MLflow?"
-    flyte run agent_tracing.py evaluate_agent
+    flyte run agent_tracing.py research_pipeline --query "What is OpenTelemetry?"
+    flyte run agent_tracing.py register_judges        # populate the Judges UI
+
+Run local:
+    flyte run --local agent_tracing.py research_pipeline --query "What is MLflow?"
 """
 
 from __future__ import annotations
@@ -20,6 +29,8 @@ from dataclasses import dataclass
 import flyte
 
 from config import agent_env, MLFLOW_TRACKING_URI, OPENAI_MODEL
+
+EXPERIMENT = "llm-agent-tracing"
 
 # ── Prompt Registry ──────────────────────────────────────────────────────────
 PROMPT_NAME = "research-agent-prompt"
@@ -49,15 +60,58 @@ def _load_or_register_prompt():
 
 
 @dataclass
-class AgentResult:
+class TopicReport:
+    topic: str
+    report: str
+
+
+@dataclass
+class PipelineResult:
     query: str
+    topics: list[str]
     answer: str
-    run_id: str
+    judge_metrics: dict
 
 
+def _md_to_html(text: str) -> str:
+    import markdown
+    return markdown.markdown(text, extensions=["tables", "fenced_code"])
+
+
+# ── Task 1: plan ─────────────────────────────────────────────────────────────
 @agent_env.task(report=True)
-async def traced_research(query: str = "What is MLflow and how does it compare to other ML tools?") -> AgentResult:
-    """Run a research agent with MLflow tracing + a registry-managed prompt."""
+async def plan_topics(query: str, num_topics: int = 3) -> list[str]:
+    """Break a research query into focused sub-topics (one traced LLM call)."""
+    import json
+
+    import mlflow
+    import mlflow.langchain
+    from langchain_openai import ChatOpenAI
+
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(EXPERIMENT)
+    mlflow.langchain.autolog()
+
+    llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
+    resp = llm.invoke(
+        f"Break this research question into exactly {num_topics} focused sub-topics. "
+        f"Return ONLY a JSON array of strings, nothing else.\n\nQuestion: {query}"
+    )
+    try:
+        topics = json.loads(resp.content)[:num_topics]
+    except json.JSONDecodeError:
+        topics = [query]
+
+    print(f"[plan] {query!r} -> {topics}")
+    items = "".join(f"<li>{t}</li>" for t in topics)
+    await flyte.report.log.aio(f"<h2>Planning</h2><p>{query}</p><ul>{items}</ul>")
+    return topics
+
+
+# ── Task 2: research (fan-out, one task per sub-topic) ───────────────────────
+@agent_env.task(report=True)
+async def research_topic(topic: str) -> TopicReport:
+    """A ReAct agent (Tavily web search) researches one sub-topic. Traced by MLflow."""
     import mlflow
     import mlflow.langchain
     from langchain_openai import ChatOpenAI
@@ -65,166 +119,128 @@ async def traced_research(query: str = "What is MLflow and how does it compare t
     from langchain_core.tools import tool
     from tavily import TavilyClient
 
-    # Set up MLflow tracking + LangChain autologging
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment("llm-agent-tracing")
+    mlflow.set_experiment(EXPERIMENT)
     mlflow.langchain.autolog()
 
     prompt = _load_or_register_prompt()
-
     tavily = TavilyClient()
 
     @tool
     def web_search(query: str) -> str:
         """Search the web for information."""
         results = tavily.search(query=query, max_results=3)
-        return "\n\n".join(
-            f"**{r['title']}**\n{r['content']}" for r in results["results"]
-        )
+        return "\n\n".join(f"**{r['title']}**\n{r['content']}" for r in results["results"])
 
     llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
     agent = create_react_agent(llm, [web_search])
 
-    with mlflow.start_run(run_name=f"research: {query[:50]}") as run:
-        mlflow.log_param("query", query)
-        mlflow.log_param("model", OPENAI_MODEL)
-        mlflow.log_param("prompt_name", PROMPT_NAME)
+    with mlflow.start_run(run_name=f"research: {topic[:40]}") as run:
+        mlflow.log_param("topic", topic)
         mlflow.log_param("prompt_version", prompt.version)
+        result = await agent.ainvoke(
+            {"messages": [{"role": "user", "content": prompt.format(query=topic)}]}
+        )
+        report = result["messages"][-1].content
+        mlflow.log_metric("report_length", len(report))
 
-        # Render the registry prompt with the runtime query
-        user_content = prompt.format(query=query)
-        result = await agent.ainvoke({
-            "messages": [{"role": "user", "content": user_content}]
-        })
-
-        answer = result["messages"][-1].content
-
-        mlflow.log_metric("answer_length", len(answer))
-        mlflow.log_text(answer, "answer.md")
-
-        # Flyte report
-        import markdown
-        report = f"""
-        <h2>Research: {query}</h2>
-        <div>{markdown.markdown(answer)}</div>
-        <p><small>MLflow Run ID: {run.info.run_id} | prompt: {PROMPT_NAME} v{prompt.version}</small></p>
-        """
-        await flyte.report.log.aio(report)
-
-        print(f"[agent] query={query[:50]}... answer_length={len(answer)} prompt_v={prompt.version}")
-
-        return AgentResult(query=query, answer=answer, run_id=run.info.run_id)
+    print(f"[research] {topic[:40]}... -> {len(report)} chars (run {run.info.run_id})")
+    await flyte.report.log.aio(f"<h2>{topic}</h2>{_md_to_html(report)}")
+    return TopicReport(topic=topic, report=report)
 
 
+# ── Task 3: judge (synthesize + LLM-as-a-judge) ──────────────────────────────
 @agent_env.task(report=True)
-async def evaluate_agent() -> str:
-    """Grade LLM answers with MLflow's LLM-as-a-judge scorers.
+async def judge_research(query: str, reports: list[TopicReport]) -> PipelineResult:
+    """Synthesize the sub-topic reports, then score the answer with judges.
 
-    Runs mlflow.genai.evaluate over a small eval set using built-in judges
-    plus one custom judge (make_judge). Scores show up per-row in the MLflow
-    Evaluations UI with the judge's rationale.
+    Uses all three judge types: built-in LLM judges, a custom LLM judge
+    (make_judge), and a custom code judge (@scorer). Logs an MLflow evaluation
+    run with per-answer scores and rationales.
     """
-    import json
-
     import mlflow
     import mlflow.genai
-    from mlflow.genai.scorers import Correctness, RelevanceToQuery, Guidelines, Safety, scorer
+    from mlflow.genai.scorers import RelevanceToQuery, Safety, Guidelines, scorer
     from mlflow.genai.judges import make_judge
     from mlflow.entities import Feedback
     from langchain_openai import ChatOpenAI
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment("llm-agent-tracing")
+    mlflow.set_experiment(EXPERIMENT)
 
-    # In OSS MLflow each judge needs an explicit model (no managed endpoint).
+    # Synthesize one answer from the sub-topic reports
+    sections = "\n\n---\n\n".join(f"## {r.topic}\n\n{r.report}" for r in reports)
+    llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
+    answer = llm.invoke(
+        f"Question: {query}\n\nSub-topic research:\n\n{sections}\n\n"
+        f"Write a comprehensive, well-organized answer that synthesizes these findings."
+    ).content
+
     judge_model = f"openai:/{OPENAI_MODEL}"
 
-    # Eval set: questions + ground-truth facts the answer should contain.
-    eval_data = [
-        {
-            "inputs": {"query": "What is MLflow?"},
-            "expectations": {"expected_facts": [
-                "open-source platform", "machine learning lifecycle", "experiment tracking",
-            ]},
-        },
-        {
-            "inputs": {"query": "Which company originally created MLflow?"},
-            "expectations": {"expected_facts": ["Databricks"]},
-        },
-        {
-            "inputs": {"query": "Name two things MLflow can track for an ML experiment."},
-            "expectations": {"expected_facts": ["parameters", "metrics"]},
-        },
-    ]
-
-    llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
-
-    def predict_fn(query: str) -> str:
-        """The system under test — answers get judged. Auto-traced by evaluate."""
-        return llm.invoke(query).content
-
-    # Custom judge: a domain rubric expressed in natural language.
-    conciseness_judge = make_judge(
+    conciseness = make_judge(
         name="conciseness",
-        instructions=(
-            "You are grading an assistant answer for conciseness.\n"
-            "Question: {{ inputs }}\nAnswer: {{ outputs }}\n"
-            "Return true if the answer is focused and free of filler, "
-            "otherwise false. Explain briefly."
-        ),
+        instructions="Question: {{ inputs }}\nAnswer: {{ outputs }}\nReturn true if the answer is concise.",
         model=judge_model,
-        feedback_value_type=bool,  # boolean → MLflow rolls up a pass-rate metric
+        feedback_value_type=bool,
     )
 
-    # Custom CODE judge: plain Python, deterministic, no LLM call (fast + free).
-    # Return a Feedback object; any param (inputs/outputs/expectations) is optional.
     @scorer
     def substantive_answer(outputs) -> Feedback:
-        n_words = len(str(outputs).split())
-        ok = n_words >= 20
-        return Feedback(
-            value=ok,
-            rationale=f"{n_words} words " + ("(>= 20, substantive)" if ok else "(< 20, too thin)"),
-        )
+        ok = len(str(outputs).split()) >= 50
+        return Feedback(value=ok, rationale="substantive" if ok else "too thin")
 
     scorers = [
-        Correctness(model=judge_model),          # built-in LLM judge: supported by expected_facts
-        RelevanceToQuery(model=judge_model),      # built-in LLM judge: addresses the question
-        Guidelines(                               # built-in LLM judge with a custom rule
-            name="factual_tone",
-            guidelines="The response must be factual and avoid speculation or hedging.",
-            model=judge_model,
-        ),
-        Safety(model=judge_model),                # built-in LLM judge: no harmful content
-        conciseness_judge,                        # custom LLM judge (make_judge)
-        substantive_answer,                       # custom code judge (@scorer, no LLM)
+        RelevanceToQuery(model=judge_model),
+        Safety(model=judge_model),
+        Guidelines(name="factual_tone", guidelines="Be factual; avoid speculation.", model=judge_model),
+        conciseness,
+        substantive_answer,
     ]
 
-    results = mlflow.genai.evaluate(
-        data=eval_data,
+    result = mlflow.genai.evaluate(
+        data=[{"inputs": {"query": query}, "outputs": answer}],
         scorers=scorers,
-        predict_fn=predict_fn,
+    )
+    metrics = {k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))}
+
+    print(f"[judge] metrics={metrics}")
+    rows = "".join(f"<tr><td>{k}</td><td>{v:.3f}</td></tr>" for k, v in sorted(metrics.items()))
+    await flyte.report.log.aio(
+        f"<h2>Judged Answer</h2>{_md_to_html(answer)}"
+        f"<h3>Judge scores</h3><table><tr><th>Metric</th><th>Score</th></tr>{rows}</table>"
+    )
+    return PipelineResult(
+        query=query,
+        topics=[r.topic for r in reports],
+        answer=answer,
+        judge_metrics=metrics,
     )
 
-    metrics = results.metrics
 
-    rows = "".join(
-        f"<tr><td>{k}</td><td>{v:.3f}</td></tr>"
-        for k, v in sorted(metrics.items()) if isinstance(v, (int, float))
-    )
-    report = f"""
-    <h2>LLM-as-a-Judge Evaluation</h2>
-    <p>Built-in LLM judges: Correctness, RelevanceToQuery, Guidelines(factual_tone), Safety.
-    Custom LLM judge: conciseness (make_judge). Custom code judge: substantive_answer (@scorer).</p>
-    <table><tr><th>Metric</th><th>Score</th></tr>{rows}</table>
-    """
-    await flyte.report.log.aio(report)
+# ── Orchestrator ─────────────────────────────────────────────────────────────
+@agent_env.task(report=True)
+async def research_pipeline(
+    query: str = "What is MLflow and how does it compare to other ML tools?",
+    num_topics: int = 3,
+) -> PipelineResult:
+    """plan → research (fan-out) → judge. Each step is its own Flyte task + MLflow trace."""
+    import asyncio
 
-    summary = json.dumps(
-        {k: v for k, v in metrics.items() if isinstance(v, (int, float))}, indent=2
+    topics = await plan_topics.aio(query=query, num_topics=num_topics)
+    reports = await asyncio.gather(*[research_topic.aio(topic=t) for t in topics])
+    result = await judge_research.aio(query=query, reports=list(reports))
+
+    await flyte.report.log.aio(
+        f"<h2>Research Pipeline</h2>"
+        f"<p><b>Query:</b> {query}</p>"
+        f"<p><b>Sub-topics:</b> {', '.join(topics)}</p>"
+        f"<hr/>{_md_to_html(result.answer)}"
+        f"<p><small>Flyte ran {2 + len(topics)} tasks; MLflow recorded {len(topics)} "
+        f"research traces + 1 evaluation run.</small></p>"
     )
-    print(f"[eval] judge metrics:\n{summary}")
-    return summary
+    print(f"[pipeline] query={query!r} topics={len(topics)} metrics={result.judge_metrics}")
+    return result
 
 
 @agent_env.task
@@ -247,7 +263,7 @@ async def register_judges() -> str:
     from mlflow.genai.judges import make_judge
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    eid = mlflow.set_experiment("llm-agent-tracing").experiment_id
+    eid = mlflow.set_experiment(EXPERIMENT).experiment_id
     judge_model = f"openai:/{OPENAI_MODEL}"
 
     judges = [
