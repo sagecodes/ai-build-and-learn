@@ -49,9 +49,9 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Open-Source Music Generation: Text-to-Music &amp; Lyrics-to-Song</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">TBD</div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-08-14</div>
         <div style="font-size: 13px; color: #666;">
-          <a href="topics/music-generation">code</a>
+          <a href="topics/music-generation">code</a> • <a href="https://luma.com/2emw9rxu">register</a>
         </div>
       </div>
     </td><td><div style="padding: 8px 0; line-height: 1.5;">Generate music and audio with open-source models: text-to-music and full lyrics-to-song with vocals.
