@@ -205,8 +205,10 @@ REPORT_CSS = """
   .ig-wrap { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
   .ig-wrap h2 { margin: 0 0 4px; }
   .ig-meta { color: #6b7280; font-size: 13px; margin-bottom: 16px; }
-  .ig-grid { display: grid; gap: 14px; overflow-x: auto;
-             grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr); }
+  /* Wrap cells to the next row when they run out of width, instead of one long
+     horizontally-scrolling row. auto-fill packs as many >=260px columns as fit. */
+  .ig-grid { display: grid; gap: 14px;
+             grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
   .ig-cell { border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden;
              background: #fff; display: flex; flex-direction: column; }
   .ig-cell img { width: 100%; height: auto; display: block; background: #f3f4f6; }
