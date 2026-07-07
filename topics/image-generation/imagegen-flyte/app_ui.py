@@ -17,20 +17,27 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections import OrderedDict
 from typing import Callable
 
-from imagegen_core import generate, load_pipeline
+from imagegen_core import free_gpu_memory, generate, load_pipeline
 from models import DEFAULT_MODELS, MODELS, get_spec
 
 # Lazily-built pipeline cache: model key -> pipeline. Loading is expensive, so
-# keep each warm once built. The GB10's unified memory holds several at once.
-_cache: dict = {}
+# keep each warm once built. But it's an LRU with a cap, not unbounded: the newer
+# models (CogView4 6B, Chroma ~9B) are large, and a long session ticking many of
+# them would otherwise pin every pipeline in the GB10's unified memory at once
+# and OOM the box. Cap holds the N most-recently-used; the rest are evicted and
+# their memory handed back. Raise IMAGEGEN_MAX_CACHED if you have headroom.
+_MAX_CACHED = int(os.environ.get("IMAGEGEN_MAX_CACHED", "2"))
+_cache: "OrderedDict[str, object]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 
 def _get_pipe(key: str):
     with _cache_lock:
         if key in _cache:
+            _cache.move_to_end(key)   # mark most-recently-used
             return _cache[key]
     # Load outside the lock so a slow load doesn't block reads of other models;
     # double-check on the way in.
@@ -38,7 +45,22 @@ def _get_pipe(key: str):
     pipe = load_pipeline(spec)
     with _cache_lock:
         _cache.setdefault(key, pipe)
-        return _cache[key]
+        _cache.move_to_end(key)
+        pipe = _cache[key]
+        # Evict least-recently-used pipelines past the cap and reclaim their
+        # memory. A pipeline another thread is mid-generation on stays alive via
+        # that thread's own reference (refcounting), so this can't pull weights
+        # out from under an in-flight request; the reclaim just lands once it
+        # finishes. The just-loaded `key` is most-recent, so it's never evicted.
+        evicted = False
+        while len(_cache) > _MAX_CACHED:
+            old_key, old_pipe = _cache.popitem(last=False)
+            del old_pipe
+            evicted = True
+            print(f"[studio] evicted {old_key} from GPU cache (cap {_MAX_CACHED})", flush=True)
+        if evicted:
+            free_gpu_memory()
+        return pipe
 
 
 def launch(

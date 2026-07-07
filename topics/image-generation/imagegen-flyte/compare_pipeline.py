@@ -42,6 +42,7 @@ import flyte.report
 from config import cpu_task_env, gpu_task_env, orch_env
 from imagegen_core import (
     GenResult,
+    free_gpu_memory,
     load_pipeline,
     pil_to_data_uri,
     render_grid,
@@ -55,9 +56,10 @@ log = logging.getLogger(__name__)
 env = gpu_task_env
 
 # Cap the size embedded in the report so a big grid stays light (JPEG thumbnails);
-# full-res PNGs live in the returned directory. Keep this modest: the whole grid
-# is base64'd into one HTML doc that the console iframe has to render.
-REPORT_MAX_SIDE = 512
+# full-res PNGs live in the returned directory. 768 keeps the whole grid base64'd
+# into one HTML doc light enough for the console iframe, while giving the
+# click-to-zoom lightbox a meaningfully bigger image than the ~260px grid cell.
+REPORT_MAX_SIDE = 768
 
 
 @dataclass
@@ -78,10 +80,108 @@ class ModelRun:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Weight download: a throughput watchdog that kills + resumes on a stall
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# On a lossy uplink a snapshot_download stalls mid-stream: bytes flatline (dead
+# socket, or a trickle below any read timeout) and neither HF_HUB_DOWNLOAD_TIMEOUT
+# nor a socket timeout ever fires. Verified a 44.9GB Qwen pull sat at +0 MB/30s
+# for 20+ minutes. Flyte task retries don't help either: a retry is a fresh pod,
+# so it restarts from 0. The fix: watch throughput, and when it flatlines KILL the
+# download and re-spawn it against the same local dir. snapshot_download resumes
+# from the .incomplete files, so a restart just re-establishes the connection and
+# keeps every byte downloaded so far. A subprocess (not a thread) because a
+# blocked/trickling socket can't be interrupted in-thread.
+
+def _dir_size(path) -> int:
+    try:
+        return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file())
+    except OSError:
+        return 0
+
+
+def _snapshot_worker(repo: str, local_dir: str, token, ignore_patterns) -> None:
+    """Child process: pin DNS to IPv4 (HF's CDN black-holes IPv6 here), then pull."""
+    import socket as _socket
+
+    _orig = _socket.getaddrinfo
+    _socket.getaddrinfo = lambda *a, **k: [r for r in _orig(*a, **k) if r[0] == _socket.AF_INET]
+    _socket.setdefaulttimeout(120)
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(repo_id=repo, local_dir=local_dir, token=token,
+                      ignore_patterns=ignore_patterns)
+
+
+def _download_with_watchdog(repo, dest, token, ignore_patterns, model_key,
+                            poll=30, stall_windows=5, min_growth=5_000_000,
+                            max_restarts=3) -> None:
+    """Pull `repo` into `dest`, restarting the download whenever throughput stalls.
+
+    A poll window that adds < `min_growth` bytes counts as stalled; `stall_windows`
+    in a row (default 5 x 30s = 2.5 min) triggers a kill + resume. Each resume
+    continues from the .incomplete files (it does NOT re-pull what's already down),
+    so a restart is cheap. `max_restarts` (default 3) bounds it so a permanently
+    dead link fails fast instead of looping forever; raise it for a huge model on
+    a flaky link. Flyte's task retries is the from-scratch backstop beyond that.
+    """
+    import multiprocessing as _mp
+    import time as _time
+
+    ctx = _mp.get_context("spawn")   # clean child; safe to fork from a worker thread
+    restarts = 0
+    while True:
+        p = ctx.Process(target=_snapshot_worker,
+                        args=(repo, str(dest), token, ignore_patterns), daemon=True)
+        p.start()
+        last = _dir_size(dest)
+        stalls = 0
+        stalled = False
+        while p.is_alive():
+            _time.sleep(poll)
+            cur = _dir_size(dest)
+            grew = cur - last
+            log.info(f"[{model_key}] {cur / 1e9:.1f} GB so far (+{grew / 1e6:.0f} MB/{poll}s)")
+            stalls = stalls + 1 if grew < min_growth else 0
+            last = cur
+            if stalls >= stall_windows:
+                stalled = True
+                break
+        if stalled:
+            restarts += 1
+            log.warning(f"[{model_key}] stalled at {last / 1e9:.1f} GB for "
+                        f"{stall_windows * poll}s; killing + resuming "
+                        f"(restart {restarts}/{max_restarts})")
+            p.terminate()
+            p.join(10)
+            if p.is_alive():
+                p.kill()
+                p.join()
+            if restarts > max_restarts:
+                raise RuntimeError(f"[{model_key}] download stalled past {max_restarts} restarts")
+            continue
+        p.join()
+        if p.exitcode == 0:
+            log.info(f"[{model_key}] download complete")
+            return
+        # Worker exited on a network error rather than a flatline; resume too.
+        restarts += 1
+        log.warning(f"[{model_key}] download worker exited {p.exitcode}; "
+                    f"resuming (restart {restarts}/{max_restarts})")
+        if restarts > max_restarts:
+            raise RuntimeError(f"[{model_key}] download failed after {max_restarts} restarts")
+        _time.sleep(5)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Task — download the weights once, cache the result
 # ──────────────────────────────────────────────────────────────────────────────
 
-@cpu_task_env.task(cache="auto")
+# retries=2: the in-pod watchdog handles stalls by resuming (cheap), so the
+# task-level retry is just a from-scratch backstop for a pod dying outright.
+# Kept low on purpose: each task retry is a fresh pod that re-pulls from 0, and
+# we don't want to burn bandwidth re-downloading tens of GB many times over.
+@cpu_task_env.task(cache="auto", retries=2)
 async def fetch_weights(model_key: str) -> flyte.io.Dir:
     """Snapshot a model's HuggingFace repo into a Dir and return it.
 
@@ -90,21 +190,12 @@ async def fetch_weights(model_key: str) -> flyte.io.Dir:
     GPU task pulls it in-cluster instead of re-hitting HuggingFace. Runs on a
     CPU pod so no GPU sits idle during the download.
     """
+    import asyncio as _asyncio
     import os as _os
-
-    from huggingface_hub import snapshot_download
-
-    # IPv6 to the HF CDN is black-holed on this network (302 -> 0 bytes, hangs
-    # forever with no timeout mid-shard). Pin name resolution to IPv4 so big
-    # multi-shard pulls (Qwen, FLUX, future video weights) actually complete.
-    import socket as _socket
-    if not getattr(_socket, "_flyte_ipv4_only", False):
-        _orig_gai = _socket.getaddrinfo
-        _socket.getaddrinfo = lambda *a, **k: [r for r in _orig_gai(*a, **k) if r[0] == _socket.AF_INET]
-        _socket._flyte_ipv4_only = True
 
     spec = get_spec(model_key)
     dest = Path(tempfile.mkdtemp(prefix=f"weights_{model_key}_")) / "repo"
+    dest.mkdir(parents=True, exist_ok=True)
     log.info(f"[{model_key}] downloading {spec.repo} → {dest}")
     # Pull ONLY what diffusers' from_pretrained loads, not the whole repo. Big
     # model repos (SDXL especially) also ship: PyTorch .bin duplicates of every
@@ -112,24 +203,28 @@ async def fetch_weights(model_key: str) -> flyte.io.Dir:
     # combined checkpoints (sd_xl_base_1.0.safetensors, refiners, example LoRAs)
     # that the diffusers pipeline never touches. Downloading all of it is ~50GB
     # for SDXL vs ~13GB for the fp32 diffusers folders we actually use.
-    snapshot_download(
-        repo_id=spec.repo,
-        local_dir=str(dest),
-        token=_os.environ.get("HF_TOKEN"),
-        ignore_patterns=[
-            "*.pth", "*.onnx", "*.onnx_data", "*.ckpt", "*.gguf",  # other runtimes
-            "*.bin", "*.msgpack", "*.h5",                          # non-safetensors dupes
-            "*.fp16.safetensors",                                  # keep fp32 components
-            # Root-level single-file checkpoints that DUPLICATE the diffusers
-            # subfolders (transformer/, unet/, vae/, ...) which from_pretrained
-            # actually loads. Each is a full second copy of the model, e.g. FLUX
-            # ships flux1-schnell.safetensors (~22GB) alongside transformer/.
-            "sd_xl_*.safetensors", "*_refiner*",                   # SDXL
-            "flux1-*.safetensors", "flux2-*.safetensors", "ae.safetensors",  # FLUX
-            "sd3*.safetensors", "sd3.5*.safetensors",              # SD3.5
-        ],
+    ignore_patterns = [
+        "*.pth", "*.onnx", "*.onnx_data", "*.ckpt", "*.gguf",  # other runtimes
+        "*.bin", "*.msgpack", "*.h5",                          # non-safetensors dupes
+        "*.fp16.safetensors",                                  # keep fp32 components
+        # Root-level single-file checkpoints that DUPLICATE the diffusers
+        # subfolders (transformer/, unet/, vae/, ...) which from_pretrained
+        # actually loads. Each is a full second copy of the model, e.g. FLUX
+        # ships flux1-schnell.safetensors (~22GB) alongside transformer/.
+        "sd_xl_*.safetensors", "*_refiner*",                   # SDXL
+        "flux1-*.safetensors", "flux2-*.safetensors", "ae.safetensors",  # FLUX
+        "sd3*.safetensors", "sd3.5*.safetensors",              # SD3.5
+    ]
+
+    # Download in a subprocess under a throughput watchdog (see
+    # _download_with_watchdog): it logs the same 30s GB heartbeat, and when bytes
+    # flatline it kills + resumes the pull, which is the only thing that reliably
+    # recovers a mid-stream stall on this link. Runs in a thread so the task's
+    # event loop stays responsive.
+    await _asyncio.to_thread(
+        _download_with_watchdog, spec.repo, dest,
+        _os.environ.get("HF_TOKEN"), ignore_patterns, model_key,
     )
-    log.info(f"[{model_key}] download complete")
     return await flyte.io.Dir.from_local(str(dest))
 
 
@@ -137,7 +232,7 @@ async def fetch_weights(model_key: str) -> flyte.io.Dir:
 # Task — one model over all prompts
 # ──────────────────────────────────────────────────────────────────────────────
 
-@env.task(report=True)
+@env.task(report=True, retries=3)
 async def generate_for_model(
     model_key: str,
     weights: flyte.io.Dir,
@@ -162,44 +257,64 @@ async def generate_for_model(
     await flyte.report.flush.aio()
 
     local_weights = await weights.download()
-    pipe = load_pipeline(spec, model_path=local_weights)
+    pipe = None
+    try:
+        # Start from a clean allocator in case anything lingered, then load. A
+        # transient CUDA OOM here (unified-memory pressure on the GB10) re-runs
+        # via retries=3 in a fresh pod, which usually clears it.
+        free_gpu_memory()
+        pipe = load_pipeline(spec, model_path=local_weights)
 
-    kw = dict(
-        steps=None if steps < 0 else steps,
-        guidance=None if guidance < 0 else guidance,
-        seed=seed,
-        width=None if width < 0 else width,
-        height=None if height < 0 else height,
-        negative_prompt=negative_prompt or None,
-    )
+        kw = dict(
+            steps=None if steps < 0 else steps,
+            guidance=None if guidance < 0 else guidance,
+            seed=seed,
+            width=None if width < 0 else width,
+            height=None if height < 0 else height,
+            negative_prompt=negative_prompt or None,
+        )
 
-    items: list[GenItem] = []
-    results: list[GenResult] = []  # for the live per-model report (data URIs)
-    for i, prompt in enumerate(prompts):
-        log.info(f"[{model_key}] {i + 1}/{len(prompts)}: {prompt[:60]}")
-        try:
-            img, secs = timed_generate(pipe, spec, prompt, **kw)
-            fname = f"{model_key}__{i:02d}.png"
-            img.save(out_dir / fname)
-            items.append(GenItem(prompt=prompt, filename=fname, seconds=secs))
-            results.append(GenResult(
-                model_key=model_key, prompt=prompt, seconds=secs,
-                data_uri=pil_to_data_uri(img, max_side=REPORT_MAX_SIDE),
+        items: list[GenItem] = []
+        results: list[GenResult] = []  # for the live per-model report (data URIs)
+        for i, prompt in enumerate(prompts):
+            log.info(f"[{model_key}] {i + 1}/{len(prompts)}: {prompt[:60]}")
+            try:
+                img, secs = timed_generate(pipe, spec, prompt, **kw)
+                fname = f"{model_key}__{i:02d}.png"
+                img.save(out_dir / fname)
+                items.append(GenItem(prompt=prompt, filename=fname, seconds=secs))
+                results.append(GenResult(
+                    model_key=model_key, prompt=prompt, seconds=secs,
+                    data_uri=pil_to_data_uri(img, max_side=REPORT_MAX_SIDE),
+                ))
+            except Exception as e:  # one bad prompt shouldn't sink the whole model
+                # A CUDA OOM is different: it's a whole-pod condition, not a
+                # bad prompt, and it's usually transient (unified-memory pressure
+                # on the GB10). Free and re-raise so the task retries in a fresh
+                # pod instead of silently marking every remaining cell failed.
+                if "out of memory" in str(e).lower() or type(e).__name__ == "OutOfMemoryError":
+                    log.warning(f"[{model_key}] CUDA OOM on prompt {i}; failing task to retry")
+                    free_gpu_memory()
+                    raise
+                log.warning(f"[{model_key}] failed on prompt {i}: {e}")
+                items.append(GenItem(prompt=prompt, filename="", seconds=0.0, error=str(e)))
+                results.append(GenResult(model_key=model_key, prompt=prompt, seconds=0.0,
+                                         error=str(e)))
+            # Progressive report: redraw the prompts-so-far grid after each image.
+            await flyte.report.replace.aio(render_grid(
+                prompts[: i + 1], [spec], results,
+                meta=f"{spec.repo} · {spec.license} · {i + 1}/{len(prompts)} prompts",
             ))
-        except Exception as e:  # one bad prompt shouldn't sink the whole model
-            log.warning(f"[{model_key}] failed on prompt {i}: {e}")
-            items.append(GenItem(prompt=prompt, filename="", seconds=0.0, error=str(e)))
-            results.append(GenResult(model_key=model_key, prompt=prompt, seconds=0.0,
-                                     error=str(e)))
-        # Progressive report: redraw the prompts-so-far grid after each image.
-        await flyte.report.replace.aio(render_grid(
-            prompts[: i + 1], [spec], results,
-            meta=f"{spec.repo} · {spec.license} · {i + 1}/{len(prompts)} prompts",
-        ))
-        await flyte.report.flush.aio()
+            await flyte.report.flush.aio()
 
-    images = await flyte.io.Dir.from_local(str(out_dir))
-    return ModelRun(model_key=model_key, items=items, images=images)
+        images = await flyte.io.Dir.from_local(str(out_dir))
+        return ModelRun(model_key=model_key, items=items, images=images)
+    finally:
+        # Free the GPU before this task returns. The per-model tasks serialize on
+        # the single-GPU devbox, so releasing here keeps the next model from
+        # racing this pod's teardown (and cleans up even if generation threw).
+        pipe = None
+        free_gpu_memory()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -261,9 +376,14 @@ async def compare(
     )
     await flyte.report.flush.aio()
 
-    # Download every model's weights first — CPU tasks, run in parallel, and
-    # cached so this is free on re-runs.
-    weights = await asyncio.gather(*[fetch_weights(s.key) for s in specs])
+    # Download every model's weights first, one model at a time. Serial on
+    # purpose: parallel snapshot_downloads open dozens of concurrent sockets to
+    # the HF CDN, and on a lossy uplink (e.g. the Spark over Wi-Fi) that
+    # congestion is what black-holes a transfer mid-stream and hangs the fetch.
+    # On a real cluster with a fat, reliable pipe, swap this for the parallel
+    # form: `weights = await asyncio.gather(*[fetch_weights(s.key) for s in specs])`.
+    # Each fetch is cache="auto", so already-downloaded models return instantly.
+    weights = [await fetch_weights(s.key) for s in specs]
 
     # Then one GPU task per model. asyncio.gather submits them together; the
     # devbox scheduler runs as many as there are free GPUs (one at a time on a

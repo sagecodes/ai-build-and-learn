@@ -151,6 +151,69 @@ MODELS: dict[str, ModelSpec] = {
         max_sequence_length=512,
         notes="Newest BFL open weights. Confirm Flux2Pipeline exists in your diffusers.",
     ),
+    # Sana-Sprint 1.6B: NVIDIA's efficiency play, and the star turn on a Spark:
+    # NVIDIA's own model on NVIDIA silicon. Linear-attention DiT + a 32x deep-
+    # compression autoencoder + timestep distillation give genuinely good images
+    # in ~2 steps, so it's dramatically faster than everything else in the grid.
+    "sana-sprint": ModelSpec(
+        key="sana-sprint",
+        repo="Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+        pipeline="SanaSprintPipeline",   # recent diffusers; falls back to Auto
+        family="Linear-DiT (few-step)",
+        license="NVIDIA open (non-commercial)",
+        gated=False,             # freely downloadable, no click-through gate
+        steps=2,                 # sprint is distilled to 1–4 steps
+        guidance=None,           # timestep-distilled: no CFG, don't pass it
+        supports_negative=False,
+        notes="NVIDIA's efficient few-step model. The fast one; great on the Spark.",
+    ),
+    # Chroma: the fully-open (Apache-2.0), un-gated de-distill of FLUX.1-schnell.
+    # The direct answer to "you don't need the access-gated FLUX repo." Restores
+    # CFG + negative prompts that schnell dropped, so it's slower than schnell but
+    # ungated and community-tuned. ~8.9B; fits the Spark's unified memory easily.
+    "chroma": ModelSpec(
+        key="chroma",
+        repo="lodestones/Chroma",
+        pipeline="ChromaPipeline",   # verify: recent diffusers; may need single-file load
+        family="DiT / rectified flow (FLUX-based)",
+        license="Apache-2.0",
+        gated=False,
+        steps=30,
+        guidance=4.0,
+        supports_negative=True,
+        max_sequence_length=512,
+        notes="Ungated open FLUX-schnell de-distill. Confirm ChromaPipeline loads the repo.",
+    ),
+    # CogView4-6B: Zhipu's Apache MM-DiT with a GLM-4 text encoder. Another strong
+    # text-in-image renderer, so it makes a clean head-to-head against Qwen-Image,
+    # both fully open. 6B at 50 steps → not fast; lower --steps for a quick look.
+    "cogview4": ModelSpec(
+        key="cogview4",
+        repo="THUDM/CogView4-6B",
+        pipeline="CogView4Pipeline",
+        family="MM-DiT (GLM text encoder)",
+        license="Apache-2.0",
+        gated=False,
+        steps=50,
+        guidance=3.5,
+        supports_negative=True,
+        notes="Bilingual, strong text rendering. Pit against qwen-image.",
+    ),
+    # Lumina-Image 2.0: a compact (2B), current Apache DiT. A good "small but
+    # modern" datapoint sitting between tiny Sana and the big MM-DiTs.
+    "lumina2": ModelSpec(
+        key="lumina2",
+        repo="Alpha-VLLM/Lumina-Image-2.0",
+        pipeline="Lumina2Pipeline",   # a.k.a. Lumina2Text2ImgPipeline in some versions
+        family="DiT / flow (2B)",
+        license="Apache-2.0",
+        gated=False,
+        steps=35,
+        guidance=4.0,
+        supports_negative=True,
+        max_sequence_length=256,
+        notes="Compact modern open DiT. Class name may vary; falls back to Auto.",
+    ),
 }
 
 

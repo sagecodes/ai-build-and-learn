@@ -13,6 +13,37 @@ pulled from HuggingFace at runtime (nothing baked into the image).
    5 photos of a subject ──► SDXL LoRA (a few hundred steps) ──► base-vs-tuned report
 ```
 
+## Quickstart
+
+```bash
+# 1. GPU devbox (Flyte 2 cluster with host GPUs)
+flyte start devbox --gpu
+
+# 2. CLI venv (submits runs; separate from the heavy task image)
+cd topics/image-generation/imagegen-flyte
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python flyte==2.2.1 kubernetes 'connectrpc==0.10.0'
+export PATH="$PWD/.venv/bin:$PATH"
+
+# 3. HF token secret (needed for gated models; avoids rate limits on the rest)
+flyte create secret HF_TOKEN --value hf_xxxxxxxxxxxx
+
+# 4. Compare models -> side-by-side Flyte report (open the run URL it prints)
+flyte run compare_pipeline.py compare \
+  --models '["sdxl","zimage-turbo","flux1-schnell"]' \
+  --prompts '["a red panda barista pouring latte art, cozy cafe, 50mm, bokeh"]'
+
+# 5. Pull the generated images to ./downloads/
+python download_outputs.py <run_name>
+```
+
+The first run downloads weights (cached after, so later runs are instant); big
+models like Qwen are ~50GB. Weights fetch on a CPU pod and log a live progress
+heartbeat (`X GB so far (+Y MB/30s)`) in the task logs, with a socket timeout +
+retries so a stalled connection self-heals instead of hanging. Sections below cover
+the Gradio studio, LoRA fine-tune, host-GPU mode, pulling artifacts, and
+troubleshooting.
+
 ## What's here
 
 | File                  | What it is                                                        |
@@ -132,24 +163,39 @@ PNGs are saved as each task's output directory.
 **How it's wired:** a `fetch_weights` task (CPU, `cache="auto"`) snapshots each
 model's HuggingFace repo into a `Dir` in the blob store, then one GPU
 `generate_for_model` task per model loads from that cached Dir. So weights
-download **once** — every later run is a cache hit served in-cluster, and no GPU
+download **once**: every later run is a cache hit served in-cluster, and no GPU
 sits idle during the download. On a single-GPU devbox the generate tasks
-serialize at the scheduler (one holds the GPU at a time); downloads and a
-multi-GPU box fan out in parallel.
+serialize at the scheduler (one holds the GPU at a time).
+
+**Downloads run one model at a time, on purpose.** Fetching all the models in
+parallel opens dozens of concurrent sockets to the HuggingFace CDN, and on a
+lossy uplink (like the Spark over Wi-Fi) that congestion black-holes a transfer
+mid-stream and hangs the fetch with no error. Serializing keeps the socket count
+low and the downloads reliable. In production on a real cluster with a fat,
+reliable pipe, fetch in parallel instead: swap the serial loop in
+`compare_pipeline.py` back to
+`weights = await asyncio.gather(*[fetch_weights(s.key) for s in specs])`.
 
 ## The Gradio studio
 
-An interactive front door to the same models: type a prompt, tick the models to
-race, watch the images land side by side.
+A front door to the pipeline: type a prompt, tick the models to race, hit
+Generate, and the studio **launches a Flyte `compare` run** and links its report
+(the prompt x model grid + saved PNGs). The app is a thin CPU launcher: it loads
+no model and touches no GPU, so it can't pin weights in memory. All the GPU work
+happens in the pipeline's tasks. This mirrors the langgraph_agent_research
+tutorial's "Gradio over `flyte.run`" pattern.
 
 ```bash
-python app.py                    # serve on the devbox
-GRADIO_SHARE=1 python app.py     # public HTTPS tunnel for a remote browser
+# register the pipeline first so the app can reference the compare task
+flyte deploy compare_pipeline.py
+
+python app.py                    # local app -> remote (devbox) pipeline
+RUN_MODE=local python app.py     # local app -> local pipeline (host dev)
+GRADIO_SHARE=1 python app.py     # add a public HTTPS tunnel for a remote browser
 ```
 
-Models load on first use and stay cached (the GB10's unified memory holds
-several at once). 🔒 in the picker marks gated models. For the batch,
-report-first path use `compare_pipeline.py`.
+🔒 in the picker marks gated models. For the interactive, in-process path on a
+host GPU (no Flyte), use `run_local.py` instead.
 
 ## Fine-tune a LoRA
 

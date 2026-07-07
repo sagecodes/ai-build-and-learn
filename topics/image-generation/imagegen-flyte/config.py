@@ -3,8 +3,8 @@
 Two runtimes share one image + one model registry (models.py):
   - compare_pipeline.py : GPU *tasks* that generate a prompt grid across models
     and emit a side-by-side Flyte report.
-  - app.py              : a GPU Gradio *app* to type a prompt, pick models, and
-    see the images live (and kick off the batch pipeline).
+  - app.py              : a thin CPU Gradio *app* that launches compare runs and
+    links the report (no GPU, loads no model).
 
 DGX-Spark-pinned (GB10 Blackwell, arm64, cu130 stack): aarch64 platform +
 devbox-local registry. Drop the pins for a generic Flyte 2 cluster.
@@ -94,8 +94,19 @@ def _torch_image(name: str, extra: tuple[str, ...] = ()) -> flyte.Image:
 # Task image (compare_pipeline.py, lora_finetune.py).
 image = _torch_image("imagegen-image")
 
-# App image adds gradio; bundles the flyte-free modules so the server pod can
-# `import` them (same sibling-bundling trick as the other Gradio apps).
+# The studio app is a thin LAUNCHER: it submits `compare` runs and links the
+# report, so it needs no torch/diffusers, just flyte + gradio and the model
+# registry (models.py, bundled in app.py) for the model picker. That keeps the
+# app pod tiny and, crucially, means it never loads a model or holds GPU memory.
+# connectrpc pinned to 0.10.x: 0.11 breaks flyte 2.2.1 runs ('Headers' not callable).
+studio_app_image = (
+    flyte.Image.from_debian_base(name="imagegen-studio-image", registry=REGISTRY, platform=PLATFORM)
+    .with_pip_packages("flyte==2.2.1", "connectrpc==0.10.*", "gradio==5.42.0", "python-dotenv")
+)
+
+# Legacy heavyweight app image + GPU pod template from when the studio generated
+# in-pod. The studio is now a launcher (studio_app_image above), so these are
+# unused; kept only for lora_finetune-style in-pod experiments. Safe to delete.
 app_image = _torch_image("imagegen-app-image", extra=("gradio==5.42.0",))
 
 
@@ -126,20 +137,37 @@ app_image = _torch_image("imagegen-app-image", extra=("gradio==5.42.0",))
 
 _ENV_VARS = {"HF_HOME": HF_HOME, "HF_HUB_ENABLE_HF_TRANSFER": "1"}
 
+# The fetch task turns hf_transfer OFF on purpose. hf_transfer is a Rust
+# downloader that does its own DNS, so it bypasses the IPv4 pin in fetch_weights;
+# on a network with a black-holed IPv6 route to the HF CDN it still hangs. The
+# plain Python downloader honors the IPv4 pin, and HF_HUB_DOWNLOAD_TIMEOUT bounds
+# a *stalled read* (per-read, not total time) so a hung socket fails in ~60s and
+# snapshot_download resumes from the .incomplete instead of hanging forever. Big
+# models can take an hour of healthy downloading; only a lack of progress trips.
+_FETCH_ENV_VARS = {**_ENV_VARS, "HF_HUB_ENABLE_HF_TRANSFER": "0", "HF_HUB_DOWNLOAD_TIMEOUT": "60"}
+
 cpu_task_env = flyte.TaskEnvironment(
     name="imagegen-fetch",
     image=image,
     resources=flyte.Resources(cpu="4", memory="16Gi", disk="120Gi"),
     secrets=[HF_SECRET],
-    env_vars=_ENV_VARS,
+    env_vars=_FETCH_ENV_VARS,
 )
+
+# expandable_segments lets PyTorch's caching allocator grow/shrink segments
+# instead of reserving fixed blocks, which cuts fragmentation-driven OOM. It
+# matters more on the GB10: "GPU memory" is the same unified 128GB the OS, page
+# cache, and other pods share (nvidia-smi even reports usage as "Not Supported"),
+# so a model can transiently fail to allocate under memory pressure that a
+# discrete GPU would never see. Paired with per-task retries below.
+_GPU_ENV_VARS = {**_ENV_VARS, "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
 
 gpu_task_env = flyte.TaskEnvironment(
     name="imagegen",
     image=image,
     resources=flyte.Resources(cpu="8", memory="48Gi", gpu=1, disk="80Gi"),
     secrets=[HF_SECRET],
-    env_vars=_ENV_VARS,
+    env_vars=_GPU_ENV_VARS,
 )
 
 orch_env = flyte.TaskEnvironment(

@@ -90,6 +90,31 @@ def load_pipeline(spec: ModelSpec, device: str = "cuda", model_path: str | None 
     return pipe
 
 
+def free_gpu_memory() -> None:
+    """Hand a just-dropped pipeline's memory back to the allocator/OS.
+
+    Call this right after you drop your last reference to a pipeline (`pipe =
+    None`) so the next model starts from a clean slate. On the GB10's *unified*
+    memory there's no separate VRAM pool to move weights out of (CPU and GPU
+    share the same 128GB), so `.to("cpu")` frees nothing; the reclaim comes from
+    releasing the Python objects and then returning PyTorch's cached blocks with
+    `empty_cache()`. Best-effort and import-safe: does nothing if torch/CUDA is
+    absent.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
 # ── Generating ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -193,8 +218,41 @@ REPORT_CSS = """
   .ig-err { padding: 16px; color: #b91c1c; font-size: 13px; white-space: pre-wrap; }
   .ig-prompt { background: #f9fafb; border-left: 3px solid #6366f1; padding: 8px 12px;
                border-radius: 6px; margin: 6px 0 14px; font-size: 14px; }
+  /* Click-to-zoom lightbox: thumbnails are small so many models fit; click one
+     to see it big. Pure inline handlers (no <script>) so it works whether the
+     console loads the report as a document or injects it via innerHTML. */
+  .ig-cell img.ig-zoom { cursor: zoom-in; }
+  #ig-lb { position: fixed; inset: 0; z-index: 9999; display: none; cursor: zoom-out;
+           flex-direction: column; align-items: center; justify-content: center;
+           gap: 12px; padding: 24px; background: rgba(0,0,0,.85); }
+  #ig-lb img { max-width: 92vw; max-height: 82vh; border-radius: 8px;
+               box-shadow: 0 8px 40px rgba(0,0,0,.5); }
+  #ig-lb #ig-lb-cap { color: #e5e7eb; font-size: 14px;
+                      font-family: system-ui, -apple-system, sans-serif; }
 </style>
 """
+
+# Opening the lightbox: set the big image + caption from the clicked thumbnail,
+# then show the overlay. No user data in the handler itself, so no escaping needed.
+_ZOOM_ONCLICK = (
+    "document.getElementById('ig-lb-img').src=this.src;"
+    "document.getElementById('ig-lb-cap').textContent=this.dataset.cap;"
+    "document.getElementById('ig-lb').style.display='flex'"
+)
+
+# The overlay itself; click anywhere on it to close. Appended once per report.
+_LIGHTBOX = (
+    "<div id=\"ig-lb\" onclick=\"this.style.display='none'\" style=\"display:none\">"
+    '<img id="ig-lb-img" src="" alt="zoomed"/><div id="ig-lb-cap"></div></div>'
+)
+
+
+def _zoom_img(data_uri: str, alt: str, cap: str) -> str:
+    """An <img> that expands into the lightbox on click."""
+    return (
+        f'<img class="ig-zoom" src="{data_uri}" alt="{html.escape(alt)}" '
+        f'data-cap="{html.escape(cap, quote=True)}" onclick="{_ZOOM_ONCLICK}"/>'
+    )
 
 
 def _cell_html(spec: ModelSpec, r: GenResult) -> str:
@@ -206,7 +264,7 @@ def _cell_html(spec: ModelSpec, r: GenResult) -> str:
         body = f'<div class="ig-err">⚠️ {html.escape(r.error)}</div>'
         sub = ""
     else:
-        body = f'<img src="{r.data_uri}" alt="{html.escape(spec.key)}"/>'
+        body = _zoom_img(r.data_uri, spec.key, f"{spec.key} · {r.prompt} · {r.seconds:.1f}s")
         sub = (f'<div class="ig-sub">{r.seconds:.1f}s · {spec.steps} steps · '
                f'{spec.license}</div>')
     return f'<div class="ig-cell">{body}{header}{sub}</div></div>'
@@ -229,7 +287,7 @@ def render_comparison(
         f'{REPORT_CSS}<div class="ig-wrap"><h2>Model comparison</h2>'
         f'<div class="ig-meta">{html.escape(meta)}</div>'
         f'<div class="ig-prompt">🖊️ {html.escape(prompt)}</div>'
-        f'<div class="ig-grid">{cells}</div></div>'
+        f'<div class="ig-grid">{cells}</div></div>{_LIGHTBOX}'
     )
 
 
@@ -253,7 +311,7 @@ def render_grid(
         )
     header = (f'{REPORT_CSS}<div class="ig-wrap"><h2>Image model comparison</h2>'
               f'<div class="ig-meta">{html.escape(meta)}</div>')
-    return header + "".join(blocks) + "</div>"
+    return header + "".join(blocks) + "</div>" + _LIGHTBOX
 
 
 def render_before_after(
@@ -268,7 +326,7 @@ def render_before_after(
         if r.error:
             body = f'<div class="ig-err">⚠️ {html.escape(r.error)}</div>'
         else:
-            body = f'<img src="{r.data_uri}" alt="{title}"/>'
+            body = _zoom_img(r.data_uri, title, f"{title} · {r.seconds:.1f}s")
         return (f'<div class="ig-cell">{body}<div class="ig-cap">'
                 f'<div class="ig-model">{html.escape(title)}</div>'
                 f'<div class="ig-sub">{r.seconds:.1f}s</div></div></div>')
@@ -277,7 +335,7 @@ def render_before_after(
         f'{REPORT_CSS}<div class="ig-wrap"><h2>LoRA fine-tune: before vs after</h2>'
         f'<div class="ig-meta">{html.escape(meta)}</div>'
         f'<div class="ig-prompt">🖊️ {html.escape(prompt)}</div>'
-        f'<div class="ig-grid">{grid}</div></div>'
+        f'<div class="ig-grid">{grid}</div></div>{_LIGHTBOX}'
     )
 
 
