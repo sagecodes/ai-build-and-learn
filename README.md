@@ -259,3 +259,71 @@ source .venv/bin/activate  # macOS/Linux
 # Install dependencies
 uv pip install -r TopicFOLDER/requirements.txt
 ```
+
+
+
+
+  ---
+  Continue the open-source image-generation demo in
+  topics/image-generation/imagegen-flyte/ (build-learn repo, for the
+  2026-07-10 stream). Running on the DGX Spark GPU Flyte devbox. See memory
+  project_imagegen_flyte_demo and the reference notes.
+
+  What's built (all files exist):
+  - models.py — registry: flux1-schnell/dev, flux2-dev, sdxl, qwen-image,
+  sd35-large, zimage-turbo. All FLUX repos are license-gated.
+  - config.py — cu130 torch arm64 image; 3 task envs: cpu_task_env(fetch),
+  gpu_task_env(generate), orch_env(orchestrators, CPU so they don't deadlock
+  on the single GPU). hf_transfer enabled, HF_TOKEN secret.
+  - imagegen_core.py — flyte-free load/generate/report (JPEG@512 thumbnails).
+  - compare_pipeline.py — centerpiece: fetch_weights(cache="auto", lean
+  download ~13GB) → generate_for_model(GPU) → side-by-side grid report + PNG
+  Dir. Tasks: compare, generate_one, generate_for_model, fetch_weights.
+  - app.py/app_ui.py — Gradio studio GPU app. lora_finetune.py — SDXL
+  DreamBooth-LoRA before/after. run_local.py, README.md, report_smoke.py.
+
+  Validated on devbox: compare pipeline ran green; confirmed a real 768×768
+  SDXL image (red-panda barista) embedded in the report; fetch_weights cache
+  hit works. Not yet run: the Gradio app.py and lora_finetune.py.
+
+  Env setup: .venv has flyte==2.2.1 kubernetes connectrpc==0.10.0 s3fs. MUST
+  Continue the open-source image-generation demo in
+  topics/image-generation/imagegen-flyte/ (build-learn repo, for the
+  2026-07-10 stream). Running on the DGX Spark GPU Flyte devbox. See memory
+  project_imagegen_flyte_demo and the reference notes.
+
+  What's built (all files exist):
+  - models.py — registry: flux1-schnell/dev, flux2-dev, sdxl, qwen-image,
+  sd35-large, zimage-turbo. All FLUX repos are license-gated.
+  - config.py — cu130 torch arm64 image; 3 task envs: cpu_task_env(fetch),
+  gpu_task_env(generate), orch_env(orchestrators, CPU so they don't deadlock
+  on the single GPU). hf_transfer enabled, HF_TOKEN secret.
+  - imagegen_core.py — flyte-free load/generate/report (JPEG@512 thumbnails).
+  - compare_pipeline.py — centerpiece: fetch_weights(cache="auto", lean
+  download ~13GB) → generate_for_model(GPU) → side-by-side grid report + PNG
+  Dir. Tasks: compare, generate_one, generate_for_model, fetch_weights.
+  - app.py/app_ui.py — Gradio studio GPU app. lora_finetune.py — SDXL
+  DreamBooth-LoRA before/after. run_local.py, README.md, report_smoke.py.
+
+  Validated on devbox: compare pipeline ran green; confirmed a real 768×768
+  SDXL image (red-panda barista) embedded in the report; fetch_weights cache
+  hit works. Not yet run: the Gradio app.py and lora_finetune.py.
+
+  Env setup: .venv has flyte==2.2.1 kubernetes connectrpc==0.10.0 s3fs. MUST
+  pin connectrpc 0.10.x (0.11 breaks every run). .flyte/config.yaml →
+  localhost:30080.
+
+  Last open item: Flyte report tab wouldn't render in the Mac browser — root
+  cause was VSCode not forwarding port 30002 (rustfs) after a Wi-Fi→ethernet
+  switch dropped the tunnel; not a code/devbox bug (backend serves reports
+  fine, verified HTTP 200). I reverted a temporary configmap edit; devbox is
+  in default state. User was reconnecting VSCode + forwarding 30002.
+
+  Next steps: (1) confirm reports render after reconnect, (2) run the Gradio
+  studio (python app.py) and validate, (3) run lora_finetune.py lora_demo and
+  validate the before/after report.
+
+  Devbox creds for reading rustfs directly if needed: s3fs key
+  rustfs/rustfsstorage, endpoint http://localhost:30002, bucket flyte-data.
+
+  ---
