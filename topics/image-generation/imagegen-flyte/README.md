@@ -160,6 +160,20 @@ Open the run URL it prints. The **report** tab shows the images side by side
 (models are columns, prompts rows) with per-image timing; the full-resolution
 PNGs are saved as each task's output directory.
 
+### Prompts to try (and what each stresses)
+
+A small eval sweep that surfaces where models diverge. In the studio, paste one
+per line; on the CLI, pass them as a JSON array (escape the inner quotes in the
+menu one, e.g. `\"TODAY: PUMPKIN LATTE $5\"`).
+
+- **Fine detail, materials, macro light:** a hedgehog knight in handmade acorn armor guarding a glowing blue mushroom, misty forest floor at dawn, cinematic macro, golden rim light
+- **Text rendering** (Qwen-Image, CogView4 pull ahead): a hand-lettered chalkboard menu outside a cafe that reads "TODAY: PUMPKIN LATTE $5"
+- **Hands + shallow depth of field** (hands are the classic tell): close-up of a barista's hands pulling an espresso shot, steam, shallow depth of field, 85mm
+- **Translucency + glow on black:** a translucent glass hummingbird perched on a neon sign, bioluminescent, dark background, macro
+- **People in a busy scene** (candid face, hands, crowd coherence): a woman laughing while hailing a taxi on a busy New York sidewalk, golden hour, candid street photography, 50mm
+- **Portrait realism** (skin, freckles, soft light): portrait of a woman with freckles and windswept hair on a rooftop at sunset, city skyline behind her, 85mm, soft light
+- **Dynamic pose + motion blur** (full-body anatomy): a man skateboarding through a sunlit city plaza, motion blur, dynamic pose, street photography
+
 **How it's wired:** a `fetch_weights` task (CPU, `cache="auto"`) snapshots each
 model's HuggingFace repo into a `Dir` in the blob store, then one GPU
 `generate_for_model` task per model loads from that cached Dir. So weights

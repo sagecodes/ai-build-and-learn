@@ -81,9 +81,11 @@ def _compare_task():
 
 def run_compare(prompt, model_keys, seed, steps, guidance, negative):
     """Submit a compare run, stream the run link, then confirm on completion."""
-    prompt = (prompt or "").strip()
-    if not prompt:
-        yield "⚠️ Enter a prompt first.", ""
+    # One prompt per line (NOT comma-split: prompts are full of commas). The grid
+    # is prompts x models, and each model task loads once and renders every prompt.
+    prompts = [p.strip() for p in (prompt or "").splitlines() if p.strip()]
+    if not prompts:
+        yield "⚠️ Enter at least one prompt (one per line).", ""
         return
     if not model_keys:
         yield "⚠️ Pick at least one model.", ""
@@ -92,7 +94,7 @@ def run_compare(prompt, model_keys, seed, steps, guidance, negative):
     try:
         run = flyte.run(
             _compare_task(),
-            prompts=[prompt],
+            prompts=prompts,
             models=list(model_keys),
             seed=int(seed),
             steps=int(steps) if int(steps) > 0 else -1,
@@ -110,8 +112,9 @@ def run_compare(prompt, model_keys, seed, steps, guidance, negative):
         if url else f"Running as <code>{run.name}</code>…"
     )
     yield (
-        f"🚀 Launched compare on {len(model_keys)} model(s). Uncached weights "
-        f"download on first use, so the first run for a model is slow.",
+        f"🚀 Launched compare: {len(prompts)} prompt(s) × {len(model_keys)} "
+        f"model(s). Uncached weights download on first use, so the first run for "
+        f"a model is slow.",
         link,
     )
 
@@ -145,7 +148,8 @@ def create_demo():
         with gr.Row():
             with gr.Column(scale=3):
                 prompt = gr.Textbox(
-                    label="Prompt", lines=2,
+                    label="Prompt(s) — one per line", lines=3,
+                    placeholder="one prompt per line; the grid is prompts × models",
                     value="a red panda barista pouring latte art, cozy cafe, 50mm, bokeh",
                 )
                 negative = gr.Textbox(
