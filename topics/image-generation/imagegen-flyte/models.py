@@ -109,6 +109,23 @@ MODELS: dict[str, ModelSpec] = {
         guidance=4.0,
         notes="Strong all-rounder; best-in-class text-in-image rendering.",
     ),
+    # Qwen-Image-2512: the Dec 2025 update of Qwen-Image (better human realism,
+    # detail, text). Same ~20B MM-DiT architecture that already runs here, so it
+    # fits the Spark; Apache-2.0 and ungated. Card recommends 50 steps and a
+    # recent diffusers (git build) — if QwenImagePipeline doesn't resolve, the
+    # loader falls back to AutoPipeline/DiffusionPipeline.
+    "qwen-image-2512": ModelSpec(
+        key="qwen-image-2512",
+        repo="Qwen/Qwen-Image-2512",
+        pipeline="QwenImagePipeline",
+        family="MM-DiT",
+        license="Apache-2.0",
+        gated=False,
+        steps=50,
+        guidance=4.0,
+        supports_negative=True,   # Qwen uses true_cfg_scale when a negative is given
+        notes="Dec 2025 Qwen-Image update. ~50GB pull; 50 steps so slower. May want git diffusers.",
+    ),
     # SD 3.5 Large: Stability's MM-DiT flagship. Gated.
     "sd35-large": ModelSpec(
         key="sd35-large",
@@ -136,12 +153,17 @@ MODELS: dict[str, ModelSpec] = {
         max_sequence_length=512,
         notes="Full FLUX.1. Slower + better than schnell.",
     ),
-    # FLUX.2 [dev]: current open-weight quality benchmark. Newest → highest risk
-    # on the pipeline class name; kept out of DEFAULT_MODELS until verified.
+    # FLUX.2 [dev]: current open-weight quality benchmark, but a beast. 32B
+    # transformer + a separate ~24B Mistral-3 text encoder, so in bf16 it's ~110GB
+    # of weights: it will very likely OOM the GB10's 128GB unified pool (BFL's own
+    # example loads it with text_encoder=None + a remote encoder to dodge this).
+    # For the Spark the realistic option is the 4-bit repo
+    # `diffusers/FLUX.2-dev-bnb-4bit` (would need bitsandbytes in the image). Kept
+    # out of DEFAULT_MODELS. Class name Flux2Pipeline verified on the HF model card.
     "flux2-dev": ModelSpec(
         key="flux2-dev",
         repo="black-forest-labs/FLUX.2-dev",
-        pipeline="Flux2Pipeline",    # verify: needs a diffusers that ships it
+        pipeline="Flux2Pipeline",
         family="DiT (next-gen)",
         license="FLUX.2-dev non-commercial (gated)",
         gated=True,
@@ -149,7 +171,7 @@ MODELS: dict[str, ModelSpec] = {
         guidance=4.0,
         supports_negative=False,
         max_sequence_length=512,
-        notes="Newest BFL open weights. Confirm Flux2Pipeline exists in your diffusers.",
+        notes="32B + 24B text encoder; full bf16 likely OOMs the Spark. bnb-4bit variant fits better.",
     ),
     # Sana-Sprint 1.6B: NVIDIA's efficiency play, and the star turn on a Spark:
     # NVIDIA's own model on NVIDIA silicon. Linear-attention DiT + a 32x deep-
@@ -169,12 +191,17 @@ MODELS: dict[str, ModelSpec] = {
     ),
     # Chroma: the fully-open (Apache-2.0), un-gated de-distill of FLUX.1-schnell.
     # The direct answer to "you don't need the access-gated FLUX repo." Restores
-    # CFG + negative prompts that schnell dropped, so it's slower than schnell but
-    # ungated and community-tuned. ~8.9B; fits the Spark's unified memory easily.
-    "chroma": ModelSpec(
-        key="chroma",
-        repo="lodestones/Chroma",
-        pipeline="ChromaPipeline",   # verify: recent diffusers; may need single-file load
+    # CFG + negative prompts that schnell dropped. ~8.9B; fits the Spark easily.
+    # NOTE: the original `lodestones/Chroma` repo is DEPRECATED and ships the whole
+    # 1.3TB training-epoch archive (v11..v50, each 17.8GB) — never point at it. The
+    # Chroma1-* repos below are proper diffusers-format single releases (~45-63GB).
+    # (They also ship a root single-file .safetensors that duplicates transformer/;
+    # from_pretrained ignores it, but the fetch still pulls it until we add
+    # `Chroma1-*.safetensors` to ignore_patterns.)
+    "chroma-hd": ModelSpec(
+        key="chroma-hd",
+        repo="lodestones/Chroma1-HD",
+        pipeline="ChromaPipeline",   # diffusers-format; falls back to Auto/DiffusionPipeline
         family="DiT / rectified flow (FLUX-based)",
         license="Apache-2.0",
         gated=False,
@@ -182,7 +209,33 @@ MODELS: dict[str, ModelSpec] = {
         guidance=4.0,
         supports_negative=True,
         max_sequence_length=512,
-        notes="Ungated open FLUX-schnell de-distill. Confirm ChromaPipeline loads the repo.",
+        notes="Flagship high-detail Chroma. Ungated open FLUX-schnell de-distill.",
+    ),
+    "chroma-base": ModelSpec(
+        key="chroma-base",
+        repo="lodestones/Chroma1-Base",
+        pipeline="ChromaPipeline",
+        family="DiT / rectified flow (FLUX-based)",
+        license="Apache-2.0",
+        gated=False,
+        steps=30,
+        guidance=4.0,
+        supports_negative=True,
+        max_sequence_length=512,
+        notes="Base Chroma release. Same arch as HD, less detail-tuned.",
+    ),
+    "chroma-flash": ModelSpec(
+        key="chroma-flash",
+        repo="lodestones/Chroma1-Flash",
+        pipeline="ChromaPipeline",
+        family="DiT / rectified flow (FLUX-based, accelerated)",
+        license="Apache-2.0",
+        gated=False,
+        steps=12,                # few-step accelerated variant; tune ~8–16
+        guidance=1.0,            # distilled: low/no CFG
+        supports_negative=False,
+        max_sequence_length=512,
+        notes="Speed-distilled Chroma (HD + flash delta). Few steps; empty card, tune settings.",
     ),
     # CogView4-6B: Zhipu's Apache MM-DiT with a GLM-4 text encoder. Another strong
     # text-in-image renderer, so it makes a clean head-to-head against Qwen-Image,
@@ -213,6 +266,23 @@ MODELS: dict[str, ModelSpec] = {
         supports_negative=True,
         max_sequence_length=256,
         notes="Compact modern open DiT. Class name may vary; falls back to Auto.",
+    ),
+    # Krea-2-Turbo: Krea's 12B DiT, post-trained for few-step inference (8 steps,
+    # no CFG). Ungated, Krea 2 Community License, ~62GB diffusers-format. We add
+    # ONLY Turbo: the sibling Krea-2-Raw is a base checkpoint the card says is
+    # "not recommended for inference" (finetuning base only). Krea2Pipeline is very
+    # new (Jun 2026) so it may need a git diffusers; the loader falls back to Auto.
+    "krea-2-turbo": ModelSpec(
+        key="krea-2-turbo",
+        repo="krea/Krea-2-Turbo",
+        pipeline="Krea2Pipeline",
+        family="DiT (12B, turbo)",
+        license="Krea 2 Community (open)",
+        gated=False,
+        steps=8,
+        guidance=0.0,            # turbo: guidance-distilled, CFG off
+        supports_negative=False,
+        notes="Krea's fast 12B model (8 steps). Needs recent diffusers for Krea2Pipeline.",
     ),
 }
 
