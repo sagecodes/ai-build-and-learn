@@ -348,8 +348,8 @@ async def generate_one(
     seed: int = 1234,
 ) -> ModelRun:
     """CLI-friendly single model: fetch (cached) then generate. For quick smokes."""
-    w = await fetch_weights(model_key)
-    return await generate_for_model(
+    w = await fetch_weights.override(short_name=f"fetch {model_key}")(model_key)
+    return await generate_for_model.override(short_name=f"generate {model_key}")(
         model_key, w, prompts, steps=steps, guidance=guidance, seed=seed,
     )
 
@@ -383,13 +383,20 @@ async def compare(
     # On a real cluster with a fat, reliable pipe, swap this for the parallel
     # form: `weights = await asyncio.gather(*[fetch_weights(s.key) for s in specs])`.
     # Each fetch is cache="auto", so already-downloaded models return instantly.
-    weights = [await fetch_weights(s.key) for s in specs]
+    # override(short_name=...) renames each invocation in the UI so the run graph
+    # reads "fetch qwen-image" / "generate sdxl" instead of a wall of identical
+    # "fetch_weights" / "generate_for_model" nodes. Display-only; doesn't change
+    # the task body or its cache key.
+    weights = [
+        await fetch_weights.override(short_name=f"fetch {s.key}")(s.key)
+        for s in specs
+    ]
 
     # Then one GPU task per model. asyncio.gather submits them together; the
     # devbox scheduler runs as many as there are free GPUs (one at a time on a
     # single-GPU box), each loading from its cached weights Dir.
     runs: list[ModelRun] = await asyncio.gather(*[
-        generate_for_model(
+        generate_for_model.override(short_name=f"generate {s.key}")(
             s.key, w, prompts, steps=steps, guidance=guidance, seed=seed,
             width=width, height=height, negative_prompt=negative_prompt,
         )

@@ -180,6 +180,13 @@ prompt that has them, like the menu and poster ones: `\"TODAY: PUMPKIN LATTE $5\
 - **Reflection + physical consistency:** a still alpine lake at dawn perfectly mirroring a snow-capped mountain and pink clouds, ultra sharp
 - **Art-style fidelity:** a fox in a snowy forest, Japanese ukiyo-e woodblock print style
 - **Lighting extremes / low light:** a lone lantern-lit ramen stall on a dark rainy street, warm glow against deep shadow, cinematic
+- **Human + animal: cradling** (arms, contact, scale): a farmer cradling a newborn lamb in both arms, golden-hour field, documentary photo
+- **Human + animals: hands + small subjects** (birds on outstretched hands): an old man feeding pigeons on a park bench, birds landing on his outstretched hands, candid street photo
+- **Human + animal in motion** (two subjects, mid-action): a woman playing fetch with her golden retriever on a beach at sunset, mid-motion, candid
+- **Negation** (models struggle to leave things out): an empty city street at dawn with absolutely no cars and no people
+- **Spatial relations + compositionality** (position, not just count): a small red cube on top of a large blue sphere, a green pyramid to the left, plain studio backdrop
+- **Reflective / chrome materials** (environment reflected in a curved surface): a chrome robot standing in a desert, the landscape reflected in its polished body, midday sun
+- **Liquid / fluid physics** (splash coherence): a splash of coffee frozen mid-air being poured into a white cup, high-speed photography
 
 **How it's wired:** a `fetch_weights` task (CPU, `cache="auto"`) snapshots each
 model's HuggingFace repo into a `Dir` in the blob store, then one GPU
