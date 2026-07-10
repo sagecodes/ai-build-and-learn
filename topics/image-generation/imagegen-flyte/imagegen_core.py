@@ -518,10 +518,13 @@ def _svg_lines(
     aria: str,
     height: int = 240,
     fmt: str = "{:.3f}",
+    xunit: str = "step",
+    vlines: tuple = (),
 ) -> str:
     """One or more step-indexed lines on ONE y axis.
 
-    `series` items: {name, color, points: [(step, value)], opacity?, end_label?}.
+    `series` items: {name, color, points: [(x, value)], opacity?, end_label?,
+    markers?}. `vlines` are (x, label) faint verticals, used for epoch boundaries.
     Two measures of different scale get two calls, never two y axes: a dual axis
     invents whatever correlation its arbitrary alignment implies.
     """
@@ -554,6 +557,15 @@ def _svg_lines(
         for s in ([0, max_steps // 2, max_steps] if max_steps else [0])
     )
 
+    # Epoch boundaries: faint verticals behind the data, labelled at the top.
+    vl = "".join(
+        f'<line x1="{sx(x):.1f}" y1="{T}" x2="{sx(x):.1f}" y2="{T+ph}" '
+        f'stroke="{_GRID}" stroke-width="1" stroke-dasharray="2 3"/>'
+        f'<text x="{sx(x):.1f}" y="{T+9}" text-anchor="middle" font-size="9.5" '
+        f'fill="{_MUTED}">{html.escape(lbl)}</text>'
+        for x, lbl in vlines if 0 < x < max_steps
+    )
+
     body = []
     for s in series:
         pts = " ".join(f"{sx(x):.1f},{sy(v):.1f}" for x, v in s["points"])
@@ -563,19 +575,23 @@ def _svg_lines(
             + (f' opacity="{s["opacity"]}"' if s.get("opacity") else "")
             + "/>"
         )
+        if s.get("markers"):
+            body.append("".join(
+                f'<circle cx="{sx(x):.1f}" cy="{sy(v):.1f}" r="3" fill="{s["color"]}"/>'
+                for x, v in s["points"]
+            ))
     for s in series:
-        if not s.get("end_label"):
-            continue
-        lx, lv = s["points"][-1]
-        body.append(
-            f'<circle cx="{sx(lx):.1f}" cy="{sy(lv):.1f}" r="4" fill="{s["color"]}"/>'
-            f'<text x="{sx(lx)+8:.1f}" y="{sy(lv)+4:.1f}" font-size="12" '
-            f'font-weight="600" fill="{_INK}">{fmt.format(lv)}</text>'
-        )
+        if s.get("end_label"):
+            lx, lv = s["points"][-1]
+            body.append(
+                f'<circle cx="{sx(lx):.1f}" cy="{sy(lv):.1f}" r="4" fill="{s["color"]}"/>'
+                f'<text x="{sx(lx)+8:.1f}" y="{sy(lv)+4:.1f}" font-size="12" '
+                f'font-weight="600" fill="{_INK}">{fmt.format(lv)}</text>'
+            )
         # Invisible fat hit targets: the native <title> tooltip needs no JS.
         body.append("".join(
             f'<circle cx="{sx(x):.1f}" cy="{sy(v):.1f}" r="9" fill="transparent">'
-            f"<title>step {x} · {s['name']} {fmt.format(v)}</title></circle>"
+            f"<title>{xunit} {x} · {s['name']} {fmt.format(v)}</title></circle>"
             for x, v in s["points"]
         ))
 
@@ -590,7 +606,7 @@ def _svg_lines(
         ) + "</div>"
 
     return (
-        f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{html.escape(aria)}">{grid}'
+        f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{html.escape(aria)}">{grid}{vl}'
         f'<line x1="{L}" y1="{T+ph}" x2="{L+pw}" y2="{T+ph}" stroke="{_AXIS}" '
         f'stroke-width="1"/>{xaxis}' + "".join(body) + "</svg>" + legend
     )
@@ -660,29 +676,44 @@ def render_training_report(
     kpis: list[tuple[str, str]],
     history: list[tuple[int, float, float, float]],
     sigma_buckets: list[tuple[str, float, int]],
+    epoch_history: list[tuple[int, float]] = (),
+    epoch_len: int = 0,
     badges: list[str] = (),
     stages: list[str] = (),
     stage: int = 0,
     thumbs_html: str = "",
     footer: str = "",
 ) -> str:
-    """The live training report: stages, KPIs, loss, grad norm, loss-by-noise-level.
+    """The live training report: stages, KPIs, per-epoch + per-step loss, grad norm.
 
-    `history` is [(step, raw_loss, ema_loss, grad_norm)]; `sigma_buckets` is
+    `history` is [(step, raw_loss, ema_loss, grad_norm)]; `epoch_history` is
+    [(epoch, mean_loss over that epoch)]; `sigma_buckets` is
     [(label, mean_loss, n_steps)] ordered low noise -> high noise.
 
-    Loss and grad norm get their own charts rather than a shared plot with two y
-    axes: a dual axis would imply whatever correlation its arbitrary alignment
-    happens to draw.
+    Each measure gets its own chart rather than sharing a plot with two y axes: a
+    dual axis would imply whatever correlation its arbitrary alignment draws.
 
-    The sigma breakdown is not decoration. Flow-matching loss is dominated by
-    which timestep got sampled, so the raw curve looks flat even while the model
-    learns. Splitting by noise level is what makes the signal legible.
+    Per-epoch mean loss is the headline chart because averaging a whole shuffled
+    pass cancels the per-step sigma noise, so it's the one curve that trends down
+    as the model learns. The per-step chart under it shows the raw texture, with
+    faint verticals at each epoch boundary.
     """
     pct = 100.0 * step / max(max_steps, 1)
     table = "".join(
         f"<tr><td>{s}</td><td>{r:.4f}</td><td>{e:.4f}</td><td>{g:.3f}</td></tr>"
         for s, r, e, g in history
+    )
+    # Epoch boundaries as faint verticals on the step charts.
+    n_epochs = -(-max_steps // epoch_len) if epoch_len else 0
+    vlines = tuple((e * epoch_len, f"e{e + 1}") for e in range(1, n_epochs)) if epoch_len else ()
+
+    epoch_chart = _svg_lines(
+        [{"name": "mean loss", "color": _ACCENT, "end_label": True, "markers": True,
+          "points": [(e, v) for e, v in epoch_history]}],
+        n_epochs, aria="Mean loss per epoch", height=180, xunit="epoch",
+    ) if len(epoch_history) >= 2 else (
+        '<p class="tr-sub">The first epoch is still running; this fills in once a '
+        'full pass completes.</p>'
     )
     loss_chart = _svg_lines(
         [
@@ -691,12 +722,12 @@ def render_training_report(
             {"name": "EMA (the trend)", "color": _ACCENT, "end_label": True,
              "points": [(s, e) for s, _, e, _ in history]},
         ],
-        max_steps, aria="Training loss over steps",
+        max_steps, aria="Training loss over steps", vlines=vlines,
     )
     grad_chart = _svg_lines(
         [{"name": "grad norm", "color": _ACCENT, "end_label": True,
           "points": [(s, g) for s, _, _, g in history]}],
-        max_steps, aria="Gradient norm over steps", height=160,
+        max_steps, aria="Gradient norm over steps", height=160, vlines=vlines,
     )
     return (
         f'{TRAIN_CSS}<div class="tr-wrap">'
@@ -708,13 +739,20 @@ def render_training_report(
         + (f'<div class="tr-thumbs">{thumbs_html}</div>' if thumbs_html else "")
         + f'<div class="tr-kpis">{"".join(_kpi(k, v) for k, v in kpis)}</div>'
         f'<div class="tr-track"><div class="tr-fill" style="width:{pct:.1f}%"></div></div>'
-        f'<div class="tr-note"><b>Reading this report:</b> a flat loss curve is '
-        f'expected here and does not mean the run is broken. Flow-matching loss '
+        f'<div class="tr-note"><b>Reading this report:</b> a flat per-step loss '
+        f'curve is expected and does not mean the run is broken. Flow-matching loss '
         f'depends far more on which noise level each step randomly drew than on how '
-        f'training is going, so look at the EMA and at the per-sigma breakdown below.'
+        f'training is going. The per-epoch curve and the per-sigma breakdown are '
+        f'where learning actually shows.'
         f"</div>"
-        f'<div class="tr-card"><h3>Loss</h3>'
-        f'<p class="tr-sub">Raw loss is noisy by construction; watch the EMA.</p>'
+        f'<div class="tr-card"><h3>Mean loss per epoch</h3>'
+        f'<p class="tr-sub">One point per full shuffled pass over the dataset. '
+        f'Averaging the whole epoch cancels the sigma noise, so this is the curve '
+        f'that trends down as the LoRA learns.</p>'
+        f"{epoch_chart}</div>"
+        f'<div class="tr-card"><h3>Loss per step</h3>'
+        f'<p class="tr-sub">The raw texture, with dashed verticals at each epoch '
+        f'boundary. Noisy by construction; watch the EMA, not the jitter.</p>'
         f"{loss_chart}"
         f"<details><summary>Table view</summary><table>"
         f"<tr><th>step</th><th>loss</th><th>EMA</th><th>grad norm</th></tr>"

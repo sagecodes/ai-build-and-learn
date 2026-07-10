@@ -374,9 +374,23 @@ async def train_chroma_lora(
     running, history = 0.0, []
     ema = gnorm_ema = None
     bucket_sum, bucket_n = [0.0] * len(SIGMA_BUCKETS), [0] * len(SIGMA_BUCKETS)
+    epoch_history: list[tuple[int, float]] = []   # [(epoch, mean loss over it)]
+    epoch_loss_sum = epoch_loss_n = 0
+
+    # Real epochs: walk the whole set in a shuffled order, reshuffle each pass.
+    # `random.choice` would sample with replacement, so with 156 latents and 800
+    # steps some images get shown a dozen times and others never. One epoch is
+    # exactly `epoch_len` steps, which is what lets the report mark boundaries.
+    epoch_len = len(cached)
+    n_epochs = -(-max_steps // epoch_len)   # ceil
+    order = list(range(epoch_len))
 
     for step in range(max_steps):
-        latents, embeds, text_mask = random.choice(cached)
+        pos = step % epoch_len
+        if pos == 0:
+            random.shuffle(order)
+        epoch = step // epoch_len
+        latents, embeds, text_mask = cached[order[pos]]
 
         noise = torch.randn_like(latents)
         # Sample timesteps logit-normally: flow matching learns least from the
@@ -429,6 +443,13 @@ async def train_chroma_lora(
         b = min(int(float(sigmas.reshape(-1)[0]) * len(SIGMA_BUCKETS)), len(SIGMA_BUCKETS) - 1)
         bucket_sum[b] += lv
         bucket_n[b] += 1
+        # Per-epoch mean loss: averaging a whole shuffled pass cancels the sigma
+        # noise, so this is the one curve that actually trends down as it learns.
+        epoch_loss_sum += lv
+        epoch_loss_n += 1
+        if pos == epoch_len - 1:
+            epoch_history.append((epoch + 1, epoch_loss_sum / epoch_loss_n))
+            epoch_loss_sum = epoch_loss_n = 0
 
         if (step + 1) % 25 == 0 or step == 0:
             span = 25 if (step + 1) % 25 == 0 else 1
@@ -447,15 +468,17 @@ async def train_chroma_lora(
                 step=done, max_steps=max_steps,
                 kpis=[
                     ("step", f"{done}/{max_steps}"),
+                    ("epoch", f"{epoch + 1}/{n_epochs}"),
                     ("loss (EMA)", f"{ema:.4f}"),
                     ("grad norm", f"{gnorm_ema:.3f}"),
                     ("steps/sec", f"{sps:.2f}"),
                     ("elapsed", _fmt_secs(elapsed)),
                     ("eta", _fmt_secs((max_steps - done) / max(sps, 1e-6))),
                     ("trainable", f"{n_trainable / 1e6:.1f}M"),
-                    ("rank", str(rank)),
                 ],
                 history=history,
+                epoch_history=epoch_history,
+                epoch_len=epoch_len,
                 sigma_buckets=_sigma_rows(bucket_sum, bucket_n),
                 thumbs_html=thumbs,
                 footer=f"{len(cached)} cached latents at {resolution}px · lr {lr:g}",
@@ -486,15 +509,17 @@ async def train_chroma_lora(
         step=max_steps, max_steps=max_steps,
         kpis=[
             ("steps", str(max_steps)),
+            ("epochs", str(len(epoch_history) or n_epochs)),
             ("final loss (EMA)", f"{ema:.4f}" if ema is not None else "n/a"),
             ("grad norm", f"{gnorm_ema:.3f}" if gnorm_ema is not None else "n/a"),
             ("elapsed", _fmt_secs(elapsed)),
             ("steps/sec", f"{max_steps / max(elapsed, 1e-6):.2f}"),
             ("trainable", f"{n_trainable / 1e6:.1f}M"),
-            ("rank", str(rank)),
             ("resolution", f"{resolution}px"),
         ],
         history=history,
+        epoch_history=epoch_history,
+        epoch_len=epoch_len,
         sigma_buckets=_sigma_rows(bucket_sum, bucket_n),
         thumbs_html=thumbs,
         footer=(f"Trigger <code>{ds.trigger}</code>. The adapter is this task's Dir "

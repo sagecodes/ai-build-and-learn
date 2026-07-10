@@ -261,6 +261,15 @@ host GPU (no Flyte), use `run_local.py` instead.
 
 ## Fine-tune a LoRA
 
+The LoRA code is four files:
+
+| File | What it is |
+|------|------------|
+| `lora_finetune.py` | Subject LoRA on **SDXL** (U-Net, epsilon loss). The classic DreamBooth story: 5 photos, a rare token, `train_lora` → `sample_lora`. |
+| `lora_chroma.py` | Style LoRA on **Chroma** (DiT, flow matching). The main event: `fetch_dataset` + `train_chroma_lora` + `sample_chroma_lora`, plus `generate_with_lora` and `train_only` as entry points. |
+| `lora_data.py` | The dataset registry (repo, trigger, eval prompts, license) and the fetch/preprocess helpers both trainers share. |
+| `imagegen_core.py` | Not LoRA-specific, but the training report and the base-vs-tuned report renderers live here. |
+
 Two trainers, on purpose. They teach the same trick (freeze the model, train a
 few MB of adapter) on the two backbone families the model table splits on, and
 reading them side by side is most of the lesson.
@@ -344,21 +353,35 @@ Two things to keep straight:
 
 A trained adapter can only teach the base model something it doesn't already
 know, and **how much it teaches depends entirely on how rare the trigger is.**
+Two runs, same recipe (rank 16, 800 steps, 512px, sampled at 1024px), make the
+point:
 
-Run `r7gxz7bswkvswldgrsvs` trained the yarn-art LoRA (18 images, rank 16, 800
-steps, 512px) and rendered base vs tuned at 1024px:
+`r7gxz7bswkvswldgrsvs` — the **yarn-art** LoRA, a natural-language trigger:
 
 | prompt | mean abs pixel Δ | near-black pixels, base → tuned |
 |---|---|---|
-| a fox sitting in the snow | 119 / 255 | 2.0% → 60.2% |
-| an astronaut riding a horse | 135 / 255 | 12.0% → 63.6% |
-| the Golden Gate Bridge at sunset | 55 / 255 | 20.2% → 21.4% |
+| a fox sitting in the snow, yarn art style | 119 / 255 | 2.0% → 60.2% |
+| an astronaut riding a horse, yarn art style | 135 / 255 | 12.0% → 63.6% |
+| the Golden Gate Bridge at sunset, yarn art style | 55 / 255 | 20.2% → 21.4% |
 
-The adapter changes a *lot*, but not in the way you might advertise: **base Chroma
-already renders "yarn art style" beautifully**, because that phrase is plain
-English it has seen in training. What the LoRA actually learned is the *dataset's
-photographic setup* — the dark studio backdrop and loose stray strands of those 18
-particular photos. Hence near-black backgrounds tripling.
+**Base Chroma already renders "yarn art style" beautifully**, because that phrase
+is plain English it saw in training. So the adapter changes a lot of pixels but
+mostly learned the *dataset's photographic setup* — the dark studio backdrop of
+those 18 photos. Hence near-black backgrounds tripling. The medium was already
+there; the LoRA just tinted the room.
+
+`rksl8lnjfp2z6xdn6nzw` — the **tarot** LoRA, the rare token `trtcrd`:
+
+| prompt | mean abs pixel Δ | what changed |
+|---|---|---|
+| a trtcrd of an astronaut floating in space | 36 / 255 | photoreal astronaut → flat woodcut plate, cream ground, card banner |
+| a trtcrd of a laptop computer | 63 / 255 | rendered scene → bold-outlined 1920 Rider-Waite illustration |
+| a trtcrd of a red panda barista | 64 / 255 | Pixar-ish 3D render → flat tarot card, apothecary background |
+
+Similar pixel deltas, completely different *kind* of change. Because the base
+model has no prior for `trtcrd`, the adapter got to define it from scratch, so the
+before/after is a whole medium shift rather than a re-tint. That is the demo you
+want on camera.
 
 So:
 
@@ -367,8 +390,8 @@ So:
   set's incidental qualities. Dial it back with `--lora_scale 0.6`.
 - **Rare-token triggers** (`trtcrd`, `3dicon`, `sks dog`) carry no prior at all, so
   the base model simply cannot produce them and the before/after is dramatic. This
-  is why DreamBooth invented `sks`, and why the tarot and 3d-icon sets are the
-  better choice when you want an unmistakable demo.
+  is why DreamBooth invented `sks`, and why `--dataset tarot` is the demo to reach
+  for. (Verified: the table above is that exact run.)
 - 800 steps on 18 images is well into memorizing the set. Fewer steps, or a lower
   `lora_scale`, buys back generality.
 
@@ -402,18 +425,28 @@ Live, and it keeps its charts after the task finishes:
 
 - a stage indicator (fetch → train → sample) and badges, same shape as the
   `workshops/tutorials` reports
-- a KPI row (step, EMA loss, grad norm, steps/sec, elapsed, ETA, trainable params)
-- the loss curve: raw per-25-step loss in gray, its EMA in blue
+- a KPI row (step, **epoch**, EMA loss, grad norm, steps/sec, elapsed, ETA, params)
+- **mean loss per epoch** — one point per full pass over the dataset
+- loss per step: raw per-25-step loss in gray, its EMA in blue, dashed verticals
+  at each epoch boundary
 - the gradient norm, on **its own chart**, not a second y axis on the loss plot
 - **mean loss bucketed by noise level (sigma)**
 - a table view under each chart, and hover tooltips via SVG `<title>` (the report
   is injected as HTML, so it carries no `<script>` and no external assets)
 
-That last chart is the one that matters. Flow-matching loss depends far more on
-which sigma a step happened to draw than on how training is going, so the raw
-curve looks flat from step 1 to step 800 even when the LoRA is learning fine.
-Splitting by noise level makes it legible: near-image steps sit low, near-noise
-steps sit high, permanently. **Do not read a flat loss curve as a broken run.**
+Training is a **real epoch loop**: each pass walks the whole dataset in a
+shuffled order and reshuffles for the next, rather than `random.choice` sampling
+with replacement (which would show some images a dozen times and others never).
+One epoch is `len(dataset) × 2` steps with flip augment on, so 800 steps over 18
+yarn-art images is about 22 epochs; over 78 tarot images, about 5.
+
+Why two loss charts. Flow-matching loss depends far more on which sigma a step
+happened to draw than on how training is going, so the **per-step** curve looks
+flat from step 1 to 800 even when the LoRA is learning fine. The **per-epoch**
+curve averages a whole shuffled pass, which cancels that sigma noise and is the
+one line that actually trends down. The sigma breakdown says the same thing a
+third way: near-image steps sit low, near-noise steps sit high, permanently.
+**Do not read a flat per-step curve as a broken run.**
 
 Notes worth knowing before you change things:
 
@@ -432,7 +465,8 @@ Notes worth knowing before you change things:
   transformer), so peak memory is one big model rather than three. That is what
   lets an 8.9B transformer train next to a 4.7B text encoder on one box.
 - Latents are cached once, so there's no per-step random crop. `--flip_augment`
-  (on by default) compensates by encoding each image twice.
+  (on by default) compensates by encoding each image twice, which also doubles
+  the epoch length.
 - `--limit` subsets the dataset, and it lives on `fetch_dataset`, so changing it
   re-keys that task's cache and re-materializes the folder. That's cheap here
   (the largest set is 78 images), unlike `fetch_weights`.
