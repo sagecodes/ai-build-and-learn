@@ -44,6 +44,7 @@ class ModelSpec:
     height: int = 1024
     supports_negative: bool = True  # FLUX-style distilled models ignore/lack this
     max_sequence_length: int | None = None  # T5 prompt cap for FLUX/SD3, if set
+    quantized: bool = False     # pre-quantized (e.g. bitsandbytes 4-bit) repo
     notes: str = ""
 
 
@@ -172,6 +173,27 @@ MODELS: dict[str, ModelSpec] = {
         supports_negative=False,
         max_sequence_length=512,
         notes="32B + 24B text encoder; full bf16 likely OOMs the Spark. bnb-4bit variant fits better.",
+    ),
+    # FLUX.2 [dev], 4-bit: the version that actually fits the Spark. Same 32B+24B
+    # model bitsandbytes-quantized to 4-bit -> ~34GB of weights (vs ~110GB bf16),
+    # so it loads into the 128GB unified pool with room to spare. Diffusers-format
+    # and the mirror repo is ungated. Needs bitsandbytes in the image (added to
+    # config.DIFFUSERS_SPEC) and the quantized load path in imagegen_core. UNTESTED
+    # on-GPU so far; kept out of DEFAULT_MODELS until a real run confirms it.
+    "flux2-dev-4bit": ModelSpec(
+        key="flux2-dev-4bit",
+        repo="diffusers/FLUX.2-dev-bnb-4bit",
+        pipeline="Flux2Pipeline",
+        family="DiT (next-gen, 4-bit)",
+        license="FLUX.2-dev non-commercial",
+        gated=False,             # the 4-bit mirror repo is ungated
+        dtype="bfloat16",
+        steps=28,
+        guidance=4.0,
+        supports_negative=False,
+        max_sequence_length=512,
+        quantized=True,
+        notes="4-bit bnb FLUX.2 (~34GB); fits the Spark. Needs bitsandbytes + Flux2Pipeline.",
     ),
     # Sana-Sprint 1.6B: NVIDIA's efficiency play, and the star turn on a Spark:
     # NVIDIA's own model on NVIDIA silicon. Linear-attention DiT + a 32x deep-

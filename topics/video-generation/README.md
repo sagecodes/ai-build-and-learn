@@ -15,6 +15,7 @@ Some things to look up to get started:
 - CogVideoX (Zhipu / THUDM): best at following detailed, multi-part prompts
 - Mochi 1 (Genmo): flow-matching model known for fluid, coherent motion
 - Stable Video Diffusion (Stability AI): earlier image-to-video, still widely used
+- Krea text to video
 
 **Tooling:**
 - Hugging Face Diffusers: video pipelines: https://github.com/huggingface/diffusers

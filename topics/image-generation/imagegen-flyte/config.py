@@ -67,6 +67,11 @@ DIFFUSERS_SPEC = (
     "pillow",
     "huggingface_hub",
     "datasets>=3.0",
+    # bitsandbytes: loads pre-quantized 4-bit repos (flux2-dev-4bit) so the big
+    # models fit the Spark. Adding it rebuilds the task image; the fetch cache
+    # keys on the task+inputs (not the image), so cached weights should survive,
+    # but verify with one cached model on the first run after the rebuild.
+    "bitsandbytes",
     # hf_transfer is HF's Rust downloader; enabling HF_HUB_ENABLE_HF_TRANSFER
     # parallelizes chunk downloads and saturates bandwidth far better than the
     # default python client (the multi-GB weight pulls are the slow part).
@@ -170,13 +175,29 @@ gpu_task_env = flyte.TaskEnvironment(
     env_vars=_GPU_ENV_VARS,
 )
 
+# LoRA training (lora_chroma.py) wants more of everything than a generate task:
+# it holds a downloaded weights Dir on disk (Chroma1-HD is ~45GB, more until the
+# root single-file dupes land in fetch_weights' ignore_patterns) while training an
+# 8.9B transformer. Split out rather than fattening gpu_task_env, which would make
+# every cheap generate task request a training-sized pod.
+#
+# If this ever schedules as Unschedulable, memory is the knob: the GB10's 119.7GiB
+# is one unified pool shared with the OS and every other pod.
+lora_env = flyte.TaskEnvironment(
+    name="imagegen-lora",
+    image=image,
+    resources=flyte.Resources(cpu="8", memory="80Gi", gpu=1, disk="150Gi"),
+    secrets=[HF_SECRET],
+    env_vars=_GPU_ENV_VARS,
+)
+
 orch_env = flyte.TaskEnvironment(
     name="imagegen-orch",
     image=image,
     resources=flyte.Resources(cpu="2", memory="4Gi", disk="20Gi"),
     secrets=[HF_SECRET],
     env_vars=_ENV_VARS,
-    depends_on=[cpu_task_env, gpu_task_env],
+    depends_on=[cpu_task_env, gpu_task_env, lora_env],
 )
 
 app_gpu_pod = flyte.PodTemplate(
