@@ -133,6 +133,11 @@ def train_model(
 
     with mlflow.start_run(run_name=model_type) as run:
         mlflow.log_params(params)
+
+        # Persist the full dataset (actual rows, not just the schema/digest that
+        # mlflow.evaluate logs) as a browsable artifact on the run.
+        mlflow.log_table(data=data, artifact_file="dataset.json")
+
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
 
