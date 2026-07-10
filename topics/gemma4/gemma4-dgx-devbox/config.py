@@ -39,4 +39,9 @@ GEMMA_4_31B = ModelChoice(
 
 MODEL = GEMMA_4_31B if os.environ.get("GEMMA_VARIANT") == "31b" else GEMMA_4_26B_A4B
 
+# vLLM budgets `util * total` GPU memory and refuses to start unless that much is
+# free. On the Spark's unified memory the OS holds ~20Gi of the 119.7Gi pool, so
+# anything above ~0.83 can never be satisfied.
+GPU_MEMORY_UTILIZATION = os.environ.get("GEMMA_GPU_MEM_UTIL", "0.75")
+
 CHAT_APP_NAME = "gemma4-chat-ui"

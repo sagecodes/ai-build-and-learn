@@ -2,14 +2,20 @@
 
 Deploy (after `python vllm_server.py` has finished):
     python chat_app.py
+    GRADIO_SHARE=1 python chat_app.py   # public HTTPS tunnel, for remote browsers
 """
 
 from __future__ import annotations
+
+import os
 
 import flyte
 import flyte.app
 
 from config import CHAT_APP_NAME, MODEL
+
+
+_propagated_envs = {k: os.environ[k] for k in ("GRADIO_SHARE",) if k in os.environ}
 
 
 chat_image = (
@@ -28,6 +34,7 @@ env = flyte.app.AppEnvironment(
     resources=flyte.Resources(cpu="1", memory="2Gi"),
     port=7860,
     requires_auth=False,
+    env_vars=_propagated_envs,
     parameters=[
         flyte.app.Parameter(
             name="vllm_url",
@@ -83,6 +90,10 @@ def chat_server(vllm_url: str, model_id: str):
 
 
 def _run(vllm_url: str, model_id: str):
+    import threading
+    import time
+    import urllib.request
+
     import gradio as gr
     from openai import OpenAI
 
@@ -90,6 +101,26 @@ def _run(vllm_url: str, model_id: str):
     base_url = vllm_url.rstrip("/") + "/v1"
     print(f"[chat_server] Connecting to vLLM at {base_url} (model={model_id})", flush=True)
     client = OpenAI(base_url=base_url, api_key="not-used")
+
+    # Knative keep-alive: traffic via the gradio.live tunnel bypasses the
+    # queue-proxy sidecar on :8012, so Knative sees zero ingress and scales
+    # the pod (and the tunnel) down. Poke :8012 from inside the pod whenever
+    # there's recent chat activity, so legitimate use resets the idle timer.
+    last_activity_ts = [0.0]
+    KEEPALIVE_PERIOD_S = 60
+    ACTIVITY_WINDOW_S = 300
+
+    def _keepalive_loop():
+        while True:
+            time.sleep(KEEPALIVE_PERIOD_S)
+            if time.time() - last_activity_ts[0] > ACTIVITY_WINDOW_S:
+                continue
+            try:
+                urllib.request.urlopen("http://localhost:8012/", timeout=3)
+            except Exception:
+                pass
+
+    threading.Thread(target=_keepalive_loop, daemon=True).start()
 
     DEFAULT_SYSTEM = "You are a helpful assistant."
 
@@ -101,6 +132,8 @@ def _run(vllm_url: str, model_id: str):
         if not message or not message.strip():
             yield "", history
             return
+
+        last_activity_ts[0] = time.time()
 
         history = history + [
             {"role": "user", "content": message},
@@ -224,9 +257,16 @@ def _run(vllm_url: str, model_id: str):
         send.click(chat, inputs=inputs, outputs=outputs)
         clear.click(lambda: [], outputs=chatbot)
 
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
-    # Fallback if launch() ever stops blocking — keep the pod alive so Knative doesn't reap it.
-    import time
+    share = os.environ.get("GRADIO_SHARE", "0") == "1"
+    # Capture launch()'s URLs and flush ourselves — Gradio's own print gets buffered inside the pod.
+    _, local_url, share_url = demo.launch(
+        server_name="0.0.0.0", server_port=7860, share=share, prevent_thread_lock=True,
+    )
+    print(f"[chat_server] local URL: {local_url}", flush=True)
+    if share_url:
+        print(f"[chat_server] PUBLIC HTTPS URL: {share_url}", flush=True)
+    else:
+        print("[chat_server] no share URL (set GRADIO_SHARE=1 on deploy)", flush=True)
     while True:
         time.sleep(3600)
 

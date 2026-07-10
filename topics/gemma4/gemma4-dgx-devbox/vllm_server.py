@@ -20,7 +20,7 @@ from flyteplugins.vllm import VLLMAppEnvironment
 import flyte
 import flyte.app
 
-from config import MODEL
+from config import GPU_MEMORY_UTILIZATION, MODEL
 
 
 # `from_base()` returns a frozen dataclass with platform=linux/amd64 and
@@ -57,7 +57,7 @@ vllm_app = VLLMAppEnvironment(
     extra_args=[
         "--max-model-len", str(MODEL.max_model_len),
         "--trust-remote-code",
-        "--gpu-memory-utilization", "0.85",
+        "--gpu-memory-utilization", GPU_MEMORY_UTILIZATION,
     ],
 )
 
