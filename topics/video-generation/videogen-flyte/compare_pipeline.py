@@ -52,6 +52,7 @@ import flyte.report
 
 from config import cpu_env, gpu_env, orch_env
 from models import DEFAULT_IMAGE_MODEL, get_image_spec, get_spec, resolve_models
+from prompts import get_suite
 from videogen_core import (
     ClipResult,
     build_clip_result,
@@ -511,8 +512,9 @@ async def generate_one(
 
 @orch_env.task(report=True)
 async def compare(
-    prompts: list[str],
+    prompts: list[str] | None = None,
     models: list[str] | None = None,
+    suite: str = "",
     steps: int = -1,
     guidance: float = -1.0,
     seed: int = 1234,
@@ -521,7 +523,20 @@ async def compare(
     num_frames: int = -1,
     negative_prompt: str = "",
 ) -> list[ModelRun]:
-    """Text-to-video: render `prompts` on each model, emit one grid report."""
+    """Text-to-video: render `prompts` on each model, emit one grid report.
+
+    `suite` names a curated prompt set from prompts.py instead of passing prompts by
+    hand ("overnight" = the 8-prompt capability suite, "quick" = 3 of them). Each
+    prompt targets a failure mode that only exists in time (identity drift, physics,
+    camera-vs-subject motion, text stability), which is what makes a video model hard
+    to judge from stills. `prompts` wins if both are given.
+    """
+    if not prompts:
+        if not suite:
+            raise ValueError("pass either --prompts or --suite (e.g. --suite overnight)")
+        prompts = get_suite(suite)
+        log.info(f"Suite {suite!r}: {len(prompts)} prompts")
+
     specs = resolve_models(models)
     log.info(f"Comparing {[s.key for s in specs]} on {len(prompts)} prompt(s)")
 

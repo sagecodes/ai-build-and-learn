@@ -223,7 +223,147 @@ MODELS: dict[str, VideoModelSpec] = {
         native="720x480, 49 frames @8fps, 50 steps.",
         notes="The 2024 baseline. Cheap to pull; good smoke test.",
     ),
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # Added for the overnight suite. Every repo below was checked against the HF
+    # API (exists, ungated, size) and every pipeline class against the installed
+    # diffusers 0.39.0. But NONE has been run on this box yet, so the sampler
+    # defaults come from each model card rather than from measurement, and
+    # est_vram_gb is computed from parameter counts rather than observed. Treat a
+    # failure here as expected-ish; the report renders a per-cell error and the
+    # other models carry on.
+    # ────────────────────────────────────────────────────────────────────────────
+
+    # The third major player, alongside Wan and LTX. 8.3B going toe to toe with
+    # models 3x its size is the headline.
+    # NOTE the repo: the monolithic `tencent/HunyuanVideo-1.5` is a 372GB trap (it
+    # packs ELEVEN 33GB transformers: 480p/720p x t2v/i2v x distilled/not). These
+    # pre-split community repos are the fix: one variant, 53GB. Also note diffusers'
+    # own docstring points at `hunyuanvideo-community/HunyuanVideo-1.5-480p_t2v`,
+    # which 404s; the real id has `-Diffusers-` in the middle.
+    "hunyuan-1.5-t2v": VideoModelSpec(
+        key="hunyuan-1.5-t2v",
+        repo="hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v",
+        pipeline="HunyuanVideo15Pipeline",
+        family="DiT (8.3B)",
+        license="Tencent Hunyuan Community",
+        gated=False,
+        download_gb=53.4,
+        est_vram_gb=34.0,   # 8.3B transformer (stored fp32) + Qwen2.5-VL-7B encoder
+        steps=30,           # card says 50; trimmed for a demo-sized cell
+        guidance=5.0,
+        width=832, height=480, num_frames=49, fps=24,
+        ignore_patterns=_JUNK,
+        native="480p, 121 frames @24fps, 50 steps.",
+        notes="Tencent's compact flagship. Strong cinematic quality. Untested here.",
+    ),
+
+    # MIT. Not Apache, not 'community', not 'non-commercial': MIT. That makes it the
+    # most permissively licensed video model in open source, which is a real result
+    # independent of how it scores on quality.
+    "kandinsky5-lite": VideoModelSpec(
+        key="kandinsky5-lite",
+        repo="kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers",
+        pipeline="Kandinsky5T2VPipeline",
+        family="DiT (2B)",
+        license="MIT",
+        gated=False,
+        download_gb=23.4,
+        est_vram_gb=23.0,   # tiny 2B transformer; the Qwen2.5-VL encoder IS the cost
+        steps=30,           # card says 50
+        guidance=5.0,
+        width=768, height=512, num_frames=49, fps=24,
+        # The repo ships flax/tf/pytorch-bin duplicates of the text encoder (~5GB of
+        # pure waste that from_pretrained never reads). _JUNK already drops *.bin,
+        # *.msgpack and *.h5 via the shared list below.
+        ignore_patterns=_JUNK + ("*.msgpack", "*.h5", "*.bin"),
+        native="512x768, 121 frames @24fps, 50 steps.",
+        notes="MIT licensed. Positioned by its authors as a Wan rival. Untested here.",
+    ),
+
+    # Diffusion forcing: generates in autoregressive chunks with an overlapping
+    # history, so clip length is effectively unbounded rather than fixed by the
+    # latent shape. That is a genuinely different axis from every other model here,
+    # which is why it's in despite being another 1.3B.
+    "skyreels-v2-df-1.3b": VideoModelSpec(
+        key="skyreels-v2-df-1.3b",
+        repo="Skywork/SkyReels-V2-DF-1.3B-540P-Diffusers",
+        pipeline="SkyReelsV2DiffusionForcingPipeline",
+        family="Diffusion forcing (1.3B)",
+        license="SkyReels (open)",
+        gated=False,
+        download_gb=29.0,
+        est_vram_gb=15.0,   # Wan-based: 1.3B transformer + UMT5-XXL
+        vae_dtype="float32",  # Wan VAE, same fp32 requirement
+        steps=30,
+        guidance=6.0,
+        width=960, height=544, num_frames=49, fps=24,
+        negative_prompt=_WAN_NEGATIVE,   # Wan lineage, same failure mode
+        ignore_patterns=_JUNK,
+        native="544x960, 97 frames @24fps, 30 steps, ar_step=5, causal_block_size=5.",
+        notes="Long-video via autoregressive chunks. The odd one out, on purpose.",
+    ),
+
+    # A second modern Apache-2.0 small model, to check that wan21-1.3b's weaknesses
+    # are a size story and not a Wan story.
+    "motif-video-2b": VideoModelSpec(
+        key="motif-video-2b",
+        repo="Motif-Technologies/Motif-Video-2B",
+        pipeline="MotifVideoPipeline",
+        i2v_pipeline="MotifVideoImage2VideoPipeline",
+        family="DiT (2B)",
+        license="Apache-2.0",
+        gated=False,
+        download_gb=17.3,
+        est_vram_gb=13.0,
+        steps=30,           # card says 50
+        guidance=5.0,
+        width=832, height=480, num_frames=49, fps=24,
+        ignore_patterns=_JUNK,
+        native="1280x736, 121 frames @24fps, 50 steps.",
+        notes="Modern Apache-2.0 2B. The 'is small necessarily bad?' datapoint.",
+    ),
+
+    # The thematically perfect model for THIS box. Linear attention with a
+    # constant-memory KV cache: our bottleneck is memory bandwidth (~273GB/s), and
+    # linear attention is precisely the bet that you can spend less bandwidth per
+    # token. If any model punches above its weight on a Spark, it should be this one.
+    # Caveat: ~0 downloads on HF, so we are the ones finding the bugs. Cheap enough
+    # (14GB) that a failed cell costs almost nothing.
+    "sana-video-2b": VideoModelSpec(
+        key="sana-video-2b",
+        repo="Efficient-Large-Model/SANA-Video_2B_480p_diffusers",
+        pipeline="SanaVideoPipeline",
+        family="Linear-attention DiT (2B)",
+        license="NVIDIA open (non-commercial)",
+        gated=False,
+        download_gb=14.0,
+        est_vram_gb=10.0,
+        steps=30,
+        guidance=6.0,
+        width=832, height=480, num_frames=49, fps=16,
+        ignore_patterns=_JUNK,
+        native="480p. Linear attention, constant-memory KV cache for long video.",
+        notes="Linear attention: the on-theme bet for a bandwidth-bound box. Unproven.",
+    ),
 }
+
+
+# The overnight lineup: everything that fits, spread across sizes, licenses and
+# architectures. They serialize on the single GPU, so this is a multi-hour job.
+# wan22-t2v-a14b is deliberately NOT here: 126GB and ~15-30 min per clip undistilled,
+# which would eat the whole night for one model. See the README TODO on the lightx2v
+# 4-step distill LoRAs, which is the fix.
+OVERNIGHT_MODELS: list[str] = [
+    "wan21-t2v-1.3b",       # measured: 210s/clip, peak 16GB
+    "wan22-ti2v-5b",        # measured: 139s/clip, peak 26GB
+    "ltx2-distilled",       # measured:  33s/clip, peak 73GB, + audio
+    "hunyuan-1.5-t2v",
+    "kandinsky5-lite",
+    "skyreels-v2-df-1.3b",
+    "motif-video-2b",
+    "sana-video-2b",
+]
 
 
 # The default comparison set: the two Wan models. Together they're a 63GB pull and

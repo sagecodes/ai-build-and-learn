@@ -343,6 +343,64 @@ find out whether a model loads on this box before committing to a cluster run.
 
 ---
 
+## The overnight run
+
+One command: 8 models x the 8-prompt capability suite = **64 clips**.
+
+```bash
+.venv/bin/flyte run compare_pipeline.py compare --suite overnight \
+    --models '["wan21-t2v-1.3b","wan22-ti2v-5b","ltx2-distilled","hunyuan-1.5-t2v","kandinsky5-lite","skyreels-v2-df-1.3b","motif-video-2b","sana-video-2b"]'
+```
+
+It's a multi-hour job: the cells serialize on the single GPU, and the five new models
+are ~137GB of first-time download (cached forever after). A model that fails renders
+as an error cell and the rest carry on, so one bad model can't sink the night.
+
+### The prompt suite (`prompts.py`)
+
+The image demo has "prompts to try, and what each stresses". Video needs its own axes,
+because a model can render eight beautiful frames and still fail: **what's being
+tested is what happens between them.**
+
+| # | axis | what to look for |
+|---|---|---|
+| 1 | fluid motion (the control) | Every model manages this. Water has no fixed shape to be inconsistent about. If a model fails here it's broken. |
+| 2 | rhythmic motion + **audio sync** | The LTX-2 prompt. Does the clang land ON the hammer strike? Sparks appearing *before* impact = no causal model, just "blacksmith" texture. |
+| 3 | **identity consistency** | The hardest common failure. Same face in frame 1 and frame 6? Faces morphing mid-clip is the classic open-model tell. |
+| 4 | camera motion + parallax | Does the *camera* move, or does the scene just shimmer? Real parallax = near trunks sweep past faster than far ones. |
+| 5 | physics + causality | Expect failure, interestingly. Does the glass tip or vibrate? Does wine leave the glass before it falls? |
+| 6 | motion magnitude | Wan drifts toward static clips (its long default negative prompt exists to fight exactly this). Does the car actually cross the frame? |
+| 7 | **text stability** | Brutal, and the clearest separator. Legible text is a win; text that stays the *same* text across frames is a bigger one. |
+| 8 | object permanence + a scripted event | Three boats in frame 1 *and* frame 6? And does the specific event (the middle one sinks) happen, or just generic boats? |
+
+The **frame strip** in each report cell is the surface that makes most of these
+judgeable: identity drift and object-count errors are obvious across six frames side
+by side, and genuinely easy to miss while a 3-second clip loops past you.
+
+`python prompts.py` prints the full suite with the failure mode for each.
+
+### Still TODO
+
+- **The lightx2v 4-step distill LoRAs** (`lightx2v/Wan2.2-Distill-Loras`, Apache-2.0,
+  two 0.6GB files). The highest-leverage item left. We carry `wan22-t2v-a14b` but keep
+  it out of every lineup because it's 126GB and ~15-30 min/clip undistilled; these
+  LoRAs cut 30 steps to 4 and make the best-quality Wan demoable. diffusers 0.39 has
+  `WanLoraLoaderMixin.load_into_transformer_2`, so the high/low-noise pair maps onto
+  the MoE's two experts. Untested. It would also add a **distillation axis** to the
+  grid, which is the most interesting question this demo has surfaced: see the speed
+  table above, where the 22B model beats the 1.3B one by 6x purely on step count.
+- The five newly-added models have **never been run here**. Their sampler defaults come
+  from model cards, not measurement, and `est_vram_gb` is computed from parameter
+  counts rather than observed. Expect to tune after the first night.
+
+Two things worth **not** re-litigating, both verified: `Wan 2.5/2.6/2.7` open weights
+**do not exist** (SEO blogspam insists otherwise; the newest official Wan open weights
+are 2.2), and Cosmos-Predict 2.5 is gated, non-diffusers-layout, and a robotics world
+model that would look bad on creative prompts. Cosmos3 (shipped 2026-07-09) is ungated
+and interesting, but its `model_index.json` names `Cosmos3OmniDiffusersPipeline`, which
+does not exist in 0.39.0 (the library exports `Cosmos3OmniPipeline`). A spike, not a
+registry entry.
+
 ## The things to verify first
 
 - **arm64 + CUDA 13 torch.** Same risk as every demo on this box. If the cu130
