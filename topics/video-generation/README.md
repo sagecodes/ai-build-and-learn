@@ -20,3 +20,10 @@ Some things to look up to get started:
 **Tooling:**
 - Hugging Face Diffusers: video pipelines: https://github.com/huggingface/diffusers
 - ComfyUI: node-based workflows (popular for video too): https://github.com/comfyanonymous/ComfyUI
+
+## The demo
+
+`videogen-flyte/` is what we build on the stream: run a prompt across several open
+video models on the DGX Spark and get one side-by-side report **with clips that
+play right in the browser**, plus an image-to-video path that generates its own
+first frame. See [videogen-flyte/README.md](videogen-flyte/README.md).
