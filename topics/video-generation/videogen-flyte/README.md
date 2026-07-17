@@ -97,10 +97,12 @@ Open the run's **Report** tab. The clips play inline.
 > problem, the idea, the file to change, the exact command, and the numbers that decide
 > whether it worked. Everything below is what got us there.
 >
-> **State as of 2026-07-17 ~00:30:** SkyReels-14B is running overnight
-> (`rfwrxwmph7s5bhf7mcn5`, 193 frames, ~4h, expect ~5am). VACE-14B is **cached** at
-> 75.1GB, untested. The depth restyle matrix (anime + photoreal over the 8s chain) is
-> **done**; the edges arm was aborted because depth had already won on the numbers.
+> **State as of 2026-07-17:** SkyReels-14B's overnight run (`rfwrxwmph7s5bhf7mcn5`, 193
+> frames) **failed** with `stack expects a non-empty TensorList` and produced no clip
+> (see [#6](#-overnight-run-failed-stack-expects-a-non-empty-tensorlist-cause-not-yet-pinned);
+> cause not yet pinned). VACE-14B is **cached** at 75.1GB, untested. The depth restyle
+> matrix (anime + photoreal over the 8s chain) is **done**; the edges arm was aborted
+> because depth had already won on the numbers.
 
 Each is a section below. Status is honest: **verified** means a clip came out and we
 looked at it, not that a task went green.
@@ -115,7 +117,7 @@ looked at it, not that a task went green.
 | 5b | [`bookend`](#bookend-the-fix-for-the-trajectory-the-chain-wont-advance) | `vace.py bookend` | ✅ verified | endpoints pinned: the only run where the subject actually **recedes** |
 | 5c | [`anchored`](#anchored-the-experiment-that-tests-the-actual-claim) | `vace.py anchored` | ✅ verified | `reference_images` holds identity through the turn that broke the chain |
 | 5d | [`refine`](#refine-chain-first-then-re-render-against-one-anchor) | `vace.py refine` | ❌ **negative result** | edge control discards appearance; made a good clip worse |
-| 6 | [SkyReels 14B](#6-skyreels-14b-long-video-done-properly) | `generate_one` | ⏳ overnight | loads + runs, but **283 s/step, ~4h/clip**. Latent history vs our RGB hand-off |
+| 6 | [SkyReels 14B](#6-skyreels-14b-long-video-done-properly) | `generate_one` | ❌ **failed** | 193-frame run raised `stack expects a non-empty TensorList`, no clip. Earlier partial run measured **283 s/step, ~4h/clip** |
 | 7 | [Video to video (VACE)](#7-video-to-video-vace) | `vace.py restyle` | ✅ verified | the only model that takes video IN. 19GB, 323s/clip. **Name the subject** or it invents one |
 | 8 | [Krea v2v](#8-krea-realtime-video-researched-not-built) | — | 📋 researched | 14B Apache-2.0 causal. 51.8GB with an allowlist, 137.6GB without |
 
@@ -902,6 +904,25 @@ Also measured: **~85GB resident**, not the `est_vram_gb=42` computed from parame
 counts. It fits the 119.7GiB pool, but only just, and only with rustfs freshly
 restarted. The sampler defaults still come from the 1.3B's card, not measurement.
 
+### ❌ Overnight run failed: `stack expects a non-empty TensorList` (cause not yet pinned)
+
+The 193-frame overnight run (`rfwrxwmph7s5bhf7mcn5`, 2026-07-17) **produced no clip**.
+It raised `stack expects a non-empty TensorList` inside the diffusion-forcing pipeline
+(caught at `compare_pipeline.py:529`, surfaced as the `⚠️` in the report), so the
+`clips_skyreels-v2-df-14b_*` output dir is registered but **empty in rustfs**; there is
+nothing to download. The report renders a blank `<video>` because the src is empty, not
+because of a report/port-forward bug.
+
+**Not a quick fix, and the obvious hypothesis is already ruled out.** The natural guess
+is the sliding-window chunker producing a trailing chunk smaller than `causal_block_size`
+(so `num_blocks == 0` and `generate_timestep_matrix` stacks an empty schedule). Simulating
+the pipeline's chunk math (`vae_t=4`, `base_num_frames=97`, `overlap_history=17`,
+`causal_block_size=5`) over 97/121/153/181/193/217/241 frames shows **no empty chunk at any
+of them**, 193 included. So the empty `torch.stack` is somewhere else (prompt-embed stack,
+a VAE-decode path, or a schedule edge the simple sim doesn't model). Next step is to repro
+the pipeline `__call__` in isolation with these exact kwargs and get the real traceback,
+rather than change frame counts blind. Until then this row stays ❌, not ⏳.
+
 ---
 
 ## 7. Video to video (VACE)
@@ -1362,6 +1383,41 @@ by side, and genuinely easy to miss while a 3-second clip loops past you.
 Each of these targets something we **measured**, not something we guessed. Ordered by
 payoff per hour.
 
+> ### ✅ RESULTS (2026-07-17): the single window won, the clever anchor did not
+>
+> We ran the plan below. Outcome, measured with the seam probe (frame-to-frame delta at
+> the window boundaries vs the clip average; **~1.0x = indistinguishable from ordinary
+> motion**):
+>
+> | approach | flag | seam @49 | seam @98 | seam @147 | verdict |
+> |---|---|---|---|---|---|
+> | windowed restyle, no anchor | `--anchor_mode off` | 6.07x | 4.99x | 4.19x | the problem |
+> | **styled anchor** (#1, Sage's idea) | `--anchor_mode styled` | 6.01x | 4.73x | 3.40x | ❌ **no effect** |
+> | **single window** (#3, the swing) | `--window_frames -1` | **1.06x** | **0.48x** | **0.97x** | ✅ **solved it** |
+>
+> **Why the styled anchor failed:** a single VACE `reference_images` frame is simply too
+> weak to hold appearance across a window boundary against a strong style prompt + an
+> independent per-window depth map. The design was sound (star, not chain — see #1) and
+> the seams barely moved. Empirically dead; the mechanism can't carry enough signal.
+>
+> **Why the single window won:** there is no boundary, so there is nothing to pop at.
+> 193 frames (2.4x Wan's 81-frame training length) in one VACE pass held up fine on the
+> anime prompt — the feared long-window degradation did not show. It even *lowered the
+> average frame delta* (4.44 -> 2.465), so the whole clip is smoother, not just the seams.
+> **This is now the recommended way to restyle a chained clip.** Command: the #1 command
+> below with `--window_frames -1` instead of `--anchor_mode styled`.
+>
+> **Shipped levers on `vace.py refine`** (all implemented 2026-07-17):
+> - `--window_frames N`  `0`=49-frame windows · `81`=training length · `-1`=whole clip (winner)
+> - `--overlap K`  feathered overlap-add: cross-fade the K shared frames of adjacent
+>   windows into a short dissolve instead of a hard cut. The *in-window* seam fix (#4),
+>   for when a clip is too long to fit one window. Verified to reconstruct with full
+>   coverage; `overlap=0` is byte-identical to the old butt-join.
+> - `--anchor_mode off|source|styled`  kept for the record; `styled` is the failed idea.
+>
+> **Open at time of writing:** photorealistic single-window (does long-window drift bite
+> harder on realistic detail than on flat cel-shading?), and photorealistic `--overlap`.
+
 **1. ⭐ START HERE — bootstrap the style anchor from window 1's own output.**
 *(~20 lines in `vace.py`, one 44-min run. Sage's idea, 2026-07-17.)*
 
@@ -1394,17 +1450,19 @@ predecessor. That's a **star, not a chain** — one hop for everyone, so error c
 compound. Compounding is the entire reason the original chain drifted
 ([exposure bias](#what-we-hit-has-a-name-exposure-bias---renorm)).
 
-**Where to change it:** `vace.py` -> `vace_refine`. The window loop already has
-`reference_images=([anchor] if use_anchor else None)`; today `anchor` is the *source's*
-frame 0. Make it: window 0 passes `None`, capture `out[0]` from window 0's result, and
-pass that for windows 1..N. Probably a third mode (`anchor="none"|"source"|"style"`)
-rather than a bool, since `use_anchor` is already overloaded.
+**Where it lives (implemented 2026-07-17):** `vace.py` -> `vace_refine` now takes
+`anchor_mode="off"|"source"|"styled"` (the old `use_anchor` bool still works and maps
+to `source`/`off`). `styled` is exactly this design: window 0 renders with
+`reference_images=None`, its styled `out[0]` is frozen, and windows 1..N pass
+`reference_images=[that frame]`. Per style prompt, each style bootstraps its own anchor
+from its own window 0. Run it with `--anchor_mode styled`.
 
 **The command** (source = the 8s no-turn+renorm chain, the best one we have):
 
 ```bash
 .venv/bin/flyte run vace.py refine \
   --source_clip_uri s3://flyte-data/ws/video-generation/development/rn8gfbnd474hcsv66rbs/c495qm4qy39ku3vwsg5wjpsf4/1/c33ab18f32a023a9928b6b127dc30cca/chain_wan22-ti2v-5b_jwe8fo1w \
+  --anchor_mode styled \
   --control depth --style_prompts '["a person in a long coat walking away down a city street at night, cel-shaded anime style, bold outlines, flat colours, studio animation"]'
 ```
 

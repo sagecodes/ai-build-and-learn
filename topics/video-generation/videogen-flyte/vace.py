@@ -522,8 +522,53 @@ async def vace_refine(
     keep_pct: float = 8.0,
     control: str = "edges",
     use_anchor: bool = True,
+    anchor_mode: str = "",
+    window_frames: int = 0,
+    overlap: int = 0,
 ) -> RestyleRun:
     """Re-render a long clip in INDEPENDENT windows. Two very different jobs.
+
+    ── `overlap`: cross-fade the seams instead of butt-joining them ─────────────
+    `overlap=0` renders windows end-to-end, so a hard cut sits at every boundary and
+    the style *pops* (measured 6.0/4.7/3.4x the average frame delta). `overlap=K`
+    instead slides each window forward by `n-K` and **feathered-overlap-adds** the
+    results: the K shared frames cross-fade from one window's render into the next,
+    turning a hard cut into a short dissolve. It stays inside the model's training
+    length (unlike `window_frames=-1`) at the cost of more windows (more compute).
+    Try `overlap=16` with the default `n=49`.
+
+    ── `window_frames`: seam mitigation vs seam DELETION ───────────────────────
+    The seams between windows are the whole problem. `anchor_mode="styled"`
+    *mitigates* them and, measured 2026-07-17, barely moved them (6.0/4.7/3.4x avg
+    at frames 49/98/147, target ~1x): a single VACE `reference_images` frame is too
+    weak to hold style across a boundary. The way to *delete* a seam is to not have
+    one. `window_frames` overrides the 49-frame window:
+      * `0`   use `spec.num_frames` (49). The default; 4 windows, 3 seams.
+      * `81`  the model's real training length; 3 windows, 2 seams, each seam softer.
+      * `-1`  ONE window over the whole clip -> **zero seams by construction**. Past
+              Wan's 81-frame training length, so expect motion/quality risk, but the
+              switching cannot happen because there is no boundary. This is the
+              "extend the window to theme the whole clip" idea, done literally.
+    Any explicit value is rounded down to the pipeline-legal `4k+1`.
+
+    ── `anchor_mode` (supersedes `use_anchor`) ─────────────────────────────────
+    `use_anchor` is a two-way switch; the real choice is three-way, so prefer
+    `anchor_mode`. When `anchor_mode` is left empty it is derived from `use_anchor`
+    (`True->"source"`, `False->"off"`) so old callers are unchanged.
+
+    * `"off"`     no `reference_images`. Every window free-styles the anime look from
+                  its edge map alone, so the look **resets at each 49-frame boundary**.
+                  This is the mode whose ~2s pops prompted the styled-anchor fix.
+    * `"source"`  `reference_images=[source frame 0]` (the old preserve mode). A
+                  *photographic* anchor fights a non-photographic style prompt.
+    * `"styled"`  render window 0 with no reference, then freeze **its own styled
+                  frame 0** and hand that to every later window as `reference_images`.
+                  Window 0 defines the theme; windows 1..N are pulled toward the SAME
+                  anime appearance target, so the boundary reset largely goes away.
+                  It stays a FIXED anchor (window 0's opening frame), NOT a rolling
+                  last-frame, so it does not reintroduce the serial drift the
+                  independent-window design exists to avoid. Per style prompt: each
+                  style gets its own styled anchor from its own window 0.
 
     ── PRESERVE (`use_anchor=True`) vs REPLACE (`use_anchor=False`) ────────────
     These sound similar and are not:
@@ -590,9 +635,16 @@ async def vace_refine(
     spec = get_spec(VACE_MODEL)
     out_dir = Path(tempfile.mkdtemp(prefix="vace_refine_"))
 
+    # Three-way anchor choice; `use_anchor` kept for back-compat when unset.
+    mode = anchor_mode or ("source" if use_anchor else "off")
+    if mode not in ("off", "source", "styled"):
+        raise ValueError(f"anchor_mode must be off|source|styled, got {anchor_mode!r}")
+    _mode_label = {"off": "OFF (restyle)", "source": "SOURCE (preserve)",
+                   "styled": "STYLED (window-0 frame as shared anchor)"}[mode]
+
     await flyte.report.replace.aio(render_status(
-        f"VACE refine · anchor {'ON (preserve)' if use_anchor else 'OFF (restyle)'}",
-        f"{spec.repo} · {control} control · anchor {'ON' if use_anchor else 'OFF'} · "
+        f"VACE refine · anchor {_mode_label}",
+        f"{spec.repo} · {control} control · anchor {mode} · "
         f"{len(style_prompts)} style(s), independent windows",
     ))
     await flyte.report.flush.aio()
@@ -604,11 +656,19 @@ async def vace_refine(
     # sorted() puts chained.mp4 before chunk_00.mp4, which is what we want: refine the
     # whole clip, not one chunk of it.
     frames, fps = _read_mp4(mp4s[0])
-    w, h, n = spec.width, spec.height, spec.num_frames
+    w, h = spec.width, spec.height
     frames = [f.resize((w, h)) for f in frames]
+
+    # Window size: 0 -> model default; -1 -> whole clip (one window, no seams);
+    # else the requested size. VACE needs num_frames == 4k+1, so round down.
+    if window_frames == 0:
+        n = spec.num_frames
+    else:
+        req = len(frames) if window_frames < 0 else window_frames
+        n = max(5, (req - 1) // 4 * 4 + 1)
     anchor = frames[0]
     log.info(f"[refine] source {mp4s[0].name}: {len(frames)} frames @{fps}fps -> "
-             f"{-(-len(frames) // n)} windows of {n}")
+             f"{-(-len(frames) // n)} window(s) of {n}")
 
     local = await weights.download()
     pipe = None
@@ -621,34 +681,67 @@ async def vace_refine(
         # Control extraction (depth especially) is not free, and re-deriving it per
         # style would also risk the styles seeing subtly different control videos --
         # which is exactly what a style comparison must not do.
+        #
+        # `overlap` slides each window by `n-overlap` instead of `n` so consecutive
+        # windows share `overlap` source frames; those shared frames are cross-faded
+        # at reconstruction (feathered overlap-add). overlap=0 -> stride n -> the old
+        # butt-joined behaviour, unchanged.
+        ov = max(0, min(overlap, n - 1))
+        stride = n - ov
         windows, controls = [], []
-        for wi in range(0, len(frames), n):
+        for wi in range(0, len(frames), stride):
             window = frames[wi:wi + n]
             short = len(window)
             if short < n:                 # pad the tail so the latent shape still fits
                 window = window + [window[-1]] * (n - short)
-            windows.append((window, short))
+            windows.append((wi, window, short))
             controls.append(_control_frames(window, control, keep_pct=keep_pct))
-        log.info(f"[refine] {len(windows)} windows, {control} control, "
-                 f"{len(style_prompts)} style(s)")
+            if wi + n >= len(frames):     # this window already reaches the end
+                break
+        log.info(f"[refine] {len(windows)} windows of {n} (overlap {ov}, stride "
+                 f"{stride}), {control} control, {len(style_prompts)} style(s)")
 
+        def _feather(m: int) -> "list":
+            """Triangular ramp of length m: fade in/out over `ov` frames, flat middle.
+            Endpoints are >0 so a frame covered by a single window never divides by 0."""
+            import numpy as np
+            win = np.ones(m, dtype=np.float32)
+            r = min(ov, m // 2)
+            if r > 0:
+                ramp = np.linspace(0.0, 1.0, r + 2, dtype=np.float32)[1:-1]
+                win[:r] = ramp
+                win[-r:] = ramp[::-1]
+            return win
+
+        import numpy as np
         t0 = time.time()
         per_style: list[list] = []
         for si, sp in enumerate(style_prompts):
-            out_frames: list = []
-            for wi, ((window, short), ctrl) in enumerate(zip(windows, controls)):
+            # Feathered overlap-add buffer: weighted sum of every window's render,
+            # normalised by the total weight per source frame. With overlap=0 the
+            # weight is 1.0 everywhere and this is a plain concat.
+            acc = np.zeros((len(frames), h, w, 3), dtype=np.float32)
+            wsum = np.zeros((len(frames), 1, 1), dtype=np.float32)
+            # In "styled" mode this is frozen to window 0's OWN styled frame 0 and
+            # then reused for every later window, so the whole clip shares one anime
+            # appearance target instead of re-inventing it each window.
+            style_anchor = None
+            for wi, ((off, window, short), ctrl) in enumerate(zip(windows, controls)):
+                if mode == "source":
+                    ref = [anchor]                         # photographic frame 0
+                elif mode == "styled":
+                    ref = [style_anchor] if style_anchor is not None else None
+                else:                                       # "off"
+                    ref = None
                 log.info(f"[refine] style {si + 1}/{len(style_prompts)} "
-                         f"window {wi + 1}/{len(windows)}: {sp[:40]}")
-                out_frames.extend(pipe(
+                         f"window {wi + 1}/{len(windows)} @{off} · ref="
+                         f"{'styled@w0' if (mode=='styled' and ref) else mode}: {sp[:40]}")
+                result = pipe(
                     prompt=sp,
                     negative_prompt=spec.negative_prompt or None,
                     video=ctrl,
                     mask=mask,
-                    # ON = preserve (pull every window toward the source's look).
-                    # OFF = replace: let the style prompt own appearance unopposed,
-                    # which is what a RESTYLE wants (a photographic anchor fights a
-                    # non-photographic style prompt).
-                    reference_images=([anchor] if use_anchor else None),
+                    reference_images=ref,
                     conditioning_scale=conditioning_scale,
                     height=h, width=w, num_frames=n,
                     num_inference_steps=spec.steps if steps < 0 else steps,
@@ -658,7 +751,18 @@ async def vace_refine(
                     generator=(torch.Generator(device="cuda").manual_seed(seed)
                                if seed >= 0 else None),
                     output_type="pil",
-                ).frames[0][:short])
+                ).frames[0]
+                # Freeze window 0's first styled frame as the shared appearance anchor.
+                if mode == "styled" and style_anchor is None:
+                    style_anchor = result[0]
+                # Feathered overlap-add of this window's real (unpadded) frames.
+                wt = _feather(short)
+                for k in range(short):
+                    acc[off + k] += np.asarray(result[k], dtype=np.float32) * wt[k]
+                    wsum[off + k, 0, 0] += wt[k]
+            wsum = np.maximum(wsum, 1e-6)
+            blended = (acc / wsum[..., None]).clip(0, 255).astype(np.uint8)
+            out_frames = [Image.fromarray(f) for f in blended]
             per_style.append(out_frames)
             write_mp4(out_frames, fps, out_dir / f"restyled_{si:02d}.mp4")
             log.info(f"[refine] style {si + 1} done: {len(out_frames)} frames")
@@ -685,9 +789,9 @@ async def vace_refine(
         await flyte.report.replace.aio(render_grid(
             [r.prompt for r in results], [spec], results,
             title=(f"Chain -> restyle: {len(style_prompts)} styles, "
-                   f"{control} control, anchor {'ON' if use_anchor else 'OFF'}"),
+                   f"{control} control, anchor {mode}"),
             meta=(f"{len(frames)} frames · {len(windows)} independent windows · "
-                  f"seed={seed} · {secs:.0f}s"),
+                  f"anchor={mode} · seed={seed} · {secs:.0f}s"),
         ))
         await flyte.report.flush.aio()
 
@@ -862,25 +966,43 @@ async def refine(
     keep_pct: float = 8.0,
     control: str = "edges",
     use_anchor: bool = True,
+    anchor_mode: str = "",
+    window_frames: int = 0,
+    overlap: int = 0,
 ) -> RestyleRun:
     """Chain first, then re-render the whole clip in independent windows.
 
-    `--use_anchor`    = PRESERVE the source look (measured: doesn't work, see docs)
-    `--no-use_anchor` = REPLACE it with `--style_prompts`. The drift stops mattering
-                        because every window is being restyled anyway.
+    `--window_frames -1` renders the WHOLE clip as one window: zero seams by
+    construction (the fix when the styled anchor can't hold style across a boundary).
+    `0` = default 49-frame windows; `81` = the model's training length.
+
+    `--overlap 16` cross-fades the window seams (feathered overlap-add) instead of
+    butt-joining them: a hard cut becomes a short dissolve, staying inside the
+    training length. Costs extra windows. The in-window seam fix vs `window_frames=-1`.
+
+    `--anchor_mode` (preferred; supersedes `--use_anchor`):
+      `off`     no reference: each window free-styles, so the look RESETS every ~2s.
+      `source`  reference = source's photographic frame 0 (old preserve; fights style).
+      `styled`  reference = window 0's OWN styled frame 0, reused for every later
+                window -> one consistent theme across the whole clip, no boundary
+                reset, no serial drift. This is the fix for the anime "scene resets
+                outside the window" problem.
 
         flyte run vace.py refine \
             --source_clip_uri s3://flyte-data/.../chain_wan22-ti2v-5b_xxxx \
-            --style_prompts '["... anime style ...", "... photorealistic ..."]' 
+            --anchor_mode styled \
+            --style_prompts '["... anime style ..."]'
 
-    See `vace_refine` for why the windows are independent and what that trades away.
+    When `--anchor_mode` is empty it falls back to `--use_anchor` (True->source,
+    False->off). See `vace_refine` for why the windows are independent.
     """
     vw = await fetch_weights.override(short_name=f"fetch {VACE_MODEL}")(VACE_MODEL)
     return await vace_refine.override(short_name="vace refine")(
         vw, flyte.io.Dir.from_existing_remote(source_clip_uri), style_prompts,
         steps=steps, guidance=guidance, seed=seed,
         conditioning_scale=conditioning_scale, keep_pct=keep_pct,
-        control=control, use_anchor=use_anchor,
+        control=control, use_anchor=use_anchor, anchor_mode=anchor_mode,
+        window_frames=window_frames, overlap=overlap,
     )
 
 
