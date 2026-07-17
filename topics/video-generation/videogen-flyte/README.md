@@ -1418,6 +1418,58 @@ payoff per hour.
 > **Open at time of writing:** photorealistic single-window (does long-window drift bite
 > harder on realistic detail than on flat cel-shading?), and photorealistic `--overlap`.
 
+### 🔭 PLANNED: push the single window to 16 seconds
+
+The 8s single window won by holding one global attention context over all 193 frames.
+The obvious next swing: **how long can that context go?** Target a good-looking 16s clip
+(~385 frames). Not yet run; this is the plan and the honest ceiling analysis.
+
+**Starting point (Sage, 2026-07-17): the best long-video base we have.** Every refine run
+above sourced from `chain_wan22-ti2v-5b_jwe8fo1w` (run `rn8gfbnd474hcsv66rbs`, the no-turn +
+renorm 8s chain) and it's the best chain we've produced. So the 16s pipeline is: **(1)**
+extend *this* chain to ~16s (roughly double the hops in `long_video.py`) to get a 16s
+source — it will drift more with more hops, but that's exactly what the refine pass
+launders out — then **(2)** single-window refine the 16s chain. Refine only re-renders
+appearance; the chain still owns motion, so a better/longer chain is the lever for a better
+16s result.
+
+**Token / cost math** (832x480, VAE 8x spatial / 4x temporal, DiT patch 2x2 -> 1560
+tokens per latent frame):
+
+| clip | frames | latent frames | ~attention tokens | attention cost (O(N²)) |
+|---|---|---|---|---|
+| 8s (worked) | 193 | 49 | ~76k | 1x |
+| **16s** | 385 | 97 | ~151k | **~4x** |
+
+**Three ceilings, in the order they bite:**
+1. **Compute** — ~4x the 8s wall time (~30-40 min at 30 steps). Annoying, not blocking.
+2. **Memory** — fits. SDPA/flash attention is O(N) in memory, so ~151k tokens sits inside
+   the 119.7GiB pool, and the 0.90 `set_per_process_memory_fraction` cap means it
+   OOM-and-retries rather than hanging the box if wrong.
+3. **RoPE extrapolation = the real ceiling.** 8s already ran at **2.4x** Wan's 81-frame
+   training length and held *only because depth control pins every frame*. 16s is
+   **~4.8x**. Confirmed in the source: `transformer_wan.py` uses **RoPE** (rotary pos
+   emb, `theta=10000`, precomputed `freqs` to a `max_seq_len`). Past the trained length
+   the temporal positions are unseen -> looping / drift / temporal mush.
+
+**Levers that extend it, best first:**
+- **RoPE position interpolation / NTK theta-scaling** — highest leverage, and viable
+  precisely *because* Wan is RoPE-based (same trick that turns a 4k-context LLM into 32k).
+  Scale the temporal positions back into the trained range (or raise `theta`) — a ~10-line
+  patch to `WanRotaryPosEmbed`, no retrain. Most likely thing to make 16s single-window work.
+- **Keep depth control** — it's the whole reason 2.4x held; without it none of this is on
+  the table.
+- **VACE-14B** (cached, 75.1GB) — bigger models tolerate out-of-distribution length better.
+- **`--overlap` finally earns its keep** — at 16s, if the single window is past its cliff,
+  overlap keeps every window *in-distribution*. The exact regime it's built for, and the
+  opposite of the 8s result where it lost (busier: avg delta 4.98 vs 2.62).
+
+**The experiment: sweep the cliff, don't guess it.** Render the same source single-window
+at **193 -> 289 -> 385** frames and watch where avg frame-delta spikes / looping starts.
+That locates the real breaking point (bet: raw single-window breaks ~3-4x training length,
+i.e. ~250-350 frames; RoPE interpolation buys the rest). Then pick whatever sits under the
+cliff: single-window + RoPE-scaling if patched, else `--overlap` or VACE-14B.
+
 **1. ⭐ START HERE — bootstrap the style anchor from window 1's own output.**
 *(~20 lines in `vace.py`, one 44-min run. Sage's idea, 2026-07-17.)*
 
