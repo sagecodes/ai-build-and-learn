@@ -74,6 +74,7 @@ def load_pipeline(
     device: str = "cuda",
     model_path: str | None = None,
     i2v: bool = False,
+    v2v: bool = False,
 ):
     """Load `spec` into a ready-to-call diffusers pipeline.
 
@@ -96,7 +97,9 @@ def load_pipeline(
 
     dtype = _torch_dtype(spec.dtype)
     source = model_path or spec.repo
-    cls_name = spec.i2v_pipeline if i2v else spec.pipeline
+    # v2v > i2v > t2v. `v2v` selects the true video-to-video class (real frames +
+    # a `strength`), which is a different pipeline over the SAME checkpoint.
+    cls_name = spec.v2v_pipeline if v2v else (spec.i2v_pipeline if i2v else spec.pipeline)
 
     load_kwargs: dict = {"torch_dtype": dtype}
     if model_path is None:

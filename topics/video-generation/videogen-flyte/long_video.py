@@ -316,6 +316,165 @@ async def chain_from_frame(
         free_gpu_memory()
 
 
+@gpu_env.task(report=True, retries=2)
+async def polish_windows(
+    model_key: str,
+    weights: flyte.io.Dir,
+    source_clip: flyte.io.Dir,
+    prompt: str,
+    strength: float = 0.4,
+    steps: int = -1,
+    guidance: float = -1.0,
+    seed: int = 1234,
+) -> ChainRun:
+    """Re-render a chained clip with TRUE video-to-video, in independent windows.
+
+    ── The right tool for the "chain then refine" idea ─────────────────────────
+    The first attempt at this (`vace.py refine`) used VACE's control mode and made a
+    good clip worse: it fed VACE **edge maps**, which discard all appearance, and
+    asked one `reference_images` frame to rebuild the scene. The coat came back black
+    and the window seams popped at 2.7-3.4x.
+
+    `WanVideoToVideoPipeline` is the tool that job actually wanted:
+
+      * it takes the **real frames**, not a control signal, so appearance is preserved
+        by construction rather than reconstructed from nothing;
+      * it has **`strength`** (img2img-style): 0.3 = a light touch-up, 0.8 = a heavy
+        restyle. VACE's mask is binary (keep / generate) and has no such knob;
+      * it loads the **wan22-ti2v-5b checkpoint we already have cached** — a different
+        pipeline class over the same weights. No download, and 5B instead of VACE's
+        1.3B.
+
+    Windows are still independent (each one's input is its own slice of the ORIGINAL
+    clip), so there is no hand-off for error to accumulate through — that part of the
+    idea was always right. But because low `strength` barely moves each window, the
+    boundary pops should be far milder than VACE's.
+
+    Expect `strength` to be the whole story: too low and it changes nothing, too high
+    and each window drifts off on its own and the seams come back.
+    """
+    import time
+
+    import torch
+
+    spec = get_spec(model_key)
+    if not spec.supports_v2v:
+        raise ValueError(f"{model_key} has no v2v pipeline. Try wan22-ti2v-5b.")
+
+    out_dir = Path(tempfile.mkdtemp(prefix=f"polish_{model_key}_"))
+    await flyte.report.replace.aio(render_status(
+        f"Polish (true v2v, strength={strength})",
+        f"{spec.repo} · {spec.v2v_pipeline} · re-rendering a chained clip in windows",
+    ))
+    await flyte.report.flush.aio()
+
+    src_local = await source_clip.download()
+    mp4s = sorted(Path(src_local).glob("*.mp4"))   # chained.mp4 sorts before chunk_*
+    if not mp4s:
+        raise ValueError(f"no .mp4 in {src_local}")
+
+    import av
+    from PIL import Image
+
+    c = av.open(str(mp4s[0]))
+    fps = int(round(float(c.streams.video[0].average_rate or 24)))
+    frames = [Image.fromarray(f.to_ndarray(format="rgb24")) for f in c.decode(video=0)]
+    n = spec.num_frames
+    log.info(f"[polish] {mp4s[0].name}: {len(frames)} frames @{fps}fps -> "
+             f"{-(-len(frames) // n)} windows of {n}")
+
+    local = await weights.download()
+    pipe = None
+    try:
+        prepare_gpu(spec)
+        pipe = load_pipeline(spec, model_path=local, v2v=True)
+
+        out_frames: list = []
+        stats: list[ChunkStat] = []
+        t0 = time.time()
+        for wi in range(0, len(frames), n):
+            window = frames[wi:wi + n]
+            short = len(window)
+            if short < n:
+                window = window + [window[-1]] * (n - short)
+            log.info(f"[polish] window {wi // n + 1}: frames {wi}-{wi + short - 1}")
+            out = pipe(
+                video=window,
+                prompt=prompt,
+                negative_prompt=spec.negative_prompt or None,
+                height=spec.height, width=spec.width,
+                num_inference_steps=spec.steps if steps < 0 else steps,
+                guidance_scale=spec.guidance if guidance < 0 else guidance,
+                strength=strength,
+                generator=(torch.Generator(device="cuda").manual_seed(seed)
+                           if seed >= 0 else None),
+                output_type="pil",
+            ).frames[0][:short]
+            out_frames.extend(out)
+            b, cst = _luma_stats(out[-1])
+            stats.append(ChunkStat(beat=f"window {wi // n + 1}", seconds=0.0,
+                                   n_frames=len(out), brightness=b, contrast=cst))
+        secs = time.time() - t0
+
+        write_mp4(out_frames, fps, out_dir / "polished.mp4")
+        d = stats[-1].contrast - stats[0].contrast
+        log.info(f"[polish] {len(out_frames)} frames in {secs:.0f}s · "
+                 f"contrast drift {d:+.1f}")
+
+        spec_v = get_spec(model_key)
+        results = [
+            build_clip_result(spec_v, "source (chained)", frames, None, None, 0.0, fps=fps),
+            build_clip_result(spec_v, f"polished @strength={strength}", out_frames,
+                              None, None, secs, fps=fps),
+        ]
+        await flyte.report.replace.aio(render_grid(
+            [r.prompt for r in results], [spec_v], results,
+            title=f"Polish: true v2v, strength={strength}",
+            meta=(f"{len(out_frames)} frames · {len(stats)} independent windows · "
+                  f"contrast drift {d:+.1f} · {secs:.0f}s"),
+        ))
+        await flyte.report.flush.aio()
+
+        clips = await flyte.io.Dir.from_local(str(out_dir))
+        return ChainRun(model_key=model_key, chunks=stats, total_frames=len(out_frames),
+                        fps=fps, clips=clips)
+    finally:
+        pipe = None
+        free_gpu_memory()
+
+
+# WanVideoToVideoPipeline only loads a Wan 2.1 VAE (8x spatial, z_dim 16). The 2.2
+# TI2V-5B checkpoint ships a 16x/z_dim-48 VAE and dies on a latent shape mismatch, so
+# polish runs on the 1.3B. That is a real quality cost (1.3B re-rendering a 5B's clip)
+# and the honest reason to reach for VACE-14B or Wan 2.1 14B instead if it shows.
+POLISH_MODEL = "wan21-t2v-1.3b"
+
+
+@orch_env.task(report=True)
+async def polish(
+    source_clip_uri: str,
+    prompt: str,
+    model: str = POLISH_MODEL,
+    strength: float = 0.4,
+    steps: int = -1,
+    guidance: float = -1.0,
+    seed: int = 1234,
+) -> ChainRun:
+    """Chain first, then polish: true video-to-video over a chained clip.
+
+        flyte run long_video.py polish --strength 0.4 \
+            --source_clip_uri s3://flyte-data/.../chain_wan22-ti2v-5b_xxxx \
+            --prompt "a person in a long red coat walking away down a wet neon street at night"
+
+    See `polish_windows` for why this is the tool `vace.py refine` should have been.
+    """
+    w = await fetch_weights.override(short_name=f"fetch {model}")(model)
+    return await polish_windows.override(short_name=f"polish @{strength}")(
+        model, w, flyte.io.Dir.from_existing_remote(source_clip_uri), prompt,
+        strength=strength, steps=steps, guidance=guidance, seed=seed,
+    )
+
+
 @orch_env.task(report=True)
 async def long_video(
     beats: list[str],

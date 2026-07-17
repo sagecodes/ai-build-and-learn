@@ -100,14 +100,46 @@ looked at it, not that a task went green.
 | 2 | [Image to video](#2-image-to-video) | `animate` | ✅ verified | **the first frame is the bottleneck**: 6.2x less noise from one argument |
 | 3 | [Motion prompts](#the-i2v-model-is-prompted-too---motion_prompts) | `animate --motion_prompts` | ✅ verified | the prompt is a real lever: **2.5x** motion energy from the same frame |
 | 4 | [LoRA to animate](#4-lora-to-animate) | `animate --lora papercut` | ⚠️ built, **unrun** | fine-tuned look, moving, with no video training |
-| 5 | [Long video by chaining](#5-long-video-by-chaining-long_videopy) | `long_video.py` | ✅ verified | 8.0s from a 2s model. Works for **bounded** motion, **collapses** on a trajectory |
-| 6 | [SkyReels 14B](#6-skyreels-14b-long-video-done-properly) | `generate_one` | 🔄 **running now** | latent history vs our RGB hand-off. The control for #5 |
-| 7 | [Video to video (VACE)](#7-video-to-video-vace) | `vace.py restyle` | ⚠️ built, **unrun** | the only model that takes video IN. 19GB, the cheapest thing here |
+| 5 | [Length & consistency: 4 approaches](#5-length-and-consistency-four-approaches-measured) | `long_video.py`, `vace.py` | ✅ verified | chain / renorm / bookend / anchored. **The beats mattered more than any algorithm** (+8.9 -> +1.6, free) |
+| 5b | [`bookend`](#bookend-the-fix-for-the-trajectory-the-chain-wont-advance) | `vace.py bookend` | ✅ verified | endpoints pinned: the only run where the subject actually **recedes** |
+| 5c | [`anchored`](#anchored-the-experiment-that-tests-the-actual-claim) | `vace.py anchored` | ✅ verified | `reference_images` holds identity through the turn that broke the chain |
+| 5d | [`refine`](#refine-chain-first-then-re-render-against-one-anchor) | `vace.py refine` | ❌ **negative result** | edge control discards appearance; made a good clip worse |
+| 6 | [SkyReels 14B](#6-skyreels-14b-long-video-done-properly) | `generate_one` | ⏳ overnight | loads + runs, but **283 s/step, ~4h/clip**. Latent history vs our RGB hand-off |
+| 7 | [Video to video (VACE)](#7-video-to-video-vace) | `vace.py restyle` | ✅ verified | the only model that takes video IN. 19GB, 323s/clip. **Name the subject** or it invents one |
 | 8 | [Krea v2v](#8-krea-realtime-video-researched-not-built) | — | 📋 researched | 14B Apache-2.0 causal. 51.8GB with an allowlist, 137.6GB without |
 
 The through-line, if you want one: **#5 breaks, #6 is the principled fix, #7 has the
 tool (`reference_images`) for the part #6 doesn't fix.** See
 [exposure bias](#what-we-hit-has-a-name-exposure-bias---renorm).
+
+---
+
+## The knobs (what to turn when it looks wrong)
+
+Every one of these is a CLI flag. Defaults are chosen to be honest rather than
+flattering: `--renorm` ships **off** so the drift stays visible, and the sampler
+defaults are demo-sized rather than the model cards' (see [the models](#the-models)).
+
+| knob | where | default | range | what it does |
+|---|---|---|---|---|
+| `--strength` | `long_video.py polish` | `0.4` | 0.2-0.8 | **The most important one.** True v2v: how far to move off the source frames. Too low = nothing changes; too high = each window drifts off alone and the seams come back. |
+| `--renorm` | `long_video.py long_video` | `0.0` (off) | 0-1 | Re-anchors each hand-off frame's per-channel mean/std to chunk 1's. Helps in proportion to how **stationary** the scene is: candle **-65%** contrast creep, boat -46%, walking person **no help at all**. |
+| `--keep_pct` | `vace.py restyle` | `8.0` | 4-15 | Edge-map density (percentile threshold). Lower = only strong contours, VACE freer to invent; higher = more structure, VACE more constrained. **8% is tuned**: a fixed threshold gave a 79% white map that VACE couldn't read. |
+| `--conditioning_scale` | `vace.py restyle` | `1.0` | 0.5-1.5 | How hard VACE is pulled toward the control video. |
+| `--use_anchor` / `--no-use_anchor` | `vace.py anchored` | on | flag | Pass `reference_images` to every chunk. `--no-use_anchor` is the control arm. |
+| `--lora_scale` | `compare_pipeline.py animate` | `1.0` | 0-1.5 | LoRA fusion strength. |
+| `--motion_prompts` | `compare_pipeline.py animate` | reuses `--prompts` | list | Separates the **motion** prompt from the **frame** prompt. Measured **2.5x** motion energy from "leaps out of the water" vs "drifts gently", same frame. |
+| `--steps` / `--guidance` | most entrypoints | `-1` = the spec's | — | `-1` sentinels mean "use the model's default". |
+| `flow_shift` | `models.py` (spec field) | `0` = don't touch | 3.0 / 5.0 | Wan's flow-matching schedule shift. **3.0 for 480P, 5.0 for 720P** per the VACE card. Left at 0 for models verified on their shipped scheduler. |
+| `extra_call_kwargs` | `models.py` (spec field) | `()` | — | Family-specific `__call__` params. SkyReels' `ar_step` / `overlap_history` live here, and **without them the long-video path is unreachable**. |
+
+**Two that will surprise you:**
+
+- **`ar_step=5` makes SkyReels run 50 iterations, not the 30 you asked for.** Async mode
+  expands the schedule, so real cost is ~1.7x the step count. Budget on 50.
+- **A LoRA trigger word is a knob.** `papercut`, `pixel art` — without the token in the
+  prompt the adapter loads, fuses, and does nothing. Registry LoRAs prepend it for you;
+  a raw repo id does not.
 
 ---
 
@@ -508,7 +540,43 @@ the style to land weaker than on stock SDXL. Needs a run to confirm.
 
 ---
 
-## 5. Long video by chaining (`long_video.py`)
+## 5. Length and consistency: four approaches, measured
+
+All four try to beat the same wall — **every model here has its clip length baked into
+its latent shape**, so one call buys ~2-5 seconds. They fail in different ways, and the
+differences are the interesting part. Detail sections follow; this is the map.
+
+| approach | where | length | what it fixes | what it costs | verdict |
+|---|---|---|---|---|---|
+| **chain** | `long_video.py long_video` | **unbounded** (8s tested) | nothing by itself; it's the baseline | drifts; won't advance a trajectory | ✅ works if the beats behave |
+| **chain + `--renorm`** | `long_video.py long_video --renorm 1.0` | unbounded | **statistical** drift (contrast/colour creep) | nothing | ✅ on stationary scenes (candle **-65%**), ❌ on a moving subject |
+| **bookend** | `vace.py bookend` | **49 frames only** | **the trajectory** — endpoints pinned, so it can't run away | you give up unbounded length | ✅ the only one that made the subject actually recede |
+| **anchored chain** | `vace.py anchored` | unbounded | **identity** — the subject stays the same subject | contrast slightly worse; VACE is 1.3B | ✅ the only fix for *semantic* drift |
+| **refine after** | `vace.py refine` | n/a (post-pass) | intended: appearance, globally | seams pop 2.7-3.4x; the coat went black | ❌ wrong tool (see below) |
+| **polish after** | `long_video.py polish` | n/a (post-pass) | true v2v with a `strength` knob | needs a **Wan 2.1** checkpoint (VAE mismatch) | ⚠️ built, unrun |
+
+**How they actually relate**, which took all night to work out:
+
+1. **The chain is fine.** Its famous collapse (a person turning around and walking into
+   the lens) was **our beats**, not the method. Removing one geometry-inverting beat
+   took drift from +8.9 to **+1.6**. Prompt design beat every algorithm we tried, for
+   free.
+2. **Chaining fails at three different things, and each needs a different tool.**
+   Statistical creep -> `--renorm`. Identity -> an anchor (`reference_images`).
+   Trajectory -> pinned endpoints (`bookend`). No single knob does all three, and
+   using the wrong one looks like the method failing.
+3. **A post-pass can't repair a collapse.** `refine` re-renders from the chain's
+   *output*, so if the chain already dissolved, the control signal is already garbage.
+   An anchor has to be present *while* the damage is done — which is exactly why
+   `anchored` works and `refine` doesn't.
+4. **Watch the right number.** Contrast drift is the right probe for statistical
+   degradation and **blind** to semantic drift: the anchored run kept the red coat for
+   8 seconds *while* scoring slightly worse on contrast. Numbers for exposure; eyes for
+   identity.
+
+---
+
+## 5a. Long video by chaining (`long_video.py`)
 
 Every model here has its clip length baked into the latent shape, so one call buys
 ~2-5 seconds and no more. `long_video.py` gets around that with the obvious trick:
@@ -899,6 +967,189 @@ also the interesting one: **it's FramePack's anti-drifting primitive** — fix t
 endpoints, interpolate the middle. And VACE's `reference_images` is the identity anchor
 that [renormalization can't provide](#what-we-hit-has-a-name-exposure-bias---renorm).
 So #7 holds the tools for the part of #5 that #6 may not fix.
+
+### `bookend`: the fix for the trajectory the chain won't advance
+
+✅ **Verified 2026-07-16.** The chain's residual failure (after the beat fix) is that
+the subject **never recedes**: you ask for "further away, smaller in frame" and get a
+treadmill for 8 seconds. It can't do otherwise — each chunk sees one frame and has no
+idea where the shot is supposed to *end*.
+
+`bookend` inverts that. Generate BOTH endpoints first, then interpolate:
+
+```bash
+.venv/bin/flyte run vace.py bookend --image_model sdxl-turbo \
+  --first_prompt "a person in a long red coat close to the camera on a wet neon street at night, seen from behind" \
+  --last_prompt  "a wet neon street at night, a small distant figure in a red coat far down the street, seen from behind" \
+  --prompt       "the person walks away from the camera down the street, receding into the distance"
+```
+
+The trajectory is **bounded by construction**: the model cannot walk the subject into
+the lens, because it has been told up front that the last frame is a small figure in
+the distance. Result: a coherent figure, seen from behind the whole way, that **actually
+gets smaller** — which no chained run managed at any renorm setting.
+
+The trade is honest: **49 frames (~2s), not an unbounded chain.** Bounded is the point.
+Chaining buys length and loses the trajectory; bookending buys the trajectory and loses
+length. Pick per shot.
+
+### `refine`: chain first, then re-render against one anchor
+
+The natural next move, and it targets the thing renorm couldn't. Chaining is good at
+motion and bad at holding appearance; a **global second pass** re-renders appearance
+with the whole clip in view:
+
+```bash
+.venv/bin/flyte run vace.py refine \
+    --source_clip_uri s3://flyte-data/.../chain_wan22-ti2v-5b_xxxx \
+    --style_prompt "a person in a long red coat walking away down a wet neon street at night, seen from behind, cinematic"
+```
+
+**Why this can beat `--renorm`:** the windows **do not chain**. Each 49-frame window's
+input is its own slice of the ORIGINAL clip plus the same anchor (source frame 0), so
+there is no hand-off for error to accumulate through. Renorm corrected every hop and
+drift still grew (+4.9, +5.8, +9.5 from statistically identical starts) *because the
+hops were still serial*. Remove the serial dependency and accumulation has nowhere to
+live. `reference_images` carries appearance; the edge maps carry structure — which is
+the division of labour VACE was designed for.
+
+**The trade, which is the mirror image of the chain's:** independent windows can't
+drift, but they aren't tied to each other either, so expect **style pops at the
+49-frame boundaries** where the chain had unusually smooth seams (0.5-0.75x of average
+frame delta). A slow monotonic degradation, traded for possible discontinuities.
+
+⚠️ And the obvious risk: VACE is **1.3B**; the chain came from a **5B**. A refinement
+pass can plausibly make things worse. If it does, `Wan-AI/Wan2.1-VACE-14B-diffusers` is
+the same pipeline class at 75.1GB — a one-line spec change, not an integration.
+
+#### ❌ Result: it doesn't work, and the reason is structural
+
+Ran 2026-07-16 on the no-turn chain: 193 frames, 4 windows, 1384s. **It made a good
+clip worse.**
+
+| | source (no-turn chain) | refined |
+|---|---|---|
+| contrast drift | **+1.5** | -12.9 |
+| boundary 49 | 1.48x | **3.41x** |
+| boundary 98 | 0.42x | **2.71x** |
+| boundary 147 | 0.32x | **2.79x** |
+| the red coat | red | **near-black** |
+
+Three separate failures, and the middle one is the interesting one:
+
+1. **The seams pop, exactly as predicted.** 2.7-3.4x the average frame delta at each
+   window boundary, where the chain's seams were *below* average. No drift, but visible
+   jumps. That trade is real and it is not subtle.
+2. **The anchor did not hold appearance — the coat went black.** Preserving appearance
+   was the entire point. The cause is a design error: **edge maps discard all
+   appearance by construction**, so we handed VACE structure-only control and expected
+   one `reference_images` frame to rebuild the scene's whole look. It cannot. Identity
+   anchoring is not scene reconstruction.
+3. **Wrong patient.** We refined the clip that had *nothing wrong with it* (+1.6 drift
+   after the beat fix), so the pass could only cost. Refine a *drifted* clip if you
+   retry this.
+
+**The generalisable lesson: VACE control mode is a RESTYLE tool, not a REFINE tool.**
+It regenerates from structure. The mask is binary (keep / generate), so there is no
+low-strength "touch this up" knob the way an img2img pass at strength 0.3 would give
+you. A refinement stage needs a mechanism VACE does not have.
+
+The idea is still sound — a global pass *is* the right shape for fixing drift that
+per-hop correction can't. It just needs a tool that starts from the pixels rather than
+from their edges. See [`anchored`](#anchored-the-experiment-that-tests-the-actual-claim)
+for the version that keeps the real frame.
+
+### `anchored`: the experiment that tests the actual claim
+
+Everything measured says the chain's real failure is **semantic, not statistical**:
+
+- `--renorm` corrects the hand-off statistics *perfectly* (58.0±46.9, every hop) and
+  drift still **accelerates** (+4.9, +5.8, +9.5).
+- A person who turns around walks into the lens and dissolves, at any renorm strength.
+- Fixing the **beats** helped 5x more than any algorithm (+8.9 -> +1.6), for free.
+
+So: does an anchor that understands *content* fix what histograms couldn't? That's
+StreamingT2V's Appearance Preservation Module in one sentence, and `reference_images`
+is the closest thing we have to it.
+
+```bash
+# the A/B: identical everything, one variable
+.venv/bin/flyte run vace.py anchored --image_model sdxl-turbo --use_anchor    --beats '[...]'
+.venv/bin/flyte run vace.py anchored --image_model sdxl-turbo --no-use_anchor --beats '[...]'
+```
+
+#### The two arms, precisely
+
+Both arms run the **identical** code path: VACE in image-to-video shape, where each
+chunk is handed `video = [prev_last_frame, grey, grey, ...]` with mask
+`[BLACK, white, white, ...]` — remember **black = keep, white = generate** — so frame 0
+is the previous chunk's last frame and the other 48 are invented. Same model, same mask
+shape, same beats, same seeds. **One variable:**
+
+| | `--use_anchor` (**ON**) | `--no-use_anchor` (**OFF**, the control) |
+|---|---|---|
+| what each chunk gets | prev chunk's last frame **+ `reference_images=[anchor]`** | prev chunk's last frame **only** |
+| memory of the subject | the **original frame 0**, re-supplied every chunk, forever | whatever survived N hops of re-encoding |
+| the anchor | frame 0 of chunk 1 — the least-drifted frame in the clip | none |
+| this is | StreamingT2V's Appearance Preservation Module, roughly | plain last-frame chaining, VACE edition |
+
+**OFF is not a straw man** — it's exactly what `long_video.py` does, reimplemented on
+VACE so that the *only* difference from the ON arm is the anchor. Without it, any
+improvement could just be "VACE behaves differently from wan22" rather than "the anchor
+works."
+
+So ON keeps a permanent, un-drifted reference to who the subject *is*, while OFF only
+ever knows the subject through a frame that has been through the VAE N times. If
+semantic drift is really the disease, ON should hold identity where OFF morphs it —
+and that is precisely what happened.
+
+Two design points that matter, both learned from `refine` failing:
+
+- **The real RGB frame carries appearance**, not an edge map. `refine` handed VACE
+  edges and asked one reference image to rebuild a whole scene; the coat went black.
+  Here appearance flows through the actual frame and the anchor only has to hold
+  *identity*. That's a job `reference_images` was built for.
+- **`refine` cannot do this job at all.** It re-renders from the chain's *output*, so
+  if the chain already collapsed into bokeh, refine gets bokeh as its control signal.
+  An anchor has to be present while the damage is being done, not afterwards.
+
+Run on the **turn beats** deliberately — the known-broken case. The no-turn beats
+already work (+1.6), so an anchor would have nothing to prove there. `--no-use_anchor`
+is the control arm: same model, same mask shape, same seeds, so any difference is the
+anchor and not the model swap.
+
+#### ✅ Result: the anchor holds identity — and contrast was the wrong yardstick
+
+Run 2026-07-16, turn beats, 193 frames, both arms:
+
+| | anchor OFF | anchor ON |
+|---|---|---|
+| contrast drift | **+15.2** | +18.3 |
+| the red coat at frame 128 | **morphed** into a different jacket + jeans | **still the red coat** |
+| the coat at frame 192 | a dark coat entirely | dark, but the same garment |
+| the turn (beat 2) | not really executed | **executed at ~f64, recovered by f128** |
+| collapse into bokeh | no | no |
+
+**The anchor did exactly its job and the metric couldn't see it.** `reference_images`
+kept the subject the *same subject* for 8 seconds through the beat that destroyed the
+wan22 chain — it turns, and then it *recovers* and keeps walking away. Meanwhile
+contrast drift got slightly **worse**.
+
+Those aren't in tension: contrast measures **exposure**, not **identity**. We'd been
+leaning on it as a proxy for "is this degrading", and here it is blind to the only
+thing that matters. That's a lesson about the measurement, not the method:
+
+- **statistical drift** -> contrast is the right probe, `--renorm` is the lever
+- **semantic drift** -> contrast is *useless*; you have to look, and the lever is an
+  anchor (`reference_images`)
+
+**This is the first mechanism here that addresses semantic drift at all.** Renorm
+couldn't (by construction), better beats avoided the problem rather than solving it,
+and `refine` operated too late to help.
+
+⚠️ One confound worth stating: both arms are **VACE-1.3B**, while the chain that
+collapsed was **wan22-5B**. The ON/OFF comparison is clean (same model, same seeds), but
+"VACE chains more stably than wan22" is *not* isolated by this experiment.
 
 ---
 

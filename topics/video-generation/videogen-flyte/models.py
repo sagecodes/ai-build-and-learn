@@ -57,6 +57,11 @@ class VideoModelSpec:
     est_vram_gb: float = 0.0
 
     i2v_pipeline: str = ""        # image-to-video class; "" = T2V only
+    # True video-to-video class: takes REAL FRAMES plus a `strength` (img2img-style),
+    # so it can lightly re-render an existing clip instead of regenerating it from a
+    # control signal. This is the knob VACE does not have (its mask is binary), and
+    # it's what makes a *refine* pass possible. "" = no v2v support.
+    v2v_pipeline: str = ""
     dtype: str = "bfloat16"       # GB10 (Blackwell) is happiest in bf16
     vae_dtype: str = ""           # override; Wan's VAE must stay fp32 or it artifacts
 
@@ -99,6 +104,10 @@ class VideoModelSpec:
     def supports_i2v(self) -> bool:
         return bool(self.i2v_pipeline)
 
+    @property
+    def supports_v2v(self) -> bool:
+        return bool(self.v2v_pipeline)
+
 
 # Junk that is never load-bearing for `from_pretrained`, in every repo.
 _JUNK = ("*.md", "*.gif", "*.mp4", "*.png", "*.jpg", "assets/*", "examples/*")
@@ -122,6 +131,10 @@ MODELS: dict[str, VideoModelSpec] = {
         key="wan21-t2v-1.3b",
         repo="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         pipeline="WanPipeline",
+        # The only checkpoint here that WanVideoToVideoPipeline can actually load: it
+        # carries the Wan 2.1 VAE (8x spatial, z_dim 16) the pipeline assumes. See the
+        # note on wan22-ti2v-5b for what happens otherwise.
+        v2v_pipeline="WanVideoToVideoPipeline",
         family="DiT / flow (1.3B)",
         license="Apache-2.0",
         gated=False,
@@ -146,6 +159,11 @@ MODELS: dict[str, VideoModelSpec] = {
         repo="Wan-AI/Wan2.2-TI2V-5B-Diffusers",
         pipeline="WanPipeline",
         i2v_pipeline="WanImageToVideoPipeline",
+        # NO v2v_pipeline here on purpose: WanVideoToVideoPipeline is written against
+        # the Wan 2.1 VAE (8x spatial, z_dim 16) and THIS checkpoint ships the Wan 2.2
+        # TI2V VAE (16x spatial, z_dim 48). Feeding it this checkpoint dies with
+        # "size of tensor a (52) must match tensor b (104)" -- 832/16=52 vs 832/8=104.
+        # Measured 2026-07-16. Use wan21-t2v-1.3b for v2v instead.
         family="DiT / flow (5B, T+I)",
         license="Apache-2.0",
         gated=False,
@@ -357,6 +375,29 @@ MODELS: dict[str, VideoModelSpec] = {
         flow_shift=3.0,     # the card: 3.0 for 480P, 5.0 for 720P
         native="832x480, 81 frames @16fps, 50 steps, flow_shift=3.0 (480P).",
         notes="Video-to-video and control. The only model here that takes video IN. Untested.",
+    ),
+
+    # VACE at 14B: the same pipeline class, 10x the parameters. The upgrade path when
+    # the 1.3B is the ceiling -- and on the refine experiment it plainly was (a 1.3B
+    # re-rendering a 5B's clip lost the red coat entirely). One-line change, 75.1GB.
+    "wan21-vace-14b": VideoModelSpec(
+        key="wan21-vace-14b",
+        repo="Wan-AI/Wan2.1-VACE-14B-diffusers",
+        pipeline="WanVACEPipeline",
+        family="VACE control/v2v (14B)",
+        license="Apache-2.0",
+        gated=False,
+        download_gb=75.1,   # HF API blob sum; the API under-reported for LTX/Hunyuan
+        est_vram_gb=42.0,   # 14B transformer + UMT5-XXL; cf. skyreels-14b measured ~85GB
+        vae_dtype="float32",
+        steps=30,
+        guidance=5.0,
+        width=832, height=480, num_frames=49, fps=16,
+        negative_prompt=_WAN_NEGATIVE,
+        ignore_patterns=_JUNK,
+        flow_shift=3.0,     # the card: 3.0 for 480P, 5.0 for 720P
+        native="832x480, 81 frames @16fps, 50 steps, flow_shift=3.0 (480P).",
+        notes="VACE quality upgrade. Same code path as the 1.3B. Untested here.",
     ),
 
     # The long-video showpiece, and the reason `long_video.py` has a foil.
