@@ -57,10 +57,10 @@ Usage (on the devbox):
     # generate a source clip, then restyle it
     flyte run vace.py restyle \
         --source_prompt "a red fox trotting through tall grass, morning light" \
-        --style_prompt  "the same scene as a pen and ink sketch, cross-hatched, monochrome"
+        --style_prompts '["a red fox in tall grass, pen and ink sketch, cross-hatched"]' 
 
     # restyle a clip we already made (skips regenerating it)
-    flyte run vace.py restyle --style_prompt "..." \
+    flyte run vace.py restyle --style_prompts '["..."]' \
         --source_clip_uri s3://flyte-data/.../clips_wan22-ti2v-5b_xxxx
 
     # first-last-frame: give it two images, it invents the motion between them
@@ -258,7 +258,7 @@ def _read_mp4(path: str | Path) -> tuple[list, int]:
 async def vace_restyle(
     weights: flyte.io.Dir,
     source_clip: flyte.io.Dir,
-    style_prompt: str,
+    style_prompts: list[str],
     steps: int = -1,
     guidance: float = -1.0,
     seed: int = 1234,
@@ -266,7 +266,16 @@ async def vace_restyle(
     control: str = "edges",
     keep_pct: float = 8.0,
 ) -> RestyleRun:
-    """Take a source clip, derive a control video, and restyle it.
+    """Take a source clip, derive ONE control video, render EVERY style against it.
+
+    Styles loop inside a single task on purpose: the pipeline load (~60s) and the depth
+    pass are paid once, not once per style, and every style lands in **one report grid**
+    driven by the identical control video — which is the only way the comparison means
+    anything.
+
+    The grid is also the clearest demonstration of what VACE control actually does:
+    **the control video supplies shape and motion, the prompt supplies identity.** Same
+    two drifting shapes, N different creatures, same motion.
 
     `control`: "edges" (free, blind to subjects in texture) or "depth" (a 99MB model,
     sees objects rather than boundaries). See `_depth_frames` for why it matters.
@@ -278,7 +287,7 @@ async def vace_restyle(
 
     await flyte.report.replace.aio(render_status(
         "VACE video-to-video",
-        f"{spec.repo} · restyling to: {style_prompt}",
+        f"{spec.repo} · {control} control · {len(style_prompts)} style(s)",
     ))
     await flyte.report.flush.aio()
 
@@ -319,42 +328,51 @@ async def vace_restyle(
 
         import time
 
-        t0 = time.time()
-        result = pipe(
-            prompt=style_prompt,
-            negative_prompt=spec.negative_prompt or None,
-            video=control_frames,
-            mask=mask,
-            conditioning_scale=conditioning_scale,
-            height=h,
-            width=w,
-            num_frames=n,
-            num_inference_steps=spec.steps if steps < 0 else steps,
-            guidance_scale=spec.guidance if guidance < 0 else guidance,
-            generator=(torch.Generator(device="cuda").manual_seed(seed) if seed >= 0 else None),
-            output_type="pil",
-        )
-        secs = time.time() - t0
-        out = result.frames[0]
-        write_mp4(out, fps, out_dir / "restyled.mp4")
-        log.info(f"[vace] restyled {len(out)} frames in {secs:.0f}s")
-
         results = [
-            build_clip_result(spec, f"source ({SOURCE_MODEL})", frames, None, None, 0.0, fps=fps),
+            build_clip_result(spec, f"source ({SOURCE_MODEL})", frames, None, None,
+                              0.0, fps=fps),
             build_clip_result(spec, f"control ({control} map)", control_frames,
                               None, None, 0.0, fps=fps),
-            build_clip_result(spec, f"restyled: {style_prompt}", out, None, None, secs, fps=fps),
         ]
-        await flyte.report.replace.aio(render_grid(
-            [r.prompt for r in results], [spec], results,
-            title="VACE video-to-video",
-            meta=(f"{spec.repo} · {control} control · conditioning_scale={conditioning_scale} "
-                  f"· {secs:.0f}s · seed={seed}"),
-        ))
-        await flyte.report.flush.aio()
+        # Render every style against the SAME control video, reusing the loaded
+        # pipeline. Report is re-rendered after each so the grid fills in live.
+        for i, sp in enumerate(style_prompts):
+            log.info(f"[vace] style {i + 1}/{len(style_prompts)}: {sp[:60]}")
+            t0 = time.time()
+            out = pipe(
+                prompt=sp,
+                negative_prompt=spec.negative_prompt or None,
+                video=control_frames,
+                mask=mask,
+                conditioning_scale=conditioning_scale,
+                height=h,
+                width=w,
+                num_frames=n,
+                num_inference_steps=spec.steps if steps < 0 else steps,
+                guidance_scale=spec.guidance if guidance < 0 else guidance,
+                # Same seed for every style: identical noise means any difference you
+                # see is the PROMPT, not the sampler.
+                generator=(torch.Generator(device="cuda").manual_seed(seed)
+                           if seed >= 0 else None),
+                output_type="pil",
+            ).frames[0]
+            secs = time.time() - t0
+            write_mp4(out, fps, out_dir / f"restyled_{i:02d}.mp4")
+            log.info(f"[vace] style {i + 1} done in {secs:.0f}s")
+            results.append(build_clip_result(spec, sp, out, None, None, secs, fps=fps))
 
+            await flyte.report.replace.aio(render_grid(
+                [r.prompt for r in results], [spec], results,
+                title=f"VACE v2v: one control video, {len(style_prompts)} styles",
+                meta=(f"{spec.repo} · {control} control · "
+                      f"conditioning_scale={conditioning_scale} · seed={seed} · "
+                      f"{i + 1}/{len(style_prompts)} rendered"),
+            ))
+            await flyte.report.flush.aio()
+
+        total = sum(r.seconds for r in results)
         clips = await flyte.io.Dir.from_local(str(out_dir))
-        return RestyleRun(model_key=spec.key, seconds=secs, n_frames=len(out),
+        return RestyleRun(model_key=spec.key, seconds=total, n_frames=n,
                           fps=fps, clips=clips)
     finally:
         pipe = None
@@ -363,7 +381,7 @@ async def vace_restyle(
 
 @orch_env.task(report=True)
 async def restyle(
-    style_prompt: str,
+    style_prompts: list[str],
     # Default deliberately chosen for its CONTROL MAP, not its looks. See the
     # "pick your source" note in the module docstring: a boat on a dark puddle gives
     # crisp contours, a fox in grass gives 8% of the frame in grass blades and no
@@ -375,8 +393,14 @@ async def restyle(
     guidance: float = -1.0,
     seed: int = 1234,
     conditioning_scale: float = 1.0,
+    control: str = "edges",
+    keep_pct: float = 8.0,
 ) -> RestyleRun:
     """Generate (or reuse) a source clip, then restyle it with VACE.
+
+    `--control edges` (free) or `--control depth` (a 99MB model). Depth sees objects
+    where edges only see boundaries: use it when the subject lives in texture (grass,
+    crowds, a busy street) and the edge map can't find it. See `_depth_frames`.
 
         source_prompt --(wan22-ti2v-5b)--> clip --(edges)--> control --(VACE)--> restyled
 
@@ -388,7 +412,7 @@ async def restyle(
     await flyte.report.replace.aio(render_status(
         "VACE video-to-video",
         f"source: {'reusing ' + source_clip_uri if source_clip_uri else source_prompt} · "
-        f"style: {style_prompt}",
+        f"{len(style_prompts)} style(s) · {control} control",
     ))
     await flyte.report.flush.aio()
 
@@ -406,9 +430,9 @@ async def restyle(
         source = run.clips
 
     vw = await fetch_weights.override(short_name=f"fetch {VACE_MODEL}")(VACE_MODEL)
-    return await vace_restyle.override(short_name="vace restyle")(
-        vw, source, style_prompt, steps=steps, guidance=guidance, seed=seed,
-        conditioning_scale=conditioning_scale,
+    return await vace_restyle.override(short_name=f"vace restyle ({control})")(
+        vw, source, style_prompts, steps=steps, guidance=guidance, seed=seed,
+        conditioning_scale=conditioning_scale, control=control, keep_pct=keep_pct,
     )
 
 
@@ -490,14 +514,38 @@ async def flf2v(
 async def vace_refine(
     weights: flyte.io.Dir,
     source_clip: flyte.io.Dir,
-    style_prompt: str,
+    style_prompts: list[str],
     steps: int = -1,
     guidance: float = -1.0,
     seed: int = 1234,
     conditioning_scale: float = 1.0,
     keep_pct: float = 8.0,
+    control: str = "edges",
+    use_anchor: bool = True,
 ) -> RestyleRun:
-    """Re-render a long, drifted clip in INDEPENDENT windows, all anchored to one image.
+    """Re-render a long clip in INDEPENDENT windows. Two very different jobs.
+
+    ── PRESERVE (`use_anchor=True`) vs REPLACE (`use_anchor=False`) ────────────
+    These sound similar and are not:
+
+    * **Preserve** (anchor ON): keep the source's look, fix the drift. Measured
+      2026-07-16: **it does not work.** Edge maps discard appearance, one reference
+      frame cannot rebuild a scene, and the red coat came back black. See the result
+      table below.
+    * **Replace** (anchor OFF): *restyle* the whole clip into something new. Here the
+      source's drift stops mattering — if every frame is becoming an ink drawing, who
+      cares that the coat crept from red to dark, or that contrast climbed 32%? Edge
+      maps are largely drift-INVARIANT (structure survives while exposure creeps), and
+      the style prompt re-renders appearance uniformly across every window. **A restyle
+      can launder the drift out.**
+
+    So turn the anchor OFF for a restyle: a photographic anchor actively fights a
+    non-photographic style prompt, which is part of why the preserve attempt failed.
+
+    Either way this cannot rescue a **collapse**: it re-renders from the chain's
+    OUTPUT, so if the chain already dissolved into bokeh, the edges of bokeh are
+    garbage in, garbage out. Use it on a clip that merely drifted.
+    
 
     ── The idea ────────────────────────────────────────────────────────────────
     `long_video.py` is good at motion and bad at holding appearance: it drifts because
@@ -510,8 +558,8 @@ async def vace_refine(
              │  slice into 49-frame windows
              ├── window 1 ─┐
              ├── window 2 ─┤ each: VACE(control=window edges,
-             ├── window 3 ─┤              reference_images=[anchor],
-             └── window 4 ─┘              prompt=style_prompt)      ──> concat
+             ├── window 3 ─┤              reference_images=[anchor] if use_anchor,
+             └── window 4 ─┘              prompt=each style_prompt)  ──> concat
 
     ── Why this can fix drift that --renorm could not ──────────────────────────
     **The windows do not chain.** Each one's input is its own slice of the ORIGINAL
@@ -543,8 +591,9 @@ async def vace_refine(
     out_dir = Path(tempfile.mkdtemp(prefix="vace_refine_"))
 
     await flyte.report.replace.aio(render_status(
-        "VACE refine (anchored windows)",
-        f"{spec.repo} · re-rendering a chained clip in independent windows · {style_prompt}",
+        f"VACE refine · anchor {'ON (preserve)' if use_anchor else 'OFF (restyle)'}",
+        f"{spec.repo} · {control} control · anchor {'ON' if use_anchor else 'OFF'} · "
+        f"{len(style_prompts)} style(s), independent windows",
     ))
     await flyte.report.flush.aio()
 
@@ -568,47 +617,77 @@ async def vace_refine(
         pipe = load_pipeline(spec, model_path=local)
         mask = [Image.new("L", (w, h), 255)] * n
 
-        out_frames: list = []
-        t0 = time.time()
+        # Derive the control ONCE per window, then render every style against it.
+        # Control extraction (depth especially) is not free, and re-deriving it per
+        # style would also risk the styles seeing subtly different control videos --
+        # which is exactly what a style comparison must not do.
+        windows, controls = [], []
         for wi in range(0, len(frames), n):
             window = frames[wi:wi + n]
             short = len(window)
             if short < n:                 # pad the tail so the latent shape still fits
                 window = window + [window[-1]] * (n - short)
-            control = _edge_frames(window, keep_pct=keep_pct)
-            log.info(f"[refine] window {wi // n + 1}: frames {wi}-{wi + short - 1}")
-            result = pipe(
-                prompt=style_prompt,
-                negative_prompt=spec.negative_prompt or None,
-                video=control_frames,
-                mask=mask,
-                reference_images=[anchor],   # the same anchor for EVERY window
-                conditioning_scale=conditioning_scale,
-                height=h, width=w, num_frames=n,
-                num_inference_steps=spec.steps if steps < 0 else steps,
-                guidance_scale=spec.guidance if guidance < 0 else guidance,
-                # Same seed per window: identical noise is one more thing keeping the
-                # independent windows looking like each other.
-                generator=(torch.Generator(device="cuda").manual_seed(seed)
-                           if seed >= 0 else None),
-                output_type="pil",
-            )
-            out_frames.extend(result.frames[0][:short])   # drop the padding
+            windows.append((window, short))
+            controls.append(_control_frames(window, control, keep_pct=keep_pct))
+        log.info(f"[refine] {len(windows)} windows, {control} control, "
+                 f"{len(style_prompts)} style(s)")
+
+        t0 = time.time()
+        per_style: list[list] = []
+        for si, sp in enumerate(style_prompts):
+            out_frames: list = []
+            for wi, ((window, short), ctrl) in enumerate(zip(windows, controls)):
+                log.info(f"[refine] style {si + 1}/{len(style_prompts)} "
+                         f"window {wi + 1}/{len(windows)}: {sp[:40]}")
+                out_frames.extend(pipe(
+                    prompt=sp,
+                    negative_prompt=spec.negative_prompt or None,
+                    video=ctrl,
+                    mask=mask,
+                    # ON = preserve (pull every window toward the source's look).
+                    # OFF = replace: let the style prompt own appearance unopposed,
+                    # which is what a RESTYLE wants (a photographic anchor fights a
+                    # non-photographic style prompt).
+                    reference_images=([anchor] if use_anchor else None),
+                    conditioning_scale=conditioning_scale,
+                    height=h, width=w, num_frames=n,
+                    num_inference_steps=spec.steps if steps < 0 else steps,
+                    guidance_scale=spec.guidance if guidance < 0 else guidance,
+                    # Same seed for every window AND every style: any difference you
+                    # see is the prompt or the control, never the sampler.
+                    generator=(torch.Generator(device="cuda").manual_seed(seed)
+                               if seed >= 0 else None),
+                    output_type="pil",
+                ).frames[0][:short])
+            per_style.append(out_frames)
+            write_mp4(out_frames, fps, out_dir / f"restyled_{si:02d}.mp4")
+            log.info(f"[refine] style {si + 1} done: {len(out_frames)} frames")
+        out_frames = per_style[0]
         secs = time.time() - t0
 
         write_mp4(frames, fps, out_dir / "source.mp4")
-        write_mp4(out_frames, fps, out_dir / "refined.mp4")
-        log.info(f"[refine] {len(out_frames)} frames in {secs:.0f}s")
+        # The control video, concatenated, so the report shows what actually steered it.
+        write_mp4([f for c in controls for f in c][:len(frames)], fps,
+                  out_dir / "control.mp4")
+        log.info(f"[refine] {len(style_prompts)} style(s) x {len(frames)} frames "
+                 f"in {secs:.0f}s")
 
         results = [
-            build_clip_result(spec, "source (chained, drifted)", frames, None, None, 0.0, fps=fps),
-            build_clip_result(spec, f"refined: {style_prompt}", out_frames, None, None, secs, fps=fps),
+            build_clip_result(spec, "source (the chained clip)", frames, None, None,
+                              0.0, fps=fps),
+            build_clip_result(spec, f"control ({control} map)",
+                              [f for c in controls for f in c][:len(frames)],
+                              None, None, 0.0, fps=fps),
         ]
+        for sp, of in zip(style_prompts, per_style):
+            results.append(build_clip_result(spec, sp, of, None, None,
+                                             secs / len(style_prompts), fps=fps))
         await flyte.report.replace.aio(render_grid(
             [r.prompt for r in results], [spec], results,
-            title="VACE refine: independent windows, one anchor",
-            meta=(f"{len(out_frames)} frames · {-(-len(frames) // n)} windows · "
-                  f"anchor = source frame 0 · {secs:.0f}s"),
+            title=(f"Chain -> restyle: {len(style_prompts)} styles, "
+                   f"{control} control, anchor {'ON' if use_anchor else 'OFF'}"),
+            meta=(f"{len(frames)} frames · {len(windows)} independent windows · "
+                  f"seed={seed} · {secs:.0f}s"),
         ))
         await flyte.report.flush.aio()
 
@@ -775,26 +854,33 @@ async def anchored(
 @orch_env.task(report=True)
 async def refine(
     source_clip_uri: str,
-    style_prompt: str,
+    style_prompts: list[str],
     steps: int = -1,
     guidance: float = -1.0,
     seed: int = 1234,
     conditioning_scale: float = 1.0,
     keep_pct: float = 8.0,
+    control: str = "edges",
+    use_anchor: bool = True,
 ) -> RestyleRun:
-    """Chain first, then refine: re-render a chained clip against a single anchor.
+    """Chain first, then re-render the whole clip in independent windows.
+
+    `--use_anchor`    = PRESERVE the source look (measured: doesn't work, see docs)
+    `--no-use_anchor` = REPLACE it with `--style_prompts`. The drift stops mattering
+                        because every window is being restyled anyway.
 
         flyte run vace.py refine \
             --source_clip_uri s3://flyte-data/.../chain_wan22-ti2v-5b_xxxx \
-            --style_prompt "a person in a long red coat walking away down a wet neon street at night, cinematic"
+            --style_prompts '["... anime style ...", "... photorealistic ..."]' 
 
     See `vace_refine` for why the windows are independent and what that trades away.
     """
     vw = await fetch_weights.override(short_name=f"fetch {VACE_MODEL}")(VACE_MODEL)
     return await vace_refine.override(short_name="vace refine")(
-        vw, flyte.io.Dir.from_existing_remote(source_clip_uri), style_prompt,
+        vw, flyte.io.Dir.from_existing_remote(source_clip_uri), style_prompts,
         steps=steps, guidance=guidance, seed=seed,
         conditioning_scale=conditioning_scale, keep_pct=keep_pct,
+        control=control, use_anchor=use_anchor,
     )
 
 

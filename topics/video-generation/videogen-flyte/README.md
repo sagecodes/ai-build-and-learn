@@ -91,6 +91,17 @@ Open the run's **Report** tab. The clips play inline.
 
 ## The experiments
 
+> **📍 Picking this up cold? Read
+> [Next runs, in the order worth doing them](#next-runs-in-the-order-worth-doing-them).**
+> Run #1 (⭐ START HERE) is written to be actionable without any other context: the
+> problem, the idea, the file to change, the exact command, and the numbers that decide
+> whether it worked. Everything below is what got us there.
+>
+> **State as of 2026-07-17 ~00:30:** SkyReels-14B is running overnight
+> (`rfwrxwmph7s5bhf7mcn5`, 193 frames, ~4h, expect ~5am). VACE-14B is **cached** at
+> 75.1GB, untested. The depth restyle matrix (anime + photoreal over the 8s chain) is
+> **done**; the edges arm was aborted because depth had already won on the numbers.
+
 Each is a section below. Status is honest: **verified** means a clip came out and we
 looked at it, not that a task went green.
 
@@ -124,7 +135,10 @@ defaults are demo-sized rather than the model cards' (see [the models](#the-mode
 |---|---|---|---|---|
 | `--strength` | `long_video.py polish` | `0.4` | 0.2-0.8 | **The most important one.** True v2v: how far to move off the source frames. Too low = nothing changes; too high = each window drifts off alone and the seams come back. |
 | `--renorm` | `long_video.py long_video` | `0.0` (off) | 0-1 | Re-anchors each hand-off frame's per-channel mean/std to chunk 1's. Helps in proportion to how **stationary** the scene is: candle **-65%** contrast creep, boat -46%, walking person **no help at all**. |
-| `--keep_pct` | `vace.py restyle` | `8.0` | 4-15 | Edge-map density (percentile threshold). Lower = only strong contours, VACE freer to invent; higher = more structure, VACE more constrained. **8% is tuned**: a fixed threshold gave a 79% white map that VACE couldn't read. |
+| `--control` | `vace.py restyle` / `refine` | `edges` | `edges` \| `depth` | **Reach for `depth` first.** 99MB model, same render time, and a far steadier signal (control motion **1.48** vs edges' ~10). Edges see boundaries; depth sees objects. |
+| `--style_prompts` | `vace.py restyle` / `refine` | — | JSON list | A **list**: every style renders against the same control in one task, one grid. The control gives shape+motion, the prompt gives identity. |
+| `--use_anchor` / `--no-use_anchor` | `vace.py refine` | on | flag | ON = *preserve* the source look (measured: doesn't work). OFF = *replace* it with the style prompt — what a restyle wants, since a photographic anchor fights a stylised prompt. |
+| `--keep_pct` | `vace.py restyle` (edges only) | `8.0` | 4-15 | Edge-map density (percentile threshold). Lower = only strong contours, VACE freer to invent; higher = more structure, VACE more constrained. **8% is tuned**: a fixed threshold gave a 79% white map that VACE couldn't read. |
 | `--conditioning_scale` | `vace.py restyle` | `1.0` | 0.5-1.5 | How hard VACE is pulled toward the control video. |
 | `--use_anchor` / `--no-use_anchor` | `vace.py anchored` | on | flag | Pass `reference_images` to every chunk. `--no-use_anchor` is the control arm. |
 | `--lora_scale` | `compare_pipeline.py animate` | `1.0` | 0-1.5 | LoRA fusion strength. |
@@ -939,6 +953,54 @@ A restyle that tracks its control should land near the **source's** motion numbe
 5.56 vs 5.48 is what "it followed the video" looks like numerically. 13.62 is what
 "it ignored the video" looks like.
 
+### Depth control beats edges, and it costs 99MB (`--control depth`)
+
+`--control edges` is free numpy. `--control depth` runs
+[Depth-Anything-V2-Small](https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf)
+— **99MB**, ungated, 0.1% of the SkyReels download — and it is plainly better:
+
+| | edges | depth |
+|---|---|---|
+| control video motion* | ~10-11 | **1.48** |
+| a fox in tall grass | **invisible** at any threshold | seen as a shape |
+| a **noisy** source (the sd-turbo boat, motion 62.9) | would drown in the noise | **ignores it entirely** |
+| render time | 320s | 320s (identical) |
+
+<sub>*mean abs luma delta between consecutive control frames. Lower = a steadier signal
+for VACE to follow.</sub>
+
+The reason isn't tuning, it's kind: **an edge map knows about boundaries, a depth map
+knows about objects.** In tall grass the texture *is* the gradient, so edges can never
+separate the fox from the field. Depth sees a shape standing in front of a field. Same
+reason depth shrugs off a noisy source: noise has no geometry.
+
+### One control, many styles: what VACE control actually does
+
+`--style_prompts` takes a **list**, and every style renders against the *same* control
+video in one task — one model load, one depth pass, one report grid, one seed. Verified
+2026-07-16 on the two-boat clip:
+
+| style | motion |
+|---|---|
+| depth control | 1.48 |
+| pen & ink | **1.05** |
+| watercolour | **1.09** |
+| photorealistic | **6.64** |
+
+Two findings:
+
+1. **The control supplies shape and motion; the prompt supplies identity.** Same two
+   drifting shapes rendered as ink boats, watercolour boats, photoreal boats — and,
+   when the prompt said so, as **two foxes in grass**, moving exactly like the boats.
+   That's motion transfer: puppet any content through any motion. It also explains the
+   earlier failure symmetrically — a prompt with no subject ("the same scene as a pen
+   and ink sketch") has shape but no identity, so the model invents a landscape to
+   fill the hole.
+2. **Stylized targets are ~6x more temporally stable than photorealistic ones**
+   (1.05/1.09 vs 6.64). Flat rendering has little high-frequency detail to flicker;
+   photorealism must reinvent specular highlights and water texture every frame. Handy,
+   because the stable choice is also usually the good-looking one.
+
 Three more things, learned before writing a line of it, all in `vace.py`'s docstring:
 
 1. **The mask semantics are backwards from intuition**: black (0) = *keep* this frame,
@@ -1058,6 +1120,45 @@ The idea is still sound — a global pass *is* the right shape for fixing drift 
 per-hop correction can't. It just needs a tool that starts from the pixels rather than
 from their edges. See [`anchored`](#anchored-the-experiment-that-tests-the-actual-claim)
 for the version that keeps the real frame.
+
+#### ✅ But as a RESTYLE (`--no-use_anchor`) it works, and it's the best-looking thing here
+
+The fix was to stop trying to *preserve*. Same task, anchor **off**, depth control, a
+real style prompt — run on the 8s no-turn+renorm walking-person chain:
+
+**The drift is simply gone**, because every frame gets repainted. The source's contrast
+creep and softening stop existing when the whole clip becomes a cel-shaded night street.
+The chain supplied motion; the restyle supplied everything else. Within a window it is
+also *smoother* than the source (motion **4.08** vs **8.66**).
+
+**And it introduced a new problem — the windows pop:**
+
+| seam | source chain | anime restyle (depth) |
+|---|---|---|
+| frame 49 | 1.78x | **6.07x** |
+| frame 98 | 0.26x | **4.99x** |
+| frame 147 | 1.09x | **4.19x** |
+
+We predicted these would be *milder* than the earlier 3.4x (depth is a steadier signal,
+flat styles have less to flicker). They are **worse**. The frames show why: a depth map
+encodes **geometry only**, so each independent window re-invents every appearance detail
+— shopfronts, signs, architecture, the coat's colour. Same prompt, same seed, different
+furniture. The figure and layout carry across (that's geometry); the *set dressing* does
+not.
+
+Note the jumps land exactly on 49/98/147. **Step functions at window boundaries, not
+gradual** — that rules out lighting drift and pins it on the windowing.
+
+**So the trade is now measured, not predicted:**
+
+| | drift | seams |
+|---|---|---|
+| the chain | creeps, monotonically | smooth (0.26-1.78x) |
+| windowed restyle | **none** | **pops (4-6x)** |
+
+And the irony: `--no-use_anchor` is what removed appearance continuity *between* windows.
+Turning it off was right for fighting the style prompt and wrong for holding a style
+together. Which points straight at the fix below.
 
 ### `anchored`: the experiment that tests the actual claim
 
@@ -1255,6 +1356,115 @@ judgeable: identity drift and object-count errors are obvious across six frames 
 by side, and genuinely easy to miss while a 3-second clip loops past you.
 
 `python prompts.py` prints the full suite with the failure mode for each.
+
+### Next runs, in the order worth doing them
+
+Each of these targets something we **measured**, not something we guessed. Ordered by
+payoff per hour.
+
+**1. ⭐ START HERE — bootstrap the style anchor from window 1's own output.**
+*(~20 lines in `vace.py`, one 44-min run. Sage's idea, 2026-07-17.)*
+
+**The problem, in one line:** the windowed restyle looks great but the seams pop at
+**6.07x / 4.99x / 4.19x** (frames 49/98/147) because a depth map carries *geometry only*,
+so each independent window re-invents every appearance detail — shopfronts, signs, the
+coat's colour. Same prompt, same seed, different set dressing.
+
+**The idea:** restyle window 1 with no anchor, then **grab its first frame and use that
+as `reference_images` for every remaining window.** All windows get pulled toward the
+same styled scene, so the set dressing stops changing at the boundaries.
+
+```
+window 1: reference_images=None            -> let the style emerge freely
+          take out[0]  ==> STYLE ANCHOR
+window 2: reference_images=[style anchor]  ┐
+window 3: reference_images=[style anchor]  ├─ all anchored to the SAME styled frame
+window 4: reference_images=[style anchor]  ┘
+```
+
+**Why this beats generating a separate style reference** (the other obvious option):
+an sdxl-turbo "anime street" is not necessarily what VACE-1.3B produces for "anime
+street", so anchoring to another model's interpretation makes the anchor **fight** the
+generation — which is exactly how the *preserve* attempt failed (a photographic anchor
+vs a stylised prompt -> the coat went black). Window 1's own output is by definition
+what VACE does with that prompt. **Self-consistent: nothing to fight.**
+
+**Why it does not re-introduce drift:** every window anchors to **window 1**, not to its
+predecessor. That's a **star, not a chain** — one hop for everyone, so error cannot
+compound. Compounding is the entire reason the original chain drifted
+([exposure bias](#what-we-hit-has-a-name-exposure-bias---renorm)).
+
+**Where to change it:** `vace.py` -> `vace_refine`. The window loop already has
+`reference_images=([anchor] if use_anchor else None)`; today `anchor` is the *source's*
+frame 0. Make it: window 0 passes `None`, capture `out[0]` from window 0's result, and
+pass that for windows 1..N. Probably a third mode (`anchor="none"|"source"|"style"`)
+rather than a bool, since `use_anchor` is already overloaded.
+
+**The command** (source = the 8s no-turn+renorm chain, the best one we have):
+
+```bash
+.venv/bin/flyte run vace.py refine \
+  --source_clip_uri s3://flyte-data/ws/video-generation/development/rn8gfbnd474hcsv66rbs/c495qm4qy39ku3vwsg5wjpsf4/1/c33ab18f32a023a9928b6b127dc30cca/chain_wan22-ti2v-5b_jwe8fo1w \
+  --control depth --style_prompts '["a person in a long coat walking away down a city street at night, cel-shaded anime style, bold outlines, flat colours, studio animation"]'
+```
+
+**How to know if it worked — the numbers to beat.** Measure the frame-to-frame delta at
+the window boundaries vs the clip average (the probe used all night):
+
+| seam | source chain | anime restyle, anchor OFF | style-anchored (target) |
+|---|---|---|---|
+| frame 49 | 1.78x | 6.07x | **-> ~1x** |
+| frame 98 | 0.26x | 4.99x | **-> ~1x** |
+| frame 147 | 1.09x | 4.19x | **-> ~1x** |
+
+A seam ratio near **1.0x means the boundary is indistinguishable from ordinary motion**.
+Also check it did not cost drift: overall motion should stay near the anchor-off run's
+**4.08** (the source chain is 8.66), and the clip should still look fully anime — if the
+style washes toward photographic, the anchor is fighting the prompt again and the
+bootstrap failed.
+
+**If it only half-works**, the fallbacks are #2 (81-frame windows = fewer seams) and #3
+(193 frames in one window = no seams at all, which deletes the problem instead of
+mitigating it).
+
+**2. Use the model's real window: 81 frames, not 49.** *(one number, free)*
+
+Our VACE spec runs `num_frames=49`. The card's native length is **81**. We have been
+running *short* the whole time, for no reason but an inherited demo default. At 81:
+193 frames needs **3 windows instead of 4** (one fewer seam) and every window is
+in-distribution.
+
+**3. The swing: 193 frames in ONE window — zero seams.** *(30-60 min, may fail)*
+
+Checked the source: `WanVACEPipeline` has **no frame cap**. It only requires
+`(num_frames - 1) % 4 == 0` (the VAE's 4x temporal compression) and *rounds* rather than
+raising. 49 / 81 / 121 / 193 are all structurally valid. So:
+
+- **no windows -> no seams at all**, and the whole anchor question becomes moot
+- risk: 193 is **2.4x** the trained length. Expect degradation or looping.
+- cost: attention is O(n²) in sequence length; 193 frames is ~3.7x the tokens of 49, so
+  somewhere between 3.7x and 13x the time.
+
+Cheap to find out, and if it works it beats every fix above by deleting the problem.
+
+**4. Overlapping windows + cross-fade.** *(the conventional answer)*
+
+If (3) is too slow and (1) only partly works: overlap the windows and blend the seam.
+Standard practice, costs redundant frames.
+
+**5. VACE-14B.** *(cached at 75.1GB, ~3h for a chain, ~45 min for one 49-frame clip)*
+
+Same pipeline class, one-line spec change, already downloaded. The open question is
+whether 1.3B is the ceiling — it plainly was for `refine` (a 1.3B re-rendering a 5B's
+clip lost the red coat). Worth one 49-frame restyle before committing to a 3h chain.
+
+**6. `polish` (true v2v with `strength`).** *(built, unrun; needs a 29GB fetch)*
+
+`WanVideoToVideoPipeline` takes real frames + a `strength` knob — the img2img-style
+touch-up VACE structurally cannot do (its mask is binary). Blocked on a VAE mismatch:
+it needs a **Wan 2.1** checkpoint (8x spatial / z_dim 16); the 2.2 TI2V-5B ships a
+16x / z_dim 48 VAE and dies with `tensor a (52) vs b (104)`. So it runs on the 1.3B,
+which is exactly the quality problem above.
 
 ### Still TODO
 
