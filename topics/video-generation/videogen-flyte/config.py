@@ -61,6 +61,14 @@ VIDEO_SPEC = (
     "av",
     # imageio backs diffusers' plain export_to_video for the no-audio models.
     "imageio",
+    # ftfy is an *undeclared hard dependency* of SkyReelsV2DiffusionForcingPipeline,
+    # and diffusers won't tell you: it does `if is_ftfy_available(): import ftfy` at
+    # module scope but then calls `ftfy.fix_text(text)` UNCONDITIONALLY when cleaning
+    # the prompt, so a missing ftfy surfaces as `NameError: name 'ftfy' is not defined`
+    # at generation time, not as an ImportError at load. Wan guards the same call site
+    # (`if is_ftfy_available()`), which is why Wan runs fine without it and SkyReels
+    # does not. Cheap pure-python wheel; just install it.
+    "ftfy",
     # config.py imports kubernetes.client at module top for the app pod template,
     # and task pods import config too, so both images need it.
     "kubernetes",

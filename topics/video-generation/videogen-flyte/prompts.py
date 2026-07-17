@@ -20,6 +20,10 @@ So every prompt here targets a failure mode that only exists in time:
   - **Text stability.** Text-in-image is hard; text-in-video is brutal, because the
     letters must be legible *and* not reshuffle every frame. Expect failure. That's
     the point: it's the clearest quality separator in the grid.
+  - **Articulated bodies.** A human mid-trick is the prompt that grows a third leg.
+    Limbs have to stay attached, stay counted, and move like a skeleton rather than
+    like cloth, and the pose the model is least sure about is exactly the one the
+    prompt asks for.
   - **Motion magnitude.** Wan in particular drifts toward near-static clips (which is
     exactly what its long default negative prompt is fighting). A prompt with fast
     motion tells you whether you're getting video or an animated photograph.
@@ -101,6 +105,20 @@ SUITE: list[Prompt] = [
         watch_for="Brutal, and the clearest separator in the grid. Legible text is a "
                   "win; text that stays the SAME text across all frames is a bigger "
                   "one. Most models will reshuffle the letters every frame.",
+    ),
+    Prompt(
+        text="a skateboarder in a grey hoodie rides toward the camera in a concrete "
+             "skatepark, crouches, and pops a kickflip off a ledge, the board spinning "
+             "once beneath his feet before he lands and rolls away, low afternoon sun",
+        axis="articulated human body + limb coherence + a scripted trick",
+        watch_for="A whole body in fast motion, which is a different failure from the "
+                  "face prompt: watch the LIMBS, not the identity. Count the legs at "
+                  "the apex of the jump; models grow a third one exactly when the pose "
+                  "gets unusual. Then check the feet actually leave the board and the "
+                  "board actually rotates (most models slide it, or spin it without "
+                  "ever separating it from the shoes). Landing is the tell: if he "
+                  "teleports back onto the deck, the model has no physics, just a "
+                  "texture of 'skateboarding'.",
     ),
     Prompt(
         text="three paper boats float down a rain gutter, and the middle one tips "

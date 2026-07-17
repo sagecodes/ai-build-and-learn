@@ -51,7 +51,13 @@ import flyte.io
 import flyte.report
 
 from config import cpu_env, gpu_env, orch_env
-from models import DEFAULT_IMAGE_MODEL, get_image_spec, get_spec, resolve_models
+from models import (
+    DEFAULT_IMAGE_MODEL,
+    get_image_spec,
+    get_lora,
+    get_spec,
+    resolve_models,
+)
 from prompts import get_suite
 from videogen_core import (
     ClipResult,
@@ -61,6 +67,7 @@ from videogen_core import (
     load_pipeline,
     pil_to_data_uri,
     prepare_gpu,
+    render_frames,
     render_grid,
     render_status,
     timed_generate,
@@ -107,12 +114,53 @@ class ModelRun:
 # snapshot_download resumes from the .incomplete files, so a restart just
 # re-establishes the connection and keeps every byte so far. A subprocess (not a
 # thread) because a blocked socket can't be interrupted in-thread.
+#
+# Two things the watchdog gets wrong, both observed on the skyreels-14b pull:
+#  1. Each restart ORPHANS the in-flight `.incomplete` rather than reusing it, so the
+#     directory grows well past the real repo size (144.1GB on disk for an 80.4GB
+#     model, after 4 restarts). `_strip_staging` cleans that up before upload.
+#  2. Because `_dir_size` counts the staging dir, the orphans register as *progress*.
+#     The throughput heartbeat sailed past 80GB to 144GB, and the stall detector was
+#     partly watching re-downloaded bytes rather than new ones. It still works (a true
+#     flatline is still a flatline) but do not read the GB numbers as "of the model".
 
 def _dir_size(path) -> int:
     try:
         return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file())
     except OSError:
         return 0
+
+
+# huggingface_hub stages every download as `<local_dir>/.cache/huggingface/download/
+# **/*.incomplete` and moves it into place on completion. That staging dir is where
+# resume lives, so it MUST survive a watchdog restart; it must NOT survive into the
+# uploaded Dir.
+_HF_STAGING = ".cache"
+
+
+def _strip_staging(dest: Path, key: str) -> None:
+    """Delete HF's staging dir before the Dir is uploaded.
+
+    Measured on the skyreels-v2-df-14b pull (2026-07-16), which needed four watchdog
+    restarts: the finished repo was the expected **80.39GB in 18 safetensors**, but
+    the directory on disk was **144.1GB** because each killed attempt left its partial
+    behind (33 orphaned `.incomplete` files, 63.7GB). Resume works (the model came out
+    complete and correct); the orphans are simply never cleaned up.
+
+    Uploading them is not a cosmetic problem. `Dir.download()` in the GPU task would
+    pull all 144GB into a pod with disk=150Gi and spend ~10 minutes transferring
+    garbage. So: drop the staging dir once the download is done.
+    """
+    import shutil
+
+    staging = Path(dest) / _HF_STAGING
+    if not staging.exists():
+        return
+    junk = _dir_size(staging)
+    shutil.rmtree(staging, ignore_errors=True)
+    if junk:
+        log.info(f"[{key}] dropped {junk / 1e9:.1f} GB of HF staging/.incomplete files "
+                 f"before upload")
 
 
 def _snapshot_worker(repo, local_dir, token, allow_patterns, ignore_patterns) -> None:
@@ -193,12 +241,34 @@ def _download_with_watchdog(repo, dest, token, allow_patterns, ignore_patterns, 
 # Tasks: fetch (cached), then generate
 # ──────────────────────────────────────────────────────────────────────────────
 
-@cpu_env.task(cache="auto", retries=2)
+# ── Why the weight caches are version-PINNED, not `cache="auto"` ────────────────
+#
+# `cache="auto"` derives the cache version from the task's CODE, so editing anything
+# its hash covers silently invalidates every cached download. That's a sane default
+# for a cheap task and a disaster for an 80GB one: we re-downloaded
+# skyreels-v2-df-14b in full (~15 min) because of an unrelated edit to a LoRA helper
+# elsewhere in this module.
+#
+# Pinning to an explicit version decouples "the weights on disk" from "the code that
+# fetched them", which is what we actually want: the bytes of a HF repo at a given
+# revision do not change when we refactor a helper. Inputs (model_key) are still part
+# of the key, so every model keeps its own entry.
+#
+# BUMP THIS when you change what gets DOWNLOADED (allow/ignore patterns, the repo id,
+# the staging cleanup). That is now a deliberate act rather than an accident of
+# editing a neighbouring function.
+_WEIGHTS_CACHE_VERSION = "v2-strip-staging"
+
+_WEIGHTS_CACHE = flyte.Cache(behavior="override", version_override=_WEIGHTS_CACHE_VERSION)
+
+
+@cpu_env.task(cache=_WEIGHTS_CACHE, retries=2)
 async def fetch_weights(model_key: str) -> flyte.io.Dir:
     """Snapshot a video model's HF repo into a Dir and return it. Cached forever.
 
-    `cache="auto"` keys on (model_key, task version), so a 95GB download happens
-    ONCE: later runs get the Dir straight from the blob store and the GPU task
+    The cache is version-PINNED (see above), keyed on model_key, so a 95GB download
+    happens ONCE and survives unrelated code edits: later runs get the Dir straight
+    from the blob store and the GPU task
     pulls it in-cluster instead of re-hitting HuggingFace. Runs on a CPU pod so no
     GPU sits idle for the hour a cold LTX-2 pull can take.
 
@@ -218,10 +288,14 @@ async def fetch_weights(model_key: str) -> flyte.io.Dir:
         _download_with_watchdog, spec.repo, dest, _os.environ.get("HF_TOKEN"),
         spec.allow_patterns, spec.ignore_patterns, model_key,
     )
+    # Drop HF's .incomplete staging before this becomes a Dir (see _strip_staging):
+    # otherwise a watchdog-restarted pull uploads tens of GB of orphaned partials.
+    _strip_staging(dest, model_key)
+    log.info(f"[{model_key}] repo on disk: {_dir_size(dest) / 1e9:.1f} GB")
     return await flyte.io.Dir.from_local(str(dest))
 
 
-@cpu_env.task(cache="auto", retries=2)
+@cpu_env.task(cache=_WEIGHTS_CACHE, retries=2)
 async def fetch_image_weights(model_key: str) -> flyte.io.Dir:
     """Same, for the small text-to-image model that makes an I2V first frame.
 
@@ -238,8 +312,12 @@ async def fetch_image_weights(model_key: str) -> flyte.io.Dir:
 
     await _asyncio.to_thread(
         _download_with_watchdog, spec.repo, dest, _os.environ.get("HF_TOKEN"),
-        (), spec.ignore_patterns, model_key,
+        spec.allow_patterns, spec.ignore_patterns, model_key,
     )
+    # Drop HF's .incomplete staging before this becomes a Dir (see _strip_staging):
+    # otherwise a watchdog-restarted pull uploads tens of GB of orphaned partials.
+    _strip_staging(dest, model_key)
+    log.info(f"[{model_key}] repo on disk: {_dir_size(dest) / 1e9:.1f} GB")
     return await flyte.io.Dir.from_local(str(dest))
 
 
@@ -251,6 +329,8 @@ async def make_first_frames(
     width: int = 832,
     height: int = 480,
     seed: int = 1234,
+    lora: str = "",          # registry key | HF repo id | s3:// Dir (see `animate`)
+    lora_scale: float = 1.0,
 ) -> list[str]:
     """Generate one starting image per prompt, returned as JPEG data URIs.
 
@@ -270,18 +350,45 @@ async def make_first_frames(
     spec = get_image_spec(image_model)
     local = await weights.download()
 
+    # Resolve --lora into (what to load, which file, what token to prepend). Three
+    # accepted forms, in priority order:
+    #   1. a LORAS registry key ("papercut")     -> HF repo + weight_name + trigger
+    #   2. an s3:// Dir URI                      -> a LoRA trained by the image-gen
+    #      demo's `train_lora`, read cross-project via from_existing_remote (both
+    #      projects share the same s3://flyte-data bucket, so nothing is re-uploaded)
+    #   3. any other HF repo id                  -> loaded as-is, no trigger
+    lora_local = None
+    lora_weight_name = None
+    lspec = get_lora(lora) if lora else None
+    if lspec is not None:
+        lora_local, lora_weight_name = lspec.repo, lspec.weight_name
+    elif lora.startswith("s3://"):
+        lora_local = await flyte.io.Dir.from_existing_remote(lora).download()
+    elif lora:
+        lora_local = lora
+
     await flyte.report.replace.aio(
         render_status("Generating first frames",
-                      f"{spec.repo} · {len(prompts)} prompt(s)")
+                      f"{spec.repo} · {len(prompts)} prompt(s)"
+                      + (f" · LoRA {lora} @ {lora_scale}" if lora else ""))
     )
     await flyte.report.flush.aio()
 
     free_gpu_memory()
     pipe = None
     try:
-        pipe = load_image_pipeline(spec, model_path=local)
+        pipe = load_image_pipeline(spec, model_path=local, lora_path=lora_local,
+                                   lora_scale=lora_scale,
+                                   lora_weight_name=lora_weight_name)
         uris: list[str] = []
         for i, p in enumerate(prompts):
+            # A style LoRA is trained to fire on a token. Without it the adapter is
+            # loaded and fused and does almost nothing, which looks like "the LoRA
+            # is broken" when it's really "you didn't say the magic word".
+            if lspec is not None and lspec.trigger.lower() not in p.lower():
+                p = f"{lspec.trigger}, {p}"
+                log.info(f"[{image_model}] prompt {i}: prepended trigger "
+                         f"{lspec.trigger!r}")
             g = torch.Generator(device="cuda").manual_seed(seed) if seed >= 0 else None
             kw = dict(prompt=p, num_inference_steps=spec.steps, width=width,
                       height=height, generator=g)
@@ -293,6 +400,16 @@ async def make_first_frames(
             uris.append("data:image/jpeg;base64,"
                         + base64.b64encode(buf.getvalue()).decode("ascii"))
             log.info(f"[{image_model}] first frame {i + 1}/{len(prompts)}")
+
+            # Re-render after every frame, so the report fills in as they land
+            # instead of staying on the status card until the task ends.
+            await flyte.report.replace.aio(render_frames(
+                prompts[: len(uris)], uris,
+                title="First frames (these get animated next)",
+                meta=f"{spec.repo} · {spec.steps} steps · {width}x{height} · "
+                     f"seed={seed} · {len(uris)}/{len(prompts)}",
+            ))
+            await flyte.report.flush.aio()
         return uris
     finally:
         pipe = None
@@ -447,7 +564,14 @@ async def _to_results(run: ModelRun) -> list[ClipResult]:
 
     from videogen_core import frame_strip_data_uri, video_data_uri
 
-    if not run.clips:
+    # A model that failed EVERY prompt still returns a Dir: generate_for_model calls
+    # Dir.from_local() unconditionally, so the Dir exists but is empty. Downloading an
+    # empty Dir is not a no-op in flyte, it raises DownloadQueueEmpty (the parallel
+    # reader treats a zero-object queue as an error), and since that fires in the
+    # PARENT, one all-failed model takes the whole comparison down and throws away
+    # every other model's clips. So check for something to download, not just for a
+    # non-None Dir.
+    if not run.clips or not any(it.filename and not it.error for it in run.items):
         return [ClipResult(run.model_key, it.prompt, 0.0, error=it.error or "missing")
                 for it in run.items]
 
@@ -587,6 +711,7 @@ async def compare(
 @orch_env.task(report=True)
 async def animate(
     prompts: list[str],
+    motion_prompts: list[str] | None = None,
     models: list[str] | None = None,
     image_model: str = DEFAULT_IMAGE_MODEL,
     steps: int = -1,
@@ -595,10 +720,46 @@ async def animate(
     width: int = 832,
     height: int = 480,
     num_frames: int = -1,
+    lora: str = "",
+    lora_scale: float = 1.0,
 ) -> list[ModelRun]:
     """Image-to-video: generate a first frame per prompt, then animate it.
 
     prompt --(sd-turbo)--> first frame --(wan22-ti2v-5b)--> clip
+
+    The I2V pipeline is image-conditioned AND text-guided: it gets the image *and* a
+    prompt. By default the frame's prompt is reused for the animation, which is the
+    convenient default but not the best one, because the two prompts want different
+    things. A first-frame prompt describes a static composition ("a paper boat on a
+    rain puddle, 50mm"); an I2V prompt describes MOTION ("the boat drifts right,
+    ripples spread outward"). The composition is already settled by the time the
+    video model runs, so spending its prompt on scenery wastes the one lever you
+    have over movement.
+
+    `motion_prompts` (same length as `prompts`) separates them:
+
+        --prompts        '["a paper boat on a rain puddle at night, 50mm"]'
+        --motion_prompts '["the boat drifts slowly right as rain rings spread"]'
+
+    `lora` styles that first frame, which is the cheap way to get a fine-tuned look
+    MOVING: training a LoRA on a *video* model is an overnight job, while an image
+    LoRA is a few hundred MB (or minutes to train), and the video model then animates
+    whatever it is handed. The LoRA rides on the frame, not the motion, so it costs
+    nothing at video time. It takes three forms:
+
+        # 1. a built-in style (see models.LORAS). Nothing to train; runs today.
+        --image_model sdxl-turbo --lora papercut
+
+        # 2. your own, trained next door by the image-gen demo's `train_lora`
+        --image_model sdxl-turbo --lora s3://flyte-data/.../sdxl_lora_xxxx
+
+        # 3. any SDXL LoRA on the hub
+        --image_model sdxl-turbo --lora nerijs/pixel-art-xl
+
+    Use `--image_model sdxl-turbo`: these are SDXL adapters and sd-turbo is SD2.1, so
+    the shapes will not match. Registry LoRAs prepend their trigger word for you; a
+    raw repo id (form 3) does not have one, so put the trigger in the prompt yourself
+    or the adapter will load, fuse, and do nothing.
 
     This is the "join the two demos" path: the same trick the image-generation
     project does to make a picture, feeding the video model's I2V pipeline. The
@@ -617,11 +778,33 @@ async def animate(
             f"I2V-capable: wan22-ti2v-5b, ltx2-distilled, cogvideox-5b."
         )
 
+    # The frame's prompt is the animation's prompt unless you say otherwise.
+    video_prompts = motion_prompts or prompts
+    if len(video_prompts) != len(prompts):
+        raise ValueError(
+            f"motion_prompts must line up 1:1 with prompts "
+            f"({len(motion_prompts or [])} vs {len(prompts)})."
+        )
+
     ispec = get_image_spec(image_model)
+
+    # Fail before a 3GB download + a model load, not after: an SDXL adapter on an
+    # SD2.1 UNet dies deep in diffusers on a shape mismatch, which reads as a library
+    # bug rather than "wrong base model".
+    if lora:
+        lspec = get_lora(lora)
+        want = lspec.base if lspec else "sdxl"   # every LoRA we ship is SDXL
+        if ispec.base != want:
+            raise ValueError(
+                f"LoRA {lora!r} is a {want} adapter but --image_model {image_model} "
+                f"is {ispec.base}. Use --image_model sdxl-turbo."
+            )
+
     await flyte.report.replace.aio(render_status(
         "Image-to-video",
         f"Generating {len(prompts)} first frame(s) with {ispec.repo}, then animating "
-        f"with {', '.join(s.key for s in specs)}.",
+        f"with {', '.join(s.key for s in specs)}."
+        + (" Motion prompts are separate from the frame prompts." if motion_prompts else ""),
     ))
     await flyte.report.flush.aio()
 
@@ -629,6 +812,7 @@ async def animate(
     iw = await fetch_image_weights.override(short_name=f"fetch {image_model}")(image_model)
     first_frames = await make_first_frames.override(short_name=f"first frames {image_model}")(
         image_model, iw, prompts, width=width, height=height, seed=seed,
+        lora=lora, lora_scale=lora_scale,
     )
 
     weights = [
@@ -636,7 +820,7 @@ async def animate(
     ]
     runs: list[ModelRun] = await asyncio.gather(*[
         generate_for_model.override(short_name=f"animate {s.key}")(
-            s.key, w, prompts, steps=steps, guidance=guidance, seed=seed,
+            s.key, w, video_prompts, steps=steps, guidance=guidance, seed=seed,
             width=width, height=height, num_frames=num_frames, first_frames=first_frames,
         )
         for s, w in zip(specs, weights)
@@ -647,11 +831,12 @@ async def animate(
         all_results.extend(await _to_results(r))
 
     await flyte.report.replace.aio(render_grid(
-        prompts, specs, all_results,
+        video_prompts, specs, all_results,
         title="Image-to-video (generated first frame, then animated)",
         meta=f"first frame: {image_model} · animated by: "
-             f"{', '.join(s.key for s in specs)} · seed={seed}",
-        first_frames=dict(zip(prompts, first_frames)),
+             f"{', '.join(s.key for s in specs)} · seed={seed}"
+             + (" · motion prompts separate from frame prompts" if motion_prompts else ""),
+        first_frames=dict(zip(video_prompts, first_frames)),
     ))
     await flyte.report.flush.aio()
     return runs

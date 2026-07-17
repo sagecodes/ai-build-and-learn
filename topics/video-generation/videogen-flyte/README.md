@@ -61,6 +61,14 @@ Faster first signal (one model, ~29GB instead of ~63GB):
     --model_key wan21-t2v-1.3b --prompts '["a corgi astronaut, studio light"]'
 ```
 
+**Image-to-video** (make a first frame, then animate it) is a first-class entrypoint
+too. See [Image to video](#2-image-to-video):
+
+```bash
+.venv/bin/flyte run compare_pipeline.py animate \
+    --prompts '["a red fox trotting through tall grass, morning light"]'
+```
+
 Open the run's **Report** tab. The clips play inline.
 
 ---
@@ -73,9 +81,33 @@ Open the run's **Report** tab. The clips play inline.
 | `config.py` | Flyte images, environments, GPU resources, and the DGX Spark env vars |
 | `videogen_core.py` | Flyte-free: load, generate, encode mp4, **render the report** (this is where playback lives) |
 | `compare_pipeline.py` | the pipeline: `fetch_weights` (cached), `generate_for_model`, `compare`, `animate` |
+| `long_video.py` | **long video by chaining**: generate a clip, feed its last frame into the next |
+| `vace.py` | **video-to-video**: VACE restyle (edge-map control) + first-last-frame |
 | `app.py` | Gradio studio: a thin CPU launcher that submits runs and links the report |
 | `run_local.py` | host GPU, no Flyte. The fastest way to check a model loads at all |
 | `download_outputs.py` | pull the `.mp4` artifacts out of the devbox blob store |
+
+---
+
+## The experiments
+
+Each is a section below. Status is honest: **verified** means a clip came out and we
+looked at it, not that a task went green.
+
+| # | experiment | entrypoint | status | the headline |
+|---|---|---|---|---|
+| 1 | [Text to video](#1-text-to-video-the-model-comparison) | `compare` | ✅ verified | the grid: size vs licence vs architecture |
+| 2 | [Image to video](#2-image-to-video) | `animate` | ✅ verified | **the first frame is the bottleneck**: 6.2x less noise from one argument |
+| 3 | [Motion prompts](#the-i2v-model-is-prompted-too---motion_prompts) | `animate --motion_prompts` | ✅ verified | the prompt is a real lever: **2.5x** motion energy from the same frame |
+| 4 | [LoRA to animate](#4-lora-to-animate) | `animate --lora papercut` | ⚠️ built, **unrun** | fine-tuned look, moving, with no video training |
+| 5 | [Long video by chaining](#5-long-video-by-chaining-long_videopy) | `long_video.py` | ✅ verified | 8.0s from a 2s model. Works for **bounded** motion, **collapses** on a trajectory |
+| 6 | [SkyReels 14B](#6-skyreels-14b-long-video-done-properly) | `generate_one` | 🔄 **running now** | latent history vs our RGB hand-off. The control for #5 |
+| 7 | [Video to video (VACE)](#7-video-to-video-vace) | `vace.py restyle` | ⚠️ built, **unrun** | the only model that takes video IN. 19GB, the cheapest thing here |
+| 8 | [Krea v2v](#8-krea-realtime-video-researched-not-built) | — | 📋 researched | 14B Apache-2.0 causal. 51.8GB with an allowlist, 137.6GB without |
+
+The through-line, if you want one: **#5 breaks, #6 is the principled fix, #7 has the
+tool (`reference_images`) for the part #6 doesn't fix.** See
+[exposure bias](#what-we-hit-has-a-name-exposure-bias---renorm).
 
 ---
 
@@ -246,6 +278,40 @@ Video repos ship several mutually redundant copies of the same model, so a naive
 So the patterns in `models.py` are a correctness requirement, not an optimization,
 and `download_gb` in the table above is the *measured* size of what we actually pull.
 
+### It bites the image models too (this one shipped broken)
+
+The first-frame models (`IMAGE_MODELS`) had **no patterns at all** until 2026-07-16,
+and it cost us a real run: an `--image_model sdxl-turbo` job sat at 47GB and climbing
+before stalling. `stabilityai/sdxl-turbo` is **55.5GB**, and ships *four* redundant
+copies of one model:
+
+| | size | usable by `from_pretrained`? |
+|---|---|---|
+| `sd_xl_turbo_1.0.safetensors` | 13.9GB | no (single-file fp32) |
+| `sd_xl_turbo_1.0_fp16.safetensors` | 6.9GB | no (single-file fp16) |
+| `unet/model.onnx_data` + friends | ~13.6GB | no (ONNX export) |
+| `unet/diffusion_pytorch_model.safetensors` + friends | ~13.8GB | yes (fp32 diffusers) |
+| `unet/diffusion_pytorch_model.fp16.safetensors` + friends | **6.9GB** | **yes, and it's what we load** |
+
+We load fp16, so `_FP16_DIFFUSERS` allowlists the last set: **6.9GB instead of 55.5GB**.
+`sd-turbo` had the same disease (13.0GB naive -> **2.6GB**), and both specs' old
+`download_gb` values (14.4 and 5.2) were simply wrong. Verified after the fix: the pull
+reports `Fetching 20 files` and stops at 6.9GB.
+
+**The gotcha: `allow_patterns` and `variant` are a pair.** Keeping only
+`*.fp16.safetensors` means `from_pretrained` must be told `variant="fp16"`, or it goes
+looking for the fp32 filenames you deliberately didn't download and dies. If you add an
+image model, set both or neither.
+
+**How the image-gen demo does it, and why we differ.** `topics/image-generation` solves
+the same problem with one *global denylist* in `fetch_weights` (drop `*.onnx`, `*.bin`,
+`*.fp16.safetensors`, `sd_xl_*.safetensors`, `flux1-*.safetensors`, ...), keeping the
+**fp32** components and casting to bf16 on load. That works, and it's less typing per
+model. The trade is that a denylist has to enumerate every new repo's junk by name, so
+a model whose single-file checkpoint isn't in the list slips through silently and you
+eat the extra copy. An allowlist fails the other way: it fails *loudly* at load time,
+which on a box where a 55GB mistake costs 11 minutes is the direction you want to fail.
+
 `fetch_weights` is `cache="auto"`, keyed on `(model_key, task version)`, so a 95GB
 download happens **once, ever**. It runs on a CPU pod so no GPU idles for the hour a
 cold LTX-2 pull can take, and it wraps `snapshot_download` in a throughput watchdog
@@ -261,7 +327,32 @@ would restart the whole download from zero.
 
 ---
 
-## Image to video
+## 1. Text to video: the model comparison
+
+The original demo, and still the backbone: one prompt, N models, one grid report with
+clips that play inline.
+
+```bash
+.venv/bin/flyte run compare_pipeline.py compare \
+    --prompts '["a red panda barista pouring latte art, steam rising, cozy cafe, 50mm"]' \
+    --models '["wan22-ti2v-5b","ltx2-distilled"]'
+```
+
+Each model is its own GPU task, so it loads once and renders every prompt before the
+next model starts; on the single-GPU Spark they serialize at the scheduler, on a
+multi-GPU box they fan out for free. The interesting axes are in [the models](#the-models)
+table: size (1.3B -> 22B), licence (Apache-2.0 vs community vs non-commercial), and
+architecture (dense DiT vs MoE vs linear attention vs diffusion forcing).
+
+The headline pairing is `wan22-ti2v-5b` vs `ltx2-distilled`: Apache-2.0-and-small
+against frontier-with-synced-audio. And the most surprising number is in
+[Speed, honestly](#speed-honestly) — the 22B model beats the 1.3B by ~6x on wall clock,
+purely because it's distilled to 8 steps. Size is not the thing that costs you time;
+step count is.
+
+---
+
+## 2. Image to video
 
 Rather than make you find a source image, `animate` generates the first frame and
 then animates it:
@@ -280,6 +371,86 @@ kept and where it drifted. Only I2V-capable models are allowed (`wan22-ti2v-5b`,
 `ltx2-distilled`, `cogvideox-5b`); a text-only model fails fast with a message
 naming the ones that work.
 
+**Verified on the Spark** (2026-07-16, `sd-turbo` -> `wan22-ti2v-5b`, defaults,
+2 prompts): the whole run took **10m52s** end to end and produced two 832x480,
+49-frame @24fps clips. Both were coherent: the fox prompt gave a real trotting
+animal with a panning camera and intact grass texture.
+
+**The first frame is the bottleneck, and it is not close.** In that same run the
+"paper boat on a rain puddle, neon reflections" prompt came back structurally sound
+(the boats stay boats, the ripples read as ripples) but the water was harsh
+high-frequency noise and the neon a flat pink streak. That is not the video model
+failing; it is `sd-turbo` handing it a weak 512px frame, and `wan22-ti2v-5b`
+faithfully animating whatever it is given, flaws included.
+
+Re-running the **same prompt, same video model, same seed**, changing only the
+first-frame model:
+
+```bash
+.venv/bin/flyte run compare_pipeline.py animate \
+    --image_model sdxl-turbo \
+    --prompts '["a paper boat drifting on a rain puddle at night, neon reflections rippling"]'
+```
+
+| first frame | result | HF noise* |
+|---|---|---|
+| `sd-turbo` (512px) | harsh black-and-white noise for water, flat green boats | **34.03** |
+| `sdxl-turbo` | yellow origami boat, real depth of field, reflection, bokeh rain rings | **5.45** |
+
+<sub>*mean abs difference from a Gaussian-blurred copy of each frame, averaged over
+the clip. Lower is cleaner. Measured 2026-07-16, both runs at the shipped defaults.</sub>
+
+A **6.2x** drop in noise, from one changed argument. So: if a clip looks bad, **look
+at the frame before you blame the video model** (the report puts them side by side
+for exactly this reason). The video model is rarely the thing that's broken.
+
+### The I2V model is prompted too (`--motion_prompts`)
+
+Easy to miss: image-to-video is image-conditioned **and** text-guided. The pipeline
+gets the starting frame *and* a prompt, and that prompt is the only lever you have
+over what actually moves.
+
+By default `animate` reuses the frame's prompt for the animation, which is
+convenient and slightly wasteful: the composition is already settled by the time the
+video model runs, so spending its prompt on scenery ("neon reflections, 50mm") buys
+nothing while the motion goes unspecified. The two prompts want different things.
+A frame prompt describes a **static composition**; an I2V prompt describes **motion**.
+
+`--motion_prompts` separates them (it must line up 1:1 with `--prompts`, or the run
+fails fast):
+
+```bash
+.venv/bin/flyte run compare_pipeline.py animate --image_model sdxl-turbo \
+    --prompts        '["a paper boat on a rain puddle at night, neon reflections"]' \
+    --motion_prompts '["the paper boat leaps up out of the water, spray flying"]'
+```
+
+The clean way to see this is to hold the frame prompt and seed fixed and vary only
+the motion prompt, so the starting image is identical and the only variable is text.
+**Verified on the Spark** (2026-07-16, `sdxl-turbo` -> `wan22-ti2v-5b`, one shared
+boat frame, seed 1234):
+
+| motion prompt | what happened | motion energy* |
+|---|---|---|
+| "the paper boat **leaps up out of the water**, spray flying" | it launches: airborne by frame 32, spray streaking, leaving the top of the frame by 48, camera tracking up | **22.36** |
+| "the paper boat **spins rapidly in place**, water swirling" | holds position, water churns around it | 8.76 |
+| "the paper boat **drifts gently right** as rain rings spread" | nearly serene, barely moves | 9.12 |
+
+<sub>*mean abs luma difference between consecutive frames. Higher = more is moving.</sub>
+
+The motion prompt is a **real lever, not a suggestion**: "jump" carries ~2.5x the
+motion energy of the other two from an identical starting frame. This is the cheapest
+way to find out how much motion control a model actually gives you, and it's a good
+segment: one image, three sentences, three different physics.
+
+One measurement trap worth avoiding if you extend this: don't compare the *clips'*
+frame 0 to check the inputs matched. I2V re-renders frame 0 through the VAE and the
+prompt influences it, so it differs across runs even when the input image is
+byte-identical. Compare the first-frame data URIs instead.
+
+This is also exactly what `long_video.py` is built on: each **beat** there is a
+motion prompt, with the image carrying the composition forward between chunks.
+
 **On reusing the image-gen project's models:** you can't, quite. Flyte's cache is
 keyed on `(project, task, version, inputs)`, and this demo runs in the
 `video-generation` project, so the image-generation project's already-cached SDXL
@@ -287,6 +458,461 @@ does **not** carry over. That's why the first-frame models here are deliberately
 cheap: `sd-turbo` is a 5GB pull that makes a frame in about a second, paid once.
 (If you'd rather share the cache, point `.flyte/config.yaml` at the same project the
 image demo uses.)
+
+---
+
+## 4. LoRA to animate
+
+*(Built, **not yet run**. The one assumption is called out at the end.)*
+
+
+Training a LoRA on a **video** model is an overnight job. Training one on an **image**
+model takes minutes (or you can just download one at a few hundred MB), and on the
+image-to-video path that turns out to be enough: the LoRA styles the **first frame**,
+and the video model animates whatever it is handed. The LoRA rides on the frame, not
+the motion, so it costs **nothing at video time**. That's the whole trick.
+
+```bash
+# no training, runs today: a paper boat rendered as layered papercut, then animated
+.venv/bin/flyte run compare_pipeline.py animate \
+    --image_model sdxl-turbo --lora papercut \
+    --prompts        '["a paper boat on a rain puddle at night"]' \
+    --motion_prompts '["the boat drifts slowly right as rain rings spread"]'
+```
+
+`--lora` takes three forms:
+
+| form | example | notes |
+|---|---|---|
+| a built-in key | `--lora papercut` | see `models.LORAS`: `papercut`, `pixel-art`, `3d-render`. Ungated, 85-340MB |
+| **your own** | `--lora s3://flyte-data/.../sdxl_lora_xxxx` | the Dir from the image-gen demo's `lora_finetune.py train_lora`. Read **cross-project** via `Dir.from_existing_remote`: both projects share the `s3://flyte-data` bucket, so nothing is re-trained or re-uploaded |
+| any hub repo | `--lora nerijs/pixel-art-xl` | loaded as-is |
+
+Two ways this silently does nothing, both handled:
+
+- **Trigger words are load-bearing.** A style LoRA fires on a specific token
+  (`papercut`, `pixel art`). Without it in the prompt the adapter loads, fuses, and
+  changes almost nothing, which reads as "the LoRA is broken" when it's really "you
+  didn't say the magic word". Registry LoRAs prepend their trigger automatically and
+  log it; a raw repo id has no trigger of its own, so put it in the prompt yourself.
+- **Base mismatch.** These are SDXL adapters; the default `sd-turbo` is **SD2.1**, so
+  they cannot load onto it. `animate` refuses up front naming `sdxl-turbo`, rather
+  than dying on a shape error deep inside diffusers after a 3GB download.
+
+The adapter is **fused** (`fuse_lora`) rather than kept live, so generation costs
+exactly what the base model costs and no call site threads a `scale` around.
+
+⚠️ **Untested**: these are base-SDXL LoRAs fused onto the **turbo** checkpoint.
+sdxl-turbo *is* SDXL (few-step distilled) so the shapes match and it loads, but expect
+the style to land weaker than on stock SDXL. Needs a run to confirm.
+
+---
+
+## 5. Long video by chaining (`long_video.py`)
+
+Every model here has its clip length baked into the latent shape, so one call buys
+~2-5 seconds and no more. `long_video.py` gets around that with the obvious trick:
+generate a chunk, keep its **last frame**, feed it back as the next chunk's first
+frame. Each beat gets its own prompt, so the clip can tell a small story rather than
+loop one motion, which is something no single-shot call to these models can do.
+
+```
+beat 1 ──> [chunk 1] ──last frame──> [chunk 2] ──last frame──> [chunk 3] ──> concat
+```
+
+```bash
+.venv/bin/flyte run long_video.py long_video --beats '[
+  "a red fox trotting through tall grass, morning light",
+  "the fox slows and stops, ears twitching",
+  "the fox turns its head toward the camera",
+  "the fox looks up at the sky"
+]'
+```
+
+It needs **no new model and no new download**: it reuses `wan22-ti2v-5b`'s existing
+I2V path. The report shows every chunk plus `chained.mp4`, the whole thing
+concatenated.
+
+**Why this is a Flyte demo and not a for-loop.** The alternative is one fragile
+20-minute task. Chunking makes each unit independently retryable, so chunk 4 OOMing
+doesn't throw away chunks 1-3, and on this box OOM is often transient (something
+else grabbed the unified pool). Note the deliberate exception: the chunks share
+**one resident pipeline inside one task** rather than a task per chunk. Loading
+`wan22-ti2v-5b` costs ~60s for 26GB, so paying that per chunk would dominate the
+runtime, and on a single-GPU box each chunk pod would serialize behind the previous
+one's teardown anyway.
+
+### Verified: it works, and the drift is one number, not two
+
+First real run (2026-07-16, `sdxl-turbo` first frame -> `wan22-ti2v-5b`, 4 beats,
+defaults): **193 frames @24fps = 8.0s**, from a model whose per-call budget is 49
+frames (~2s). Each chunk took ~135s, so ~9 minutes for the clip.
+
+| chunk | beat | last-frame luma | contrast (std) |
+|---|---|---|---|
+| 1 | boat on a dark rain puddle | 56.4 | 48.2 |
+| 2 | drifts right, rain rings spread | 53.9 | 52.6 |
+| 3 | rocks as the rain grows heavier | 57.4 | 60.4 |
+| 4 | rain eases, water settles | 54.3 | 63.6 |
+| | **drift over the chain** | **-2.1** | **+15.4** |
+
+Findings from this run:
+
+- **Contrast accumulates**: 48.2 -> 52.6 -> 60.4 -> 63.6, **+32%** across four hops,
+  never once going down. That's VAE round-trip error compounding, and you can see it:
+  the bokeh highlights in the late chunks sparkle harder than in chunk 1.
+- **Brightness does NOT drift** (-2.1 net, non-monotonic). We predicted saturation
+  creep too; it isn't there.
+
+(The second run below tempers both of these. Contrast creep is real but **not**
+reliably monotonic, and the boat's clean curve was n=1.)
+
+### Then we tried a human, and it fell apart (the useful run)
+
+Same 4-beat structure, subject = a person in a red coat on a neon street: "turns to
+look over one shoulder", then "walks **away** from the camera, receding, growing
+smaller". Also 193 frames / 8.0s.
+
+It did the opposite, and then ran away with it. Frames 0-48: walks away, back to
+camera, as asked. Frame 72: turned fully around, facing camera. Frames 96-144: walking
+*toward* camera, larger each chunk. Frame 192: **the subject is gone**, dissolved into
+out-of-focus bokeh.
+
+> **Follow-up (same day): it was the beat, and the fix is free.** Re-running with the
+> turn removed — "walking away ... **seen from behind**" in every beat, nothing else
+> changed — the chain holds all 8 seconds with **no collapse**, and contrast drift
+> falls from **+8.9 to +1.6**, essentially flat. Details in
+> [the hierarchy of fixes](#the-hierarchy-of-fixes-cheapest-first) below.
+
+**The failure mode is a feedback loop, and it is inherent to last-frame chaining.**
+Beat 2 said "look over one shoulder"; the model turned the person all the way around.
+From there the frame and the prompt disagreed about which way the subject faced, and
+**the frame won** (I2V follows image geometry over text). So "walking" became walking
+*toward* the camera. Each chunk then ended with the person slightly closer, and the
+next chunk faithfully continued walking from that closer frame. Nothing can correct
+it: each chunk sees exactly **one RGB frame**, with no memory of trajectory or intent.
+Four hops took it from a clean shot to destroyed.
+
+Why the boat survived and the person didn't: the boat's motion is **bounded** (drifting
+in a puddle has nowhere to go), so error averages out. Walking is **unbounded**, so
+error compounds. That's the rule of thumb: chain bounded motion, don't chain a
+trajectory.
+
+The numbers, and how they revise the boat's story:
+
+| | boat | human |
+|---|---|---|
+| contrast drift | +15.4, monotonic | **+8.9, non-monotonic** (40.8 -> 46.4 -> 40.6 -> 49.7) |
+| brightness drift | -2.1 (noise) | **-11.4** (the dark coat grows to fill the frame: *subject*-driven, not scene-driven) |
+| seams | 0.63x / 0.50x / 0.74x (all smooth) | 0.75x / 0.52x / **1.03x** (the last one stops smoothing, right where the subject breaks) |
+
+So: **contrast creep is real but not reliably monotonic**, and a seam ratio drifting to
+~1.0x is a decent automatic tell that the chain is coming apart.
+
+### What we hit has a name: exposure bias (`--renorm`)
+
+Chaining fails the way autoregressive generation always fails. The model is trained on
+clean history and fed its own imperfect output at inference; that distribution shift is
+**exposure bias**, and per-hop error compounds into what the literature calls semantic
+collapse. Which is a fair description of a person dissolving into bokeh by frame 192.
+
+The fixes in the literature are all forms of **re-anchoring instead of trusting the
+drifted frame**:
+
+| approach | idea | do we have it? |
+|---|---|---|
+| [StreamingT2V](https://arxiv.org/html/2403.14773) | an Appearance Preservation Module re-injects features from an **anchor frame** so identity doesn't drift | the same idea is VACE's `reference_images` (`vace.py`) |
+| [FramePack](https://arxiv.org/html/2504.12626v1) | **anti-drifting sampling**: generate the endpoints first, interpolate the middle with bidirectional context, so error can't compound one-way | `vace.py flf2v` is exactly this primitive |
+| SkyReels `addnoise_condition=20` | add noise to the conditioning so the model can't over-trust a drifted history | already set, from the model card |
+| `--renorm` (here) | match the hand-off frame's per-channel mean/std back to chunk 1's | implemented below |
+
+`--renorm 0..1` is the cheapest member of that family, and it's off by default so the
+drift stays visible and the A/B against the +32% baseline above stays honest:
+
+```bash
+.venv/bin/flyte run long_video.py long_video --renorm 1.0 --beats '[...]'
+```
+
+**Verified on the real drifted frames** from the boat run (chunk 1 frame 0 is the
+anchor: the only frame in the chain that never went through a VAE round trip):
+
+| frame | luma |
+|---|---|
+| anchor | 58.2±47.0 |
+| drifted (after 4 hops) | 54.0±**63.3** |
+| renormalized | 57.6±**47.1** |
+
+#### Measured: four scenes, both arms, same seeds (2026-07-16)
+
+Every pair below is one variable: identical beats, identical seed, `--renorm` on vs off.
+
+| scene | motion | contrast drift OFF | contrast drift ON | verdict |
+|---|---|---|---|---|
+| **candle** on a table | tiny, fixed camera | +9.5 | **+3.3** | ✅ best case: **-65%** |
+| **paper boat** on a puddle | bounded drift | +15.4 | **+8.3** | ✅ **-46%** |
+| **beach, sunset -> night** | the scene is *meant* to change | +2.0 | -0.5 | ➖ barely matters |
+| **person walking** away | unbounded trajectory | +8.9 | **-16.7** | ❌ different failure, not a fix |
+
+**The rule: renorm helps in proportion to how stationary the scene is.** A candle on a
+table is its ideal case; a person walking a trajectory is outside its remit entirely.
+
+#### Three things this got wrong, which is why we ran it
+
+1. **"It only corrects moments, not meaning" was too strong.** It does only correct
+   moments — but the baseline boat's *two-boat hallucination* is largely **absent** in
+   the renorm run. Cleaner statistics at the hand-off = a less degraded input = the
+   model invents less. The statistical fix bought a semantic benefit indirectly.
+2. **We predicted renorm would FIGHT the sunset** (forcing frame 192's brightness back
+   to a sunlit anchor when you asked for night). It barely did: -8.5 -> -7.4. Because
+   renorm only touches the *hand-off frame*, and the next chunk's prompt ("night
+   settles") simply re-darkens it. **The beats override the correction every chunk**,
+   so renorm can't fight your intent. Reassuring, and not what we expected.
+3. **The drift is not IN the statistics.** This is the real finding. The hand-off
+   correction is flawless — every chunk starts at the anchor's stats within 0.1:
+
+   | hand-off | before | after |
+   |---|---|---|
+   | 1 -> 2 | 56.4±48.2 | **58.0±46.9** |
+   | 2 -> 3 | 55.3±51.8 | **58.1±46.9** |
+   | 3 -> 4 | 59.5±52.7 | **58.0±46.8** |
+
+   And yet each chunk drifts *further* from that identical clean start: **+4.9, +5.8,
+   +9.5**. Per-chunk drift **accelerates** even from statistically identical
+   conditions. So the thing accumulating is the **content** — structure the histogram
+   can't see. Statistics were the symptom, not the disease.
+
+**The split, restated honestly:**
+
+- **statistical drift** (contrast/colour creep) -> `--renorm`, cheap, real, and worth
+  it on a stationary scene
+- **semantic drift** (identity, geometry, "walks away" becoming "walks at you") ->
+  untouched by renorm at any strength. Needs an anchor that understands *content*:
+  `reference_images`, or FramePack-style endpoint pinning (`vace.py bookend`)
+
+### The hierarchy of fixes (cheapest first)
+
+Measured on the human scene, 4 beats, 193 frames, same seed throughout:
+
+| fix | contrast drift | collapse by frame 192? | cost |
+|---|---|---|---|
+| baseline ("turns to look over one shoulder") | +8.9 | **yes**, subject dissolves | — |
+| `--renorm 1.0` | -16.7 | **yes** (flat/mushy instead of harsh) | free |
+| **remove the turn beat** | **+1.6** | **no** — holds all 8s | **free** |
+| remove the turn beat + `--renorm 1.0` | -7.7 | no | free |
+
+**Writing beats that don't contradict themselves beat every algorithmic fix we tried,
+and cost nothing.** That is the headline. Renorm bought -46% on a stationary boat;
+deleting one word-level geometry inversion took the human from total collapse to
+essentially flat drift.
+
+The rule: **never chain a beat that inverts your subject's geometry.** "Turns to look
+over one shoulder" makes the *image* say "facing camera" while the *prompt* still says
+"walks away", and the image always wins (I2V follows geometry over text). From that
+frame on, every chunk faithfully walks the subject **toward** the lens. Keep the
+geometry consistent ("seen from behind" in every beat) and the failure disappears.
+
+Two things the prompt fix does **not** buy, both visible in the clip:
+
+- **The subject never recedes.** Beats 3-4 ask for "further away, smaller in frame";
+  the person stays the same size for 8 seconds. The chain preserves what is *in* frame
+  but will not advance a *trajectory* — the same one-frame-of-memory limit, in a
+  politer form. Pinning the endpoint (`vace.py bookend`) is the fix for that.
+- **Chunk 4 still softens.** Not the old runaway (contrast wobbles 48.1 -> 44.0 ->
+  53.5 -> 49.6 rather than climbing), but it's the weakest chunk.
+
+Sources: [FramePack](https://arxiv.org/html/2504.12626v1) ·
+[Packing/forcing memory for long-form consistency](https://arxiv.org/html/2510.01784v1)
+
+**No visible seam.** The frame-to-frame delta *at* each boundary is **lower** than the
+clip's average (0.63x, 0.50x, 0.74x at frames 49/97/145), i.e. the hand-off is smoother
+than ordinary motion rather than a hitch, because the next chunk starts from the exact
+frame we just showed. Subject identity survives all 8 seconds: the boat is still the
+same boat, the scene is still the same scene.
+
+The honest limit is that contrast creep sets the ceiling on how long you can chain, and
+at +32% over 4 hops you would not want to run 20. That's the real contrast with
+`skyreels-v2-df-1.3b`, which does diffusion forcing and keeps a real **latent history**
+across chunks instead of a single RGB frame, so it should not accumulate this way. This
+is the cheap trick that needs no new model; SkyReels is the principled version. Showing
+both together, with this table, is the interesting segment.
+
+Two details worth knowing: each later chunk's frame 0 is dropped (it's a re-render of
+the frame we fed in, so keeping it duplicates the seam and reads as a hitch), and the
+seed is varied per chunk (one fixed seed makes every chunk resolve toward the same
+motion from a near-identical frame, and the chain comes out a stutter loop).
+
+---
+
+## 6. SkyReels 14B: long video done properly
+
+*(Weights fetched and verified at 80.4GB. First run in flight.)*
+
+This is the **control** for experiment #5, and the reason it's interesting is exactly
+the thing chaining can't do: **hold composure across a long clip**.
+
+Our chain hands the next chunk one **decoded RGB frame**. That single frame is its
+entire memory, which is why the walking person could turn around and no later chunk
+could object, and why VAE round-trip error compounds into +32% contrast. Diffusion
+forcing hands the next chunk **latents**. It's not a claim from a blog post; it's a
+line in the diffusers source
+(`pipeline_skyreels_v2_diffusion_forcing.py`):
+
+```python
+prefix_video_latents = video_latents[:, :, -overlap_history_latent_frames:]
+```
+
+It never leaves latent space between chunks, so there is no round trip to accumulate,
+and it carries *many* frames of history rather than one — enough context to hold a
+trajectory instead of only a snapshot.
+
+**Run it against the case that BROKE**, not the one that worked. The boat chain
+survived (bounded motion); the walking person collapsed. So the overnight run uses the
+human, at the same 193 frames, so the comparison is against a measured failure:
+
+```bash
+# ~4 hours. The direct answer to "does latent history hold a trajectory?"
+.venv/bin/flyte run compare_pipeline.py generate_one \
+    --model_key skyreels-v2-df-14b --num_frames 193 \
+    --prompts '["full body shot of a person in a long red coat walking away from the camera down a wet neon city street at night, receding into the distance, cinematic, 35mm"]'
+```
+
+Note diffusion forcing takes **one prompt for the whole clip**, not per-chunk beats:
+the history is latents, not a re-prompted frame. That's the difference in one line.
+The chain needed a beat per chunk *because* a single RGB frame couldn't carry intent.
+
+**Why the 14B and not the 1.3B we already had**: the 1.3B is the model that made long
+video look bad here, and size was the likeliest reason. The 14B is the same
+architecture and the same pipeline class, so it's a drop-in registry row: only the
+download differs (80.4GB).
+
+**The knobs are not optional.** Without `extra_call_kwargs` this is just another
+49-frame T2V model, and the long path is unreachable: the pipeline *raises* if
+`overlap_history` is missing once `num_frames > base_num_frames`. We set `ar_step=5`,
+`causal_block_size=5`, `base_num_frames=97`, `overlap_history=17`, and
+`addnoise_condition=20` (the card's consistency knob, and itself an anti-drift trick:
+it stops the model over-trusting a drifted history).
+
+What to compare against #5, on one chart: contrast drift per hop. Ours crept **+32%**
+over 4 hops. If SkyReels stays flat, latent history is the whole story.
+
+### ⚠️ It works, and it costs ~4 hours a clip (measured)
+
+First run, 2026-07-16, 960x544 x 193 frames, 30 steps, on the Spark. It loads, the
+long-video path activates, and it denoises at a steady rate. That rate is the problem:
+
+```
+1/50 [04:42<3:51:00, 282.87s/it]
+```
+
+- **283 s/step**, 96% GPU the whole time. Not hung, just enormous.
+- **50 iterations, not 30.** `ar_step=5` (asynchronous mode) expands the schedule, so
+  the real cost is ~1.7x what `--steps` suggests. Budget on 50.
+- **~3h51m for one 8s clip.** For scale, `wan22-ti2v-5b` does 3.3s/step: this is a 14B
+  (2.8x params) at 1.3x the pixels over 3.9x the frames, on a box whose ceiling is
+  memory bandwidth (~273GB/s). ~85x slower per step is the honest number.
+
+So this is an **overnight artifact, not a live demo**. Options if you need it
+interactive: drop to `--num_frames 97` (one `base_num_frames` chunk, but then the
+long-video hand-off never triggers and you're not testing the thing you came for),
+lower the resolution, or set `ar_step=0` for synchronous mode and fewer iterations.
+
+Also measured: **~85GB resident**, not the `est_vram_gb=42` computed from parameter
+counts. It fits the 119.7GiB pool, but only just, and only with rustfs freshly
+restarted. The sampler defaults still come from the 1.3B's card, not measurement.
+
+---
+
+## 7. Video to video (VACE)
+
+*(✅ **Verified** 2026-07-16: 49 frames restyled in **323s** on the 1.3B. Fast enough to
+be a live demo, unlike #6.)*
+
+Every other model here goes text -> video or image -> video. **VACE is the only one
+that takes video IN**, which makes it the one new *axis* rather than another quality
+datapoint. It's also the smallest model in the registry (19GB), which is a pleasing
+inversion: the new capability is the cheap one.
+
+```bash
+# generate a source clip, derive an edge-map control video, restyle it
+.venv/bin/flyte run vace.py restyle \
+    --style_prompt "the same scene as a pen and ink sketch, cross-hatched, monochrome"
+
+# first-last-frame: give it two images, it invents the motion between
+.venv/bin/flyte run vace.py flf2v --prompt "the boat drifts across the puddle"
+```
+
+### The one that cost a run: **name the subject in the style prompt**
+
+First attempt used `--style_prompt "the same scene as a pen and ink sketch, heavy
+cross-hatching, monochrome, white paper"`. It produced a beautiful pen-and-ink
+**landscape**. The boat was gone.
+
+The control map was fine (hull, mast, ripples all clearly there). The prompt was the
+bug: **"the same scene" means nothing to the model** — it has no idea what the previous
+scene was. Given sparse edges plus a prompt describing only a *medium*, it invented a
+plausible subject for that medium and drew a field.
+
+VACE's control video is **structural guidance, not a subject specification.** Say what
+the thing is:
+
+```bash
+--style_prompt "a paper boat floating on a puddle, pen and ink sketch, heavy cross-hatching, monochrome line drawing on white paper"
+```
+
+| | motion* | result |
+|---|---|---|
+| source clip | 5.48 | the original |
+| restyle, subject **not** named | 13.62 | a landscape. Flickering: inventing content per frame |
+| restyle, subject named | **5.56** | the boat, in ink, tracking the control geometry |
+
+<sub>*mean abs luma delta between consecutive frames.</sub>
+
+A restyle that tracks its control should land near the **source's** motion number, and
+5.56 vs 5.48 is what "it followed the video" looks like numerically. 13.62 is what
+"it ignored the video" looks like.
+
+Three more things, learned before writing a line of it, all in `vace.py`'s docstring:
+
+1. **The mask semantics are backwards from intuition**: black (0) = *keep* this frame,
+   white (255) = *generate* it.
+2. **For control tasks the `video` is not footage** — it's a control signal (depth,
+   pose, scribble). Passing raw RGB with an all-white mask silently degenerates into
+   plain text-to-video, which is the easiest way to get VACE wrong.
+3. **Pick your source clip for its edges**, and **look at the control map before you
+   blame the model**. Two bugs came out of doing exactly that, neither visible in the
+   output clip:
+
+   - *Threshold*: a fixed cutoff gave a **79% white** map on a fox-in-grass frame (the
+     fox had no outline; the control was noise). Now: blur, then keep the top
+     `keep_pct`% by percentile, so density is bounded (~8%) whatever the scene.
+   - *Colourblindness*: the Sobel ran on **luma**, so a red coat on a teal street — a
+     huge *colour* contrast, a weak *luma* one — made the person vanish while every
+     neon sign lit up. Now the gradient is per-RGB-channel, max across channels.
+
+   Even fixed, the ranking is: **boat on a dark puddle (great) > person on a neon
+   street (workable) > fox in grass (hopeless)**. In tall grass the texture **is** the
+   gradient. That's a property of edge control, not of VACE, and a depth map wouldn't
+   have it (at the cost of another model download).
+
+`flf2v` is here as the low-risk path (it's the diffusers example verbatim), but it's
+also the interesting one: **it's FramePack's anti-drifting primitive** — fix the
+endpoints, interpolate the middle. And VACE's `reference_images` is the identity anchor
+that [renormalization can't provide](#what-we-hit-has-a-name-exposure-bias---renorm).
+So #7 holds the tools for the part of #5 that #6 may not fix.
+
+---
+
+## 8. Krea realtime video (researched, not built)
+
+The obvious next swing if #6 disappoints: 14B, **Apache-2.0**, ungated, causal with a
+KV cache, and it advertises video-to-video. Not built because it would be the fourth
+unrun thing; the research is done and parked in [Still TODO](#still-todo).
+
+The one number worth carrying here, because it's this repo's recurring lesson: Krea
+ships **only** the transformer and pulls its text encoder / VAE / tokenizer from
+`Wan-AI/Wan2.1-T2V-14B-Diffusers`. Naive = **137.6GB**. With an allowlist = **51.8GB**.
+The difference is one duplicated 28.6GB single-file checkpoint plus a 57.2GB Wan
+transformer that Krea replaces and we would never load.
 
 ---
 
@@ -381,8 +1007,52 @@ by side, and genuinely easy to miss while a 3-second clip loops past you.
 
 ### Still TODO
 
-- **The lightx2v 4-step distill LoRAs** (`lightx2v/Wan2.2-Distill-Loras`, Apache-2.0,
-  two 0.6GB files). The highest-leverage item left. We carry `wan22-t2v-a14b` but keep
+- **Video-to-video via Wan VACE.** The cheapest real capability left, and the only
+  new *axis* on this list. `Wan-AI/Wan2.1-VACE-1.3B-diffusers` is **19GB** (the
+  smallest model we'd carry, vs 75GB for the 14B) and `WanVACEPipeline` has been in
+  diffusers since 0.34, so 0.39 has it. It does restyle, control (depth/pose) and
+  reference-to-video. Not a drop-in registry entry though: its `__call__` takes
+  `video` / `mask` / `reference_images`, so it needs its own task rather than a
+  `VideoModelSpec` row. Diffusers 0.39 also exports `WanVideoToVideoPipeline`,
+  `SkyReelsV2DiffusionForcingVideoToVideoPipeline` and `LTX2ConditionPipeline` if we
+  want a v2v comparison grid.
+- **Krea realtime video** (`krea/krea-realtime-video`): 14B, **Apache-2.0**, ungated,
+  causal/autoregressive with a KV cache (`kv_cache_num_frames: 3`,
+  `num_frames_per_block: 3`), and it advertises **video-to-video**. The obvious swing
+  if `skyreels-v2-df-14b` disappoints. Researched 2026-07-16; three things to know
+  before starting, none of them blocking:
+
+  1. **It's Modular Diffusers, but that's fine.** No `model_index.json`; it ships
+     `modular_model_index.json` naming `_class_name: WanModularPipeline` and
+     `_blocks_class_name: WanRTBlocks`. `WanModularPipeline` **is exported by
+     diffusers 0.39**, and `WanRTBlocks` lives in the repo's own `modular_blocks.py`,
+     so this is `trust_remote_code`, not a reimplementation. (An earlier version of
+     this note called it un-loadable. That was wrong.)
+  2. **It needs TWO repos, and an allowlist is mandatory.** Krea ships *only* the
+     transformer; the scheduler, tokenizer, text encoder and VAE are all pulled from
+     `Wan-AI/Wan2.1-T2V-14B-Diffusers`. Naive = **137.6GB**, needed = **51.8GB**:
+
+     | repo | total | needed | the trap |
+     |---|---|---|---|
+     | `krea/krea-realtime-video` | 57.2GB | `transformer/` **28.6GB** | root `krea-realtime-video-14b.safetensors` is an exact 28.6GB duplicate |
+     | `Wan-AI/Wan2.1-T2V-14B-Diffusers` | 80.4GB | text_encoder+vae+tokenizer **23.3GB** | its `transformer/` is 57.2GB we never load: Krea replaces it |
+
+  3. **Most of it may already be on disk.** `Wan2.1-T2V-14B-Diffusers` has identical
+     component sizes to `skyreels-v2-df-14b` (transformer 57.15 / text_encoder 22.72 /
+     vae 0.51) because SkyReels V2 is Wan-based. Same UMT5-XXL and Wan VAE. If those
+     Dirs can be shared, Krea's marginal cost is its 28.6GB transformer.
+- **Long video by chaining clips** (generate a clip, take its last frame, feed it
+  back as the next clip's first frame). Worth trying precisely because it maps onto
+  Flyte so naturally: each chunk is a cached task and the chain is just a loop, so a
+  30s clip becomes six 5s tasks you can retry independently instead of one fragile
+  20-minute task. Uses `wan22-ti2v-5b`'s existing I2V path, so it needs **no new
+  model** and no new download. Expect drift and contrast accumulation across hops
+  (each chunk re-encodes the previous chunk's output); that degradation *is* the
+  interesting result, and it's the honest counterweight to diffusion forcing, which
+  keeps a real latent history instead of a single frame.
+- **The lightx2v 4-step distill LoRAs** (`lightx2v/Wan2.2-Distill-Loras`, Apache-2.0).
+  Repo checked: it carries rank-64 4-step high/low-noise pairs for **both t2v and
+  i2v** (four files), so this would speed up the animate path too, not just t2v. The highest-leverage item left. We carry `wan22-t2v-a14b` but keep
   it out of every lineup because it's 126GB and ~15-30 min/clip undistilled; these
   LoRAs cut 30 steps to 4 and make the best-quality Wan demoable. diffusers 0.39 has
   `WanLoraLoaderMixin.load_into_transformer_2`, so the high/low-noise pair maps onto

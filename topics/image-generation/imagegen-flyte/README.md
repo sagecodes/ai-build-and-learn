@@ -90,6 +90,43 @@ that has accepted the model's license (see below).
 > license click. If you just want a green run immediately, use those; accept the
 > FLUX / SD3.5 licenses (links below) to unlock the rest.
 
+### Anatomy of a `ModelSpec`
+
+Each entry in `models.py` carries the sane defaults for running that model. Most
+fields are self-evident; the ones that trip people up are the sampler knobs,
+because their values encode *how the model was trained*, not personal taste. Take
+`zimage-turbo`:
+
+```python
+"zimage-turbo": ModelSpec(
+    key="zimage-turbo",              # short handle for the CLI and reports
+    repo="Tongyi-MAI/Z-Image-Turbo", # HuggingFace repo id, pulled at runtime
+    pipeline="ZImagePipeline",       # diffusers class; falls back to AutoPipeline if absent
+    family="DiT / distilled flow",   # backbone, for the report grouping
+    license="Apache-2.0",
+    gated=False,                     # no HF license click needed
+    steps=8,                         # num_inference_steps
+    guidance=1.0,                    # guidance_scale (CFG); None = don't pass it
+    supports_negative=False,         # ignores a negative prompt
+    notes="...",
+),
+```
+
+| Field | What it is | Why Z-Image-Turbo's value |
+|-------|------------|---------------------------|
+| `pipeline` | The diffusers class name, resolved by string at load time. If your installed diffusers doesn't have it, `imagegen_core.load_pipeline` falls back to `AutoPipelineForText2Image`, then `DiffusionPipeline`. | `ZImagePipeline` is recent; the fallback is why a slightly old diffusers still runs. |
+| `steps` | Denoising steps (`num_inference_steps`). More = slower and usually cleaner, up to a point. | **8**, because Turbo is *timestep-distilled*: it was trained to reach a good image in a handful of steps. SDXL needs ~30 for the same. |
+| `guidance` | Classifier-free guidance scale. Higher pushes harder toward the prompt; `None` means don't pass the argument at all. | **1.0** (effectively off), because Turbo is *guidance-distilled*: CFG is baked into the weights, so cranking it up just degrades the image. |
+| `supports_negative` | Whether a negative prompt does anything. | **False**: with CFG distilled away there is no unconditional branch for a negative prompt to steer, so `generate` skips it rather than passing an ignored argument. |
+| `dtype` | Torch dtype string. Defaults to `bfloat16`, which the GB10 (Blackwell) prefers. | default; SDXL overrides to `float16` because its reference weights are fp16. |
+| `max_sequence_length` | Prompt-token cap for the T5-based encoders (FLUX / SD3 / Qwen). `None` leaves the pipeline default. | unset; only the T5 models need it. |
+| `quantized` | Marks a pre-quantized (e.g. bitsandbytes 4-bit) repo so the loader takes the quantized path. | `False`; only `flux2-dev-4bit` sets it. |
+
+The pattern to remember: **the three "turbo/schnell/flash" values travel together**
+(`steps` low, `guidance` at/near 0, `supports_negative=False`) and they all mean
+the same thing — the model was distilled for speed. That is also why those models
+are the wrong ones to LoRA-train; see [Fine-tune a LoRA](#fine-tune-a-lora).
+
 ## Prerequisites
 
 ### 1. A GPU devbox

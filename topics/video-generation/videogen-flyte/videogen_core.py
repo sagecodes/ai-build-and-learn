@@ -190,6 +190,25 @@ def load_pipeline(
     # else: accelerate already placed every module on the device. Calling .to() now
     # would either be a no-op or raise, so don't.
 
+    # Wan's flow-matching schedule shift, when a model card asks for it (VACE does:
+    # 3.0 at 480P, 5.0 at 720P). The card rebuilds the scheduler from its own config
+    # rather than mutating it, so do the same. Guarded by `if spec.flow_shift` so the
+    # already-verified Wan/LTX specs keep the scheduler they were validated on.
+    if spec.flow_shift:
+        try:
+            from diffusers.schedulers.scheduling_unipc_multistep import (
+                UniPCMultistepScheduler,
+            )
+
+            pipe.scheduler = UniPCMultistepScheduler.from_config(
+                pipe.scheduler.config, flow_shift=spec.flow_shift
+            )
+            print(f"[videogen] {spec.key}: UniPC scheduler, flow_shift={spec.flow_shift}",
+                  flush=True)
+        except Exception as e:
+            print(f"[videogen] {spec.key}: flow_shift={spec.flow_shift} not applied ({e}); "
+                  f"keeping the shipped scheduler", flush=True)
+
     # VAE tiling is the one memory optimization that genuinely matters for video:
     # decoding a 121-frame latent in one shot is the single biggest allocation in
     # the whole run and OOMs long before the transformer does. Tiling decodes it in
@@ -205,17 +224,49 @@ def load_pipeline(
 
 
 def load_image_pipeline(spec: ImageModelSpec, *, device: str = "cuda",
-                        model_path: str | None = None):
-    """Load a small text-to-image pipeline, for generating an I2V first frame."""
+                        model_path: str | None = None,
+                        lora_path: str | None = None, lora_scale: float = 1.0,
+                        lora_weight_name: str | None = None):
+    """Load a small text-to-image pipeline, for generating an I2V first frame.
+
+    `lora_path` is either a local diffusers-format LoRA directory (what the image-gen
+    demo's `train_lora` produces, downloaded from its Dir) or an HF repo id, in which
+    case `lora_weight_name` picks the file inside it (these repos usually ship several
+    variants at the top level, so it is effectively required).
+
+    The adapter is FUSED rather than kept live: fusing folds the delta into the UNet
+    weights once, so generation costs exactly what the base model costs and no call
+    site has to thread a `scale` through.
+    """
     import diffusers
 
     source = model_path or spec.repo
     kwargs: dict = {"torch_dtype": _torch_dtype(spec.dtype)}
+    # variant="fp16" is what makes diffusers look for `*.fp16.safetensors`. The specs
+    # allowlist ONLY the fp16 weights (an sdxl-turbo pull is 6.9GB that way vs 55.5GB
+    # naive), so without this from_pretrained goes looking for the fp32 filenames that
+    # were deliberately never downloaded and dies. The two settings are a pair.
+    if spec.variant:
+        kwargs["variant"] = spec.variant
     if model_path is None:
         kwargs["token"] = os.environ.get("HF_TOKEN")
     cls = getattr(diffusers, spec.pipeline, diffusers.AutoPipelineForText2Image)
     print(f"[videogen] loading first-frame model {source} via {cls.__name__}", flush=True)
-    return cls.from_pretrained(source, **kwargs).to(device)
+    pipe = cls.from_pretrained(source, **kwargs).to(device)
+
+    if lora_path:
+        print(f"[videogen] fusing LoRA {lora_path}"
+              f"{'/' + lora_weight_name if lora_weight_name else ''} "
+              f"(scale {lora_scale})", flush=True)
+        lora_kwargs: dict = {}
+        if lora_weight_name:
+            lora_kwargs["weight_name"] = lora_weight_name
+        if not os.path.isdir(lora_path):
+            lora_kwargs["token"] = os.environ.get("HF_TOKEN")
+        pipe.load_lora_weights(lora_path, **lora_kwargs)
+        pipe.fuse_lora(lora_scale=lora_scale)
+        pipe.unload_lora_weights()   # the delta is fused in now; drop the adapter
+    return pipe
 
 
 def free_gpu_memory() -> None:
@@ -415,6 +466,54 @@ class ClipResult:
     error: str = ""
 
 
+# Not every video pipeline speaks the same dialect of the diffusers call API, and a
+# mismatch is a hard TypeError that kills the cell:
+#
+#   MotifVideoPipeline.__call__() got an unexpected keyword argument 'guidance_scale'
+#
+# Three real divergences in diffusers 0.39:
+#   - Motif and HunyuanVideo-1.5 take NO `guidance_scale`. Guidance is baked into the
+#     transformer (embedded/distilled), so there is no CFG knob to turn.
+#   - HunyuanVideo-1.5 also takes no `callback_on_step_end`, so our live step counter
+#     has to be dropped for it.
+#   - SANA-Video calls the frame count `frames`, not `num_frames`.
+#
+# So: build the kwargs by INTENT above, then reconcile them against the signature the
+# pipeline actually has. Renames first, then drop anything left over that it can't
+# accept. Dropping beats crashing here: a clip generated without a negative prompt is
+# still a clip, and the alternative is a per-model kwargs table that goes stale on
+# every diffusers bump.
+_KWARG_ALIASES = {
+    "num_frames": ("frames",),        # SanaVideoPipeline
+}
+
+
+def adapt_call_kwargs(pipe, kwargs: dict) -> tuple[dict, list[str]]:
+    """Reconcile our kwargs with this pipeline's __call__. Returns (kwargs, dropped)."""
+    import inspect
+
+    try:
+        sig = inspect.signature(type(pipe).__call__)
+    except (TypeError, ValueError):
+        return kwargs, []
+
+    params = sig.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs, []   # takes **kwargs; it'll sort itself out
+
+    out, dropped = {}, []
+    for name, value in kwargs.items():
+        if name in params:
+            out[name] = value
+            continue
+        alias = next((a for a in _KWARG_ALIASES.get(name, ()) if a in params), None)
+        if alias:
+            out[alias] = value
+        else:
+            dropped.append(name)
+    return out, dropped
+
+
 def generate_video(
     pipe,
     spec: VideoModelSpec,
@@ -465,6 +564,10 @@ def generate_video(
     if image is not None:
         kwargs["image"] = image
 
+    # Family-specific call params (SkyReels' diffusion-forcing knobs, today). Set
+    # before the branches below so a spec can still be overridden by them if needed.
+    kwargs.update(dict(spec.extra_call_kwargs))
+
     # LTX-2 takes the frame rate as a sampling input (it conditions on it), unlike
     # Wan/CogVideoX where fps is purely an encoding choice made at export time.
     if spec.pipeline.startswith("LTX2"):
@@ -493,6 +596,11 @@ def generate_video(
             return cb_kwargs
 
         kwargs["callback_on_step_end"] = _cb
+
+    kwargs, dropped = adapt_call_kwargs(pipe, kwargs)
+    if dropped:
+        print(f"[videogen] {spec.key}: {type(pipe).__name__} does not accept "
+              f"{', '.join(dropped)}; dropped", flush=True)
 
     out = pipe(**kwargs)
 
@@ -816,3 +924,29 @@ def render_status(title: str, body: str) -> str:
     """A plain in-progress report (shown while models load / denoise)."""
     return (f'{REPORT_CSS}<div class="vg-wrap"><h2>{html.escape(title)}</h2>'
             f'<div class="vg-meta">{body}</div></div>')
+
+
+def render_frames(
+    prompts: list[str],
+    uris: list[str],
+    *,
+    title: str = "First frames",
+    meta: str = "",
+) -> str:
+    """Prompt -> generated image grid, for the first-frame task's own report.
+
+    The image-to-video path stands or falls on the quality of the starting frame
+    (a weak frame gets faithfully animated, flaws and all), so the task that makes
+    the frames renders them itself rather than only handing them downstream. Click
+    to zoom: it reuses the same lightbox as the clip grid.
+    """
+    cells = "".join(
+        f'<div class="vg-cell">{_zoom_img(u, p)}'
+        f'<div class="vg-cap"><div class="vg-sub">🎬 {html.escape(p)}</div></div></div>'
+        for p, u in zip(prompts, uris)
+    )
+    return (
+        f'{REPORT_CSS}<div class="vg-wrap"><h2>{html.escape(title)}</h2>'
+        f'<div class="vg-meta">{html.escape(meta)}</div>'
+        f'<div class="vg-grid">{cells}</div></div>{_LIGHTBOX}'
+    )
