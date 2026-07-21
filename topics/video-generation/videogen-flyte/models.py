@@ -236,6 +236,34 @@ MODELS: dict[str, VideoModelSpec] = {
         notes="Highest-quality Wan. 126GB, slow on the Spark. Opt in deliberately.",
     ),
 
+    # ── Wan 2.2 I2V, the 14B MoE that CHAINS. ───────────────────────────────────
+    # Unlike wan22-t2v-a14b above (t2v only), this one is image-to-video, so it can
+    # drive long_video.py's chain at 14B quality. Same MoE shape: transformer/ =
+    # high-noise expert, transformer_2/ = low-noise, BOTH required -- so there is
+    # nothing to trim, _JUNK only drops docs/assets (the repo is clean: single
+    # precision .safetensors, no fp32/fp16 dupes, no original-format .pth/.bin).
+    # Native 81 frames @16fps (~5s), ~2.5x the 49-frame chunk we run on the 5B, so
+    # a 16s clip is ~4 hops instead of 8. Opt-in: ~126GB, slow on the Spark.
+    "wan22-i2v-a14b": VideoModelSpec(
+        key="wan22-i2v-a14b",
+        repo="Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+        pipeline="WanImageToVideoPipeline",
+        i2v_pipeline="WanImageToVideoPipeline",
+        family="MoE DiT (2x14B experts), i2v",
+        license="Apache-2.0",
+        gated=False,
+        download_gb=126.2,   # transformer 58.5 + transformer_2 58.5 + UMT5-XXL 11.4 + VAE 0.5
+        est_vram_gb=68.0,    # BOTH 14B experts resident + text encoder; cf. wan22-t2v-a14b
+        vae_dtype="float32",
+        steps=30,
+        guidance=5.0,        # sampling params provisional; tune before the real 14B chain
+        width=832, height=480, num_frames=81, fps=16,
+        negative_prompt=_WAN_NEGATIVE,
+        ignore_patterns=_JUNK,
+        native="480P/720P, 81 frames @16fps (~5s), MoE dual-expert.",
+        notes="14B i2v that chains. ~126GB, all required. The 14B long-video lever.",
+    ),
+
     # ── The 2024 baseline. Tiny, weak, but proves the harness end to end. ───────
     # 21GB and rock-solid diffusers support since forever. Useful as a smoke test
     # and as the "here's how far this moved in ~18 months" slide.
