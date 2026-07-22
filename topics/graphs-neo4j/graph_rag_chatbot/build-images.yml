@@ -1,0 +1,47 @@
+name: Build GraphRAG images
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-task-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: johndellenbaugh
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push task image
+        uses: docker/build-push-action@v6
+        with:
+          context: topics/graphs-neo4j/graph_rag_chatbot
+          file: topics/graphs-neo4j/graph_rag_chatbot/Dockerfile
+          push: true
+          tags: |
+            docker.io/johndellenbaugh/graphrag-task:latest
+            docker.io/johndellenbaugh/graphrag-task:${{ github.sha }}
+
+  build-app-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: johndellenbaugh
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: topics/graphs-neo4j/graph_rag_chatbot
+          file: topics/graphs-neo4j/graph_rag_chatbot/Dockerfile.app
+          push: true
+          tags: |
+            docker.io/johndellenbaugh/graphrag-app:latest
+            docker.io/johndellenbaugh/graphrag-app:${{ github.sha }}

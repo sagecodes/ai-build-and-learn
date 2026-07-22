@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Comparison — Architecture</title>
+<style>
+:root {
+  --bg:           #0a0c10;
+  --surface:      #111418;
+  --card:         #161b22;
+  --border:       #21262d;
+  --border2:      #30363d;
+  --text:         #e6edf3;
+  --muted:        #7d8590;
+  --muted2:       #484f58;
+  --accent:       #388bfd;
+  --hi:           #e3a008;
+  --hi-glow:      rgba(227,160,8,0.22);
+  --hi-text:      #fbbf24;
+  --code-bg:      #0d1117;
+  --code-fg:      #79c0ff;
+  --warn:         #f85149;
+  --warn-glow:    rgba(248,81,73,0.18);
+  --pal:          #3fb950;
+  --pal-glow:     rgba(63,185,80,0.18);
+  --desktop:      #58a6ff;
+  --desktop-glow: rgba(88,166,255,0.25);
+  --web-c:        #3ecfcf;
+  --web-glow:     rgba(62,207,207,0.25);
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:24px 20px 40px;}
+.header{text-align:center;margin-bottom:20px;}
+.header h1{font-size:1.4em;font-weight:700;letter-spacing:-.02em;}
+.header .sub{color:var(--muted);font-size:.8em;margin-top:4px;}
+.header .badge{display:inline-block;margin-left:10px;background:var(--border2);color:var(--muted);font-size:.68em;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:3px 10px;border-radius:4px;vertical-align:middle;}
+.tabs-row{display:flex;align-items:center;max-width:1160px;margin:0 auto 18px;}
+.tabs-side{flex:0 0 auto;}
+.tabs{flex:1;display:flex;justify-content:center;gap:8px;flex-wrap:wrap;}
+.tab{padding:7px 18px;border-radius:6px;border:1px solid var(--border2);background:var(--card);color:var(--muted);font-size:.83em;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:6px;}
+.tab.active{background:var(--hi);color:#000;border-color:var(--hi);}
+.tab.active.pal-tab{background:var(--pal);border-color:var(--pal);}
+.tab:hover:not(.active){background:var(--surface);color:var(--text);}
+.diagram-outer{max-width:1160px;margin:0 auto 18px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px 20px 110px;position:relative;overflow:visible;}
+.diagram-grid{display:grid;grid-template-columns:155px 600px 225px;gap:40px;position:relative;z-index:1;justify-content:center;align-items:center;}
+#svg-arrows{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:0;}
+.arrow-path{fill:none;stroke:var(--border2);stroke-width:1.05;transition:stroke .35s,stroke-width .35s,opacity .35s;opacity:.45;marker-end:url(#arr-dim);}
+.arrow-path.lit{stroke:var(--hi);stroke-width:1.75;opacity:1;marker-end:url(#arr-lit);}
+.arrow-path.lit-pal{stroke:var(--pal);stroke-width:1.75;opacity:1;marker-end:url(#arr-pal);}
+.arrow-path.lit-warn{stroke:var(--warn);stroke-width:1.75;opacity:1;marker-end:url(#arr-warn);}
+.arrow-path.lit-desktop{stroke:var(--desktop);stroke-width:1.75;opacity:1;marker-end:url(#arr-desktop);}
+.arrow-path.lit-web{stroke:var(--web-c);stroke-width:1.75;opacity:1;marker-end:url(#arr-web);}
+.col{display:flex;flex-direction:column;gap:28px;justify-content:center;padding:8px 0;}
+.node{background:var(--card);border:1.5px solid var(--border2);border-radius:9px;padding:12px 13px;transition:border-color .35s,box-shadow .35s,background .35s;}
+.node.active{border-color:var(--hi);box-shadow:0 0 16px var(--hi-glow);background:#19160a;}
+.node.active.pal-node{border-color:var(--pal);box-shadow:0 0 16px var(--pal-glow);background:#0d1a10;}
+.node.pal-node{border-color:var(--pal);background:#0d1a10;}
+.node-icon{font-size:1.3em;margin-bottom:5px;}
+.node-name{font-weight:700;font-size:.82em;margin-bottom:3px;}
+.node-sub{color:var(--muted);font-size:.7em;line-height:1.4;}
+.node-label{font-size:.6em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-top:7px;}
+.node-label.pal{color:var(--pal);opacity:.9;}
+.cluster{border:1.5px dashed var(--border2);border-radius:10px;padding:13px;transition:border-color .35s;}
+.cluster.active{border-color:var(--accent);}
+.cluster-hdr{font-size:.65em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:6px;}
+.section-label{font-size:.6em;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted2);margin:8px 0 5px 2px;}
+.cluster-div{border-top:1px solid var(--border);margin:10px 0;}
+.task{display:flex;align-items:center;gap:9px;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 9px;margin-bottom:8px;transition:border-color .35s,background .35s,box-shadow .35s;}
+.task:last-child{margin-bottom:0;}
+.task.active{border-color:var(--hi);background:#130e00;box-shadow:0 0 10px var(--hi-glow);}
+.task.active.pal-task{border-color:var(--pal);background:#091410;box-shadow:0 0 10px var(--pal-glow);}
+.task.pal-task{border:1px solid var(--pal);background:#091410;}
+.task.pal-task .task-feature{color:var(--pal);font-size:.66em;}
+.task.pal-task .task-name{color:#fff;font-weight:500;}
+.task-ico{font-size:.95em;flex-shrink:0;}
+.task-body{flex:1;min-width:0;}
+.task-name{font-weight:700;font-size:.77em;}
+.task-detail{color:var(--muted);font-size:.67em;margin-top:2px;line-height:1.3;}
+.task-feature{font-size:.63em;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--text);margin-bottom:2px;}
+.tbadge{flex-shrink:0;background:var(--border);color:var(--muted);font-size:.6em;font-weight:700;padding:2px 7px;border-radius:8px;transition:background .35s,color .35s;white-space:nowrap;}
+.task.active .tbadge{background:var(--hi);color:#000;}
+.task.active.pal-task .tbadge{background:var(--pal);color:#000;}
+.tbadge.pal{background:#0d2218;color:var(--pal);}
+.providers-cluster{border:1.5px dashed var(--pal);border-radius:10px;padding:11px;transition:border-color .35s;}
+.providers-cluster.active{border-color:var(--pal);box-shadow:0 0 14px var(--pal-glow);}
+.providers-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;}
+.pnode{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px;text-align:center;transition:border-color .35s,background .35s;}
+.pnode.active{border-color:var(--hi);background:#130e00;}
+.pnode.active.pal-p{border-color:var(--pal);background:#091410;}
+.pnode.pal-p{border-color:rgba(63,185,80,.3);}
+.pnode-ico{font-size:1.1em;margin-bottom:3px;}
+.pnode-name{font-weight:700;font-size:.68em;}
+.pnode-sub{color:var(--muted);font-size:.6em;margin-top:2px;line-height:1.3;}
+.embed-row{margin-top:8px;padding-top:8px;border-top:1px solid var(--border);}
+.embed-badges{display:flex;gap:5px;flex-wrap:wrap;margin-top:4px;}
+.nav-row{display:flex;justify-content:center;align-items:center;gap:12px;max-width:1160px;margin:0 auto 16px;}
+.nav-row .btn{padding:6px 16px;font-size:.78em;}
+.dots{display:flex;gap:6px;align-items:center;}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--border2);cursor:pointer;transition:background .3s,transform .3s;}
+.dot.cur{background:var(--hi);transform:scale(1.4);}
+.dot.past{background:var(--accent);}
+.step-panel{max-width:1160px;margin:0 auto 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.step-top{display:flex;align-items:center;gap:10px;padding:14px 18px 12px;border-bottom:1px solid var(--border);}
+.step-num{background:var(--hi);color:#000;font-size:.72em;font-weight:800;padding:3px 11px;border-radius:11px;flex-shrink:0;}
+.step-num.pal{background:var(--pal);}
+.step-ttl{font-weight:700;font-size:1em;color:var(--hi-text);}
+.step-body{display:grid;grid-template-columns:1fr 1fr;gap:0;}
+.step-left{padding:14px 18px;border-right:1px solid var(--border);}
+.step-right{padding:14px 18px;background:var(--code-bg);}
+.panel-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-bottom:7px;}
+.step-desc{color:var(--muted);font-size:.83em;line-height:1.65;margin-bottom:14px;white-space:pre-line;}
+.comp-tags{display:flex;flex-wrap:wrap;gap:5px;}
+.comp-tag{background:var(--border);color:var(--text);font-size:.72em;font-weight:600;padding:3px 9px;border-radius:5px;font-family:'SFMono-Regular',Consolas,monospace;}
+.step-code{font-family:'SFMono-Regular',Consolas,monospace;font-size:.75em;color:var(--code-fg);line-height:1.65;white-space:pre;overflow-x:auto;min-height:80px;}
+.step-code .kw{color:#ff7b72;}
+.step-code .fn{color:#d2a8ff;}
+.step-code .str{color:#a5d6ff;}
+.step-code .cm{color:#8b949e;font-style:italic;}
+.step-code .pal{color:#3fb950;}
+.step-code .warn{color:#f85149;}
+.btn{padding:9px 26px;border-radius:7px;border:none;font-weight:700;font-size:.85em;cursor:pointer;transition:background .2s;}
+.btn-p{background:var(--hi);color:#000;}
+.btn-p:hover:not(:disabled){background:#c88a00;}
+.btn-s{background:var(--card);color:var(--text);border:1px solid var(--border2);}
+.btn-s:hover:not(:disabled){background:var(--border);}
+.btn:disabled{opacity:.28;cursor:not-allowed;}
+.step-ct{color:var(--muted);font-size:.83em;font-weight:600;min-width:56px;text-align:center;}
+.hint{text-align:center;color:var(--muted2);font-size:.72em;margin-top:12px;}
+.user-cluster{background:var(--card);border:1.5px solid var(--border2);border-radius:9px;padding:13px 11px;transition:border-color .35s,box-shadow .35s;}
+.user-cluster.active{border-color:var(--hi);box-shadow:0 0 14px var(--hi-glow);}
+.user-cluster-hdr{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:5px;}
+.user-flow{display:flex;align-items:flex-start;gap:7px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:9px 8px;margin-bottom:7px;transition:border-color .35s,background .35s,box-shadow .35s;}
+.user-flow:last-child{margin-bottom:0;}
+.user-flow.active{border-color:var(--hi);background:#130e00;box-shadow:0 0 8px var(--hi-glow);}
+#n-surface-a{border-color:rgba(88,166,255,.4);}
+#n-surface-a .uf-name{color:var(--desktop);}
+#n-surface-a.active{border-color:var(--desktop);background:rgba(88,166,255,.07);box-shadow:0 0 8px var(--desktop-glow);}
+#n-surface-b{border-color:rgba(62,207,207,.4);}
+#n-surface-b .uf-name{color:var(--web-c);}
+#n-surface-b.active{border-color:var(--web-c);background:rgba(62,207,207,.07);box-shadow:0 0 8px var(--web-glow);}
+.user-flow.dim{opacity:.25;transition:opacity .35s;}
+.uf-ico{font-size:1em;flex-shrink:0;margin-top:1px;}
+.uf-body{flex:1;min-width:0;}
+.uf-name{font-weight:700;font-size:.76em;}
+.uf-sub{color:var(--muted);font-size:.63em;margin-top:2px;line-height:1.3;}
+.pal-divider{display:flex;align-items:center;gap:8px;margin:10px 0 8px;color:var(--pal);font-size:.6em;font-weight:700;letter-spacing:.09em;text-transform:uppercase;opacity:.7;}
+.pal-divider::before,.pal-divider::after{content:'';flex:1;border-top:1px solid rgba(63,185,80,.22);}
+.nt-btn{display:inline-flex;align-items:center;gap:8px;padding:5px 14px 5px 10px;border-radius:20px;border:1px solid var(--border2);background:var(--card);color:var(--text);font-size:.78em;font-weight:600;cursor:pointer;transition:all .2s;user-select:none;}
+.nt-btn:hover{background:var(--border);}
+.nt-pill{display:inline-flex;width:30px;height:17px;border-radius:9px;background:var(--hi);position:relative;transition:background .25s;flex-shrink:0;}
+.nt-pill::after{content:'';position:absolute;top:2.5px;left:2.5px;width:12px;height:12px;border-radius:50%;background:#000;transition:transform .25s;}
+body.nontechnical .nt-pill{background:var(--border2);}
+body.nontechnical .nt-pill::after{transform:translateX(13px);}
+.nt-label-txt{min-width:16px;transition:color .2s;}
+body.nontechnical .nt-label-txt{color:var(--muted);}
+body.nontechnical .task-name,
+body.nontechnical .task-detail{display:none;}
+body.nontechnical .node-sub,
+body.nontechnical .node-label{display:none;}
+.nt-only{display:none;}
+body.nontechnical .nt-only{display:block;}
+body.nontechnical #s-code{display:none;}
+body.nontechnical .code-label{display:none !important;}
+body.nontechnical .nt-code-label{display:block !important;}
+.nt-code-label{display:none;}
+#s-nt{display:none;color:var(--muted);font-size:.83em;line-height:1.65;min-height:80px;padding-top:2px;white-space:pre-line;}
+body.nontechnical #s-nt{display:block;}
+body.nontechnical .step-right{background:var(--surface);}
+.task-nt{color:var(--muted);font-size:.67em;margin-top:2px;line-height:1.4;}
+</style>
+</head>
+<body class="nontechnical">
+
+<div class="header">
+  <h1>RAG Comparison <span class="badge">Architecture</span></h1>
+  <div class="sub">Three retrieval strategies, two frontier models, one Gradio app · Gradio · asyncio · Claude · Gemma 4 · GCP</div>
+</div>
+
+<div class="tabs-row">
+  <div class="tabs-side tabs-left">
+    <button class="nt-btn" onclick="toggleTech()">
+      <span class="nt-pill"></span>
+      Technical <span class="nt-label-txt" id="nt-label">OFF</span>
+    </button>
+  </div>
+  <div class="tabs">
+    <button class="tab active"  id="tab-rag"    onclick="setFlow('rag')">⚡ RAG Compare</button>
+    <button class="tab pal-tab" id="tab-model"  onclick="setFlow('model')">🤖 Model Compare</button>
+    <button class="tab"         id="tab-ingest" onclick="setFlow('ingest')">📥 Ingest</button>
+    <button class="tab"         id="tab-deploy" onclick="setFlow('deploy')">🚀 Deploy</button>
+  </div>
+  <div class="tabs-side tabs-right"></div>
+</div>
+
+<div class="diagram-outer" id="diagram-outer">
+  <svg id="svg-arrows">
+    <defs>
+      <marker id="arr-dim"     markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#30363d"/></marker>
+      <marker id="arr-lit"     markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#e3a008"/></marker>
+      <marker id="arr-pal"     markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#3fb950"/></marker>
+      <marker id="arr-warn"    markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#f85149"/></marker>
+      <marker id="arr-desktop" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#58a6ff"/></marker>
+      <marker id="arr-web"     markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#3ecfcf"/></marker>
+    </defs>
+  </svg>
+
+  <div class="diagram-grid" id="diagram-grid">
+
+    <!-- LEFT COLUMN -->
+    <div class="col">
+      <div class="user-cluster" id="n-user-cluster">
+        <div class="user-cluster-hdr">👤 User</div>
+
+        <div class="user-flow" id="n-surface-a">
+          <div class="uf-ico">⚡</div>
+          <div class="uf-body">
+            <div class="uf-name">RAG Compare Tab</div>
+            <div class="uf-sub">gr.Tab("RAG Comparison") · Compare RAGs button</div>
+            <div class="task-nt nt-only">User asks a question and sees three simultaneous answers from different search strategies.</div>
+          </div>
+        </div>
+
+        <div class="user-flow" id="n-surface-b">
+          <div class="uf-ico">🤖</div>
+          <div class="uf-body">
+            <div class="uf-name">Model Compare Tab</div>
+            <div class="uf-sub">gr.Tab("Model Comparison") · dropdown + Compare Models button</div>
+            <div class="task-nt nt-only">User picks a search strategy and sees Claude and Gemma 4 answer from the same information.</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- CENTER COLUMN -->
+    <div class="cluster" id="n-engine">
+      <div class="cluster-hdr">⚙️ App Engine · app.py + backends/</div>
+
+      <!-- TAB 1: RAG Compare -->
+      <div class="rag-show">
+        <div class="section-label">Orchestration</div>
+        <div class="task" id="n-app">
+          <div class="task-ico">🎛️</div>
+          <div class="task-body">
+            <div class="task-feature">Gradio Orchestrator</div>
+            <div class="task-name">app.py · run_comparison()</div>
+            <div class="task-detail">asyncio.gather() · 3 backends in parallel · _safe_query() error isolation</div>
+            <div class="task-nt nt-only">Receives a question and immediately sends it to all three search engines at the same time. If one fails, the other two keep going.</div>
+          </div>
+          <span class="tbadge">orchestrator</span>
+        </div>
+
+        <div class="cluster-div"></div>
+        <div class="section-label">RAG Backends</div>
+
+        <div class="task" id="n-vector">
+          <div class="task-ico">📊</div>
+          <div class="task-body">
+            <div class="task-feature">Vector RAG</div>
+            <div class="task-name">backends/vector.py · retrieve() + query()</div>
+            <div class="task-detail">pgvector cosine · TOP_K=5 · IPv4 forced via socket.AF_INET</div>
+            <div class="task-nt nt-only">Finds the five document sections whose meaning is most similar to the question, measured mathematically.</div>
+          </div>
+          <span class="tbadge">TOP_K=5</span>
+        </div>
+
+        <div class="task" id="n-graph">
+          <div class="task-ico">🕸️</div>
+          <div class="task-body">
+            <div class="task-feature">Graph RAG</div>
+            <div class="task-name">backends/graph/__init__.py · route→retrieve→generate</div>
+            <div class="task-detail">3 modes: hybrid / entity / community · Claude routes via tool use · TOP_K=3</div>
+            <div class="task-nt nt-only">Classifies the question type, then follows concept relationships in a knowledge graph to surface connected facts.</div>
+          </div>
+          <span class="tbadge">3 modes</span>
+        </div>
+
+        <div class="task" id="n-cognee">
+          <div class="task-ico">🧩</div>
+          <div class="task-body">
+            <div class="task-feature">Cognee</div>
+            <div class="task-name">backends/cognee_backend.py · retrieve() + query()</div>
+            <div class="task-detail">cognee.search(CHUNKS) · LanceDB + SQLite · TOP_K=10</div>
+            <div class="task-nt nt-only">Uses an automatically built hybrid index. The graph structure was created at setup time and is opaque — no manual configuration.</div>
+          </div>
+          <span class="tbadge">TOP_K=10</span>
+        </div>
+
+        <div class="pal-divider">Shared Layer</div>
+
+        <div class="task pal-task" id="n-embeddings">
+          <div class="task-ico">🔢</div>
+          <div class="task-body">
+            <div class="task-feature">Embeddings Singleton</div>
+            <div class="task-name">backends/shared/embeddings.py · embed()</div>
+            <div class="task-detail">fastembed · BAAI/bge-small-en-v1.5 · 384 dims · lazy init</div>
+            <div class="task-nt nt-only">One shared math model converts text to numbers for all three search engines. Loaded once, reused across all queries for fairness.</div>
+          </div>
+          <span class="tbadge pal">shared</span>
+        </div>
+
+        <div class="task pal-task" id="n-claude-gen">
+          <div class="task-ico">✍️</div>
+          <div class="task-body">
+            <div class="task-feature">Answer Generation</div>
+            <div class="task-name">backends/shared/claude.py · generate_answer()</div>
+            <div class="task-detail">claude-sonnet-4-6 · max_tokens=1024 · identical system prompt for all 3</div>
+            <div class="task-nt nt-only">All three search engines use the same AI writer with identical instructions. The only difference is what each engine found to write about.</div>
+          </div>
+          <span class="tbadge pal">shared</span>
+        </div>
+
+        <div class="task" id="n-claude-eval">
+          <div class="task-ico">⚖️</div>
+          <div class="task-body">
+            <div class="task-feature">RAG Evaluator</div>
+            <div class="task-name">app.py · _rag_comparison_summary()</div>
+            <div class="task-detail">claude-sonnet-4-6 · max_tokens=1500 · 5-criterion scored table</div>
+            <div class="task-nt nt-only">Claude reads all three answers together and scores them on five points, then names the winner and explains why.</div>
+          </div>
+          <span class="tbadge">judge</span>
+        </div>
+      </div><!-- end rag-show -->
+
+      <!-- TAB 2: Model Compare -->
+      <div class="model-show">
+        <div class="section-label">Model Comparison Handler</div>
+
+        <div class="task" id="n-app-model">
+          <div class="task-ico">🎛️</div>
+          <div class="task-body">
+            <div class="task-feature">Gradio Orchestrator</div>
+            <div class="task-name">app.py · run_model_comparison(question, backend)</div>
+            <div class="task-detail">dropdown → retrieve() once → asyncio.gather() on both models</div>
+            <div class="task-nt nt-only">Takes a question and the user's chosen search engine, retrieves facts once, then sends the same facts to both AI models simultaneously.</div>
+          </div>
+          <span class="tbadge">orchestrator</span>
+        </div>
+
+        <div class="task" id="n-retriever">
+          <div class="task-ico">🔍</div>
+          <div class="task-body">
+            <div class="task-feature">Selected Backend</div>
+            <div class="task-name">vector_retrieve / graph_retrieve / cognee_retrieve</div>
+            <div class="task-detail">retrieve() returns (context_str, summary_str) · no generation call</div>
+            <div class="task-nt nt-only">Gathers the relevant document sections and returns them as plain text. No AI writes an answer yet — both models get this same text.</div>
+          </div>
+          <span class="tbadge">retrieve only</span>
+        </div>
+
+        <div class="pal-divider">Parallel Generation</div>
+
+        <div class="task pal-task" id="n-claude-model">
+          <div class="task-ico">🤖</div>
+          <div class="task-body">
+            <div class="task-feature">Claude Sonnet 4.6</div>
+            <div class="task-name">backends/shared/claude.py · generate_answer()</div>
+            <div class="task-detail">AsyncAnthropic · max_tokens=1024 · native async</div>
+            <div class="task-nt nt-only">Anthropic's Claude reads the retrieved facts and writes an answer. Runs at the same time as Gemma 4.</div>
+          </div>
+          <span class="tbadge pal">Anthropic</span>
+        </div>
+
+        <div class="task pal-task" id="n-gemma">
+          <div class="task-ico">🧠</div>
+          <div class="task-body">
+            <div class="task-feature">Gemma 4 26B</div>
+            <div class="task-name">backends/shared/gemma.py · generate_answer_gemma()</div>
+            <div class="task-detail">google-genai SDK · asyncio.to_thread() · Vertex AI MaaS · ADC auth</div>
+            <div class="task-nt nt-only">Google's Gemma 4 reads the same facts and writes its own answer. Runs at the same time as Claude.</div>
+          </div>
+          <span class="tbadge pal">Vertex AI</span>
+        </div>
+
+        <div class="cluster-div"></div>
+
+        <div class="task" id="n-model-eval">
+          <div class="task-ico">⚖️</div>
+          <div class="task-body">
+            <div class="task-feature">Model Evaluator</div>
+            <div class="task-name">app.py · _model_comparison_summary()</div>
+            <div class="task-detail">claude-sonnet-4-6 · max_tokens=1000 · Accuracy / Completeness / Clarity / Context Usage / No Hallucinations</div>
+            <div class="task-nt nt-only">Claude grades both answers on five criteria and names the better model for this question and context.</div>
+          </div>
+          <span class="tbadge">judge</span>
+        </div>
+      </div><!-- end model-show -->
+
+      <!-- TAB 3: Ingest -->
+      <div class="ingest-show">
+        <div class="section-label">One-Time Ingest Scripts · ingest/</div>
+
+        <div class="task" id="n-vector-ingest">
+          <div class="task-ico">📥</div>
+          <div class="task-body">
+            <div class="task-feature">Vector Ingest</div>
+            <div class="task-name">ingest/vector_ingest.py</div>
+            <div class="task-detail">PyMuPDF · RecursiveCharacterTextSplitter(500, 50) · 160 chunks · HNSW index on vector(384)</div>
+            <div class="task-nt nt-only">Reads all 15 policy documents, breaks them into overlapping sections, and saves mathematical fingerprints of each section to the cloud database.</div>
+          </div>
+          <span class="tbadge">160 chunks</span>
+        </div>
+
+        <div class="task" id="n-graph-ingest">
+          <div class="task-ico">🕸️</div>
+          <div class="task-body">
+            <div class="task-feature">Graph Ingest</div>
+            <div class="task-name">ingest/graph_ingest.py · 8 steps</div>
+            <div class="task-detail">Claude tool use (extract_graph) · Semaphore(5) · Louvain community detection · 955 entities · 855 relationships · 135 communities</div>
+            <div class="task-nt nt-only">Claude reads every document section and identifies key concepts and their relationships, building a web of connected knowledge across all 15 documents.</div>
+          </div>
+          <span class="tbadge">955 entities</span>
+        </div>
+
+        <div class="task" id="n-cognee-ingest">
+          <div class="task-ico">🧩</div>
+          <div class="task-body">
+            <div class="task-feature">Cognee Ingest</div>
+            <div class="task-name">ingest/cognee_ingest.py</div>
+            <div class="task-detail">cognee.add() per PDF · cognee.cognify() once · LLM_PROVIDER=anthropic · VECTOR_DB_PROVIDER=lancedb</div>
+            <div class="task-nt nt-only">Feeds all 15 documents to Cognee, which automatically builds both a text search index and a knowledge graph in a single step.</div>
+          </div>
+          <span class="tbadge">15 PDFs</span>
+        </div>
+      </div><!-- end ingest-show -->
+
+      <!-- TAB 4: Deploy -->
+      <div class="deploy-show">
+        <div class="section-label">Container Build</div>
+
+        <div class="task" id="n-dockerfile">
+          <div class="task-ico">🐳</div>
+          <div class="task-body">
+            <div class="task-feature">Dockerfile</div>
+            <div class="task-name">python:3.11-slim · libmupdf-dev + gcc</div>
+            <div class="task-detail">COPY requirements.txt → pip install → COPY . → EXPOSE 7860 · CMD ["python", "app.py"]</div>
+            <div class="task-nt nt-only">Packages the entire app and all its dependencies into a portable container image.</div>
+          </div>
+          <span class="tbadge">EXPOSE 7860</span>
+        </div>
+
+        <div class="task" id="n-dockerhub">
+          <div class="task-ico">📦</div>
+          <div class="task-body">
+            <div class="task-feature">Docker Hub</div>
+            <div class="task-name">johndellenbaugh/rag-comparison:latest</div>
+            <div class="task-detail">docker build → docker push · public image registry</div>
+            <div class="task-nt nt-only">The container image is uploaded to a public registry so the cloud server can download it.</div>
+          </div>
+          <span class="tbadge">public</span>
+        </div>
+
+        <div class="cluster-div"></div>
+        <div class="section-label">GCP VM · rag-comparison</div>
+
+        <div class="task" id="n-gcp">
+          <div class="task-ico">☁️</div>
+          <div class="task-body">
+            <div class="task-feature">GCP VM</div>
+            <div class="task-name">e2-medium · 4GB RAM · us-west1-b · tcp:7860 open</div>
+            <div class="task-detail">--scopes=cloud-platform required at creation · roles/aiplatform.user on service account</div>
+            <div class="task-nt nt-only">The cloud server that runs the app. Must be set up with Vertex AI permissions when first created — this cannot be changed while it's running.</div>
+          </div>
+          <span class="tbadge">cloud-platform</span>
+        </div>
+
+        <div class="task" id="n-systemd">
+          <div class="task-ico">⚙️</div>
+          <div class="task-body">
+            <div class="task-feature">systemd Service</div>
+            <div class="task-name">rag-comparison.service · Restart=always</div>
+            <div class="task-detail">--env-file ~/.env · -e PYTHONUNBUFFERED=1 · -v .cognee_system mount · -p 7860:7860</div>
+            <div class="task-nt nt-only">Starts the app automatically when the server boots and restarts it if it crashes. Connects Cognee's database files to the container so they survive restarts.</div>
+          </div>
+          <span class="tbadge">Restart=always</span>
+        </div>
+      </div><!-- end deploy-show -->
+
+    </div><!-- end center cluster -->
+
+    <!-- RIGHT COLUMN -->
+    <div class="col">
+
+      <div class="providers-cluster" id="n-providers">
+        <div class="cluster-hdr">🔗 External Services</div>
+        <div class="providers-grid">
+          <div class="pnode pal-p" id="n-anthropic">
+            <div class="pnode-ico">🤖</div>
+            <div class="pnode-name">Anthropic API</div>
+            <div class="pnode-sub">claude-sonnet-4-6 · AsyncAnthropic SDK</div>
+          </div>
+          <div class="pnode pal-p" id="n-vertex">
+            <div class="pnode-ico">🧠</div>
+            <div class="pnode-name">Vertex AI MaaS</div>
+            <div class="pnode-sub">Gemma 4 26B · google-genai · ADC via metadata server</div>
+          </div>
+          <div class="pnode pal-p" id="n-supabase">
+            <div class="pnode-ico">🗄️</div>
+            <div class="pnode-name">Supabase pgvector</div>
+            <div class="pnode-sub">everstorm_docs · 160 vectors · Session Pooler (IPv4)</div>
+          </div>
+          <div class="pnode pal-p" id="n-neo4j">
+            <div class="pnode-ico">🕸️</div>
+            <div class="pnode-name">Neo4j AuraDB Free</div>
+            <div class="pnode-sub">chunk-embeddings index · 955 entities · 135 communities</div>
+          </div>
+        </div>
+        <div class="embed-row">
+          <div class="section-label">Shared Embeddings</div>
+          <div class="embed-badges">
+            <span class="tbadge pal" id="n-embed">fastembed · BAAI/bge-small-en-v1.5 · 384 dims</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="node pal-node" id="n-lancedb">
+        <div class="node-icon">💾</div>
+        <div class="node-name">LanceDB (local)</div>
+        <div class="node-sub">.cognee_system/ on GCP VM · volume mounted into Docker container</div>
+        <div class="node-label pal">Cognee Storage</div>
+      </div>
+
+    </div><!-- end right col -->
+
+  </div><!-- end diagram-grid -->
+</div><!-- end diagram-outer -->
+
+<div class="nav-row">
+  <button class="btn btn-s" id="btn-prev" onclick="prev()">← Prev</button>
+  <div class="dots" id="dots"></div>
+  <button class="btn btn-p" id="btn-next" onclick="next()">Next →</button>
+  <span class="step-ct" id="s-ct">1 / 1</span>
+</div>
+
+<div class="step-panel" id="step-panel">
+  <div class="step-top">
+    <span class="step-num" id="s-num">Step 1</span>
+    <span class="step-ttl" id="s-ttl"></span>
+  </div>
+  <div class="step-body">
+    <div class="step-left">
+      <div class="panel-label">Description</div>
+      <div class="step-desc" id="s-desc"></div>
+      <div class="panel-label">Active Components</div>
+      <div class="comp-tags" id="s-tags"></div>
+    </div>
+    <div class="step-right">
+      <div class="panel-label code-label">Code</div>
+      <div class="panel-label nt-code-label" id="nt-panel-label">Business Impact</div>
+      <pre class="step-code" id="s-code"></pre>
+      <div id="s-nt"></div>
+    </div>
+  </div>
+</div>
+
+<p class="hint">← → arrow keys · click dots to jump · tabs switch architecture view</p>
+
+<script>
+const ARROWS = [
+  // Tab 1 — RAG Compare: user → app
+  { id:'rag-q',       from:'n-surface-a', fS:'right',  to:'n-app',       tS:'left'   },
+  // App → 3 backends
+  { id:'app-vec',     from:'n-app',       fS:'bottom', to:'n-vector',    tS:'top',   fOff: -20 },
+  { id:'app-graph',   from:'n-app',       fS:'bottom', to:'n-graph',     tS:'top',   fOff: 0   },
+  { id:'app-cog',     from:'n-app',       fS:'bottom', to:'n-cognee',    tS:'top',   fOff: 20  },
+  // Backends → embeddings
+  { id:'vec-emb',     from:'n-vector',    fS:'bottom', to:'n-embeddings',tS:'top',   fOff: -15 },
+  { id:'graph-emb',   from:'n-graph',     fS:'bottom', to:'n-embeddings',tS:'top',   fOff: 15  },
+  // Backends → Claude generate
+  { id:'vec-cgen',    from:'n-vector',    fS:'bottom', to:'n-claude-gen',tS:'top',   fOff: -15 },
+  { id:'graph-cgen',  from:'n-graph',     fS:'bottom', to:'n-claude-gen',tS:'top',   fOff: 0   },
+  { id:'cog-cgen',    from:'n-cognee',    fS:'bottom', to:'n-claude-gen',tS:'top',   fOff: 15  },
+  // Claude gen → eval
+  { id:'gen-eval',    from:'n-claude-gen',fS:'bottom', to:'n-claude-eval',tS:'top'             },
+  // Backends → databases
+  { id:'vec-sup',     from:'n-vector',    fS:'right',  to:'n-supabase',  tS:'left'             },
+  { id:'graph-neo',   from:'n-graph',     fS:'right',  to:'n-neo4j',     tS:'left'             },
+  { id:'cog-ldb',     from:'n-cognee',    fS:'right',  to:'n-lancedb',   tS:'left'             },
+  // Claude → Anthropic
+  { id:'cgen-anth',   from:'n-claude-gen', fS:'right', to:'n-anthropic', tS:'left',  fOff: -8  },
+  { id:'eval-anth',   from:'n-claude-eval',fS:'right', to:'n-anthropic', tS:'left',  fOff: 8   },
+
+  // Tab 2 — Model Compare: user → app model
+  { id:'mod-q',       from:'n-surface-b', fS:'right',  to:'n-app-model', tS:'left'             },
+  // App → retriever
+  { id:'mod-ret',     from:'n-app-model', fS:'bottom', to:'n-retriever', tS:'top'              },
+  // Retriever → providers cluster (shows a DB is hit)
+  { id:'ret-prov',    from:'n-retriever', fS:'right',  to:'n-providers', tS:'left'             },
+  // App → both models
+  { id:'mod-cmod',    from:'n-app-model', fS:'bottom', to:'n-claude-model',tS:'top', fOff: -20 },
+  { id:'mod-gemma',   from:'n-app-model', fS:'bottom', to:'n-gemma',     tS:'top',   fOff: 20  },
+  // Models → external APIs
+  { id:'cmod-anth',   from:'n-claude-model',fS:'right',to:'n-anthropic', tS:'left'             },
+  { id:'gemma-vtx',   from:'n-gemma',     fS:'right',  to:'n-vertex',    tS:'left'             },
+  // Eval → Anthropic
+  { id:'meval-anth',  from:'n-model-eval',fS:'right',  to:'n-anthropic', tS:'left'             },
+
+  // Tab 3 — Ingest: PDFs (surface-a) → scripts
+  { id:'pdfs-vingest',from:'n-surface-a', fS:'right',  to:'n-vector-ingest', tS:'left', fOff:-15 },
+  { id:'pdfs-gingest',from:'n-surface-a', fS:'right',  to:'n-graph-ingest',  tS:'left', fOff: 0  },
+  { id:'pdfs-cingest',from:'n-surface-a', fS:'right',  to:'n-cognee-ingest', tS:'left', fOff: 15 },
+  // Scripts → databases
+  { id:'vingest-sup', from:'n-vector-ingest', fS:'right', to:'n-supabase',  tS:'left'           },
+  { id:'gingest-neo', from:'n-graph-ingest',  fS:'right', to:'n-neo4j',     tS:'left'           },
+  { id:'cingest-ldb', from:'n-cognee-ingest', fS:'right', to:'n-lancedb',   tS:'left'           },
+  // Graph ingest → Anthropic (entity extraction)
+  { id:'gingest-anth',from:'n-graph-ingest',  fS:'right', to:'n-anthropic', tS:'left', fOff:-15 },
+
+  // Tab 4 — Deploy
+  { id:'dev-docker',  from:'n-surface-b', fS:'right',  to:'n-dockerfile',tS:'left'             },
+  { id:'docker-hub',  from:'n-dockerfile',fS:'bottom', to:'n-dockerhub', tS:'top'              },
+  { id:'hub-gcp',     from:'n-dockerhub', fS:'bottom', to:'n-gcp',       tS:'top'              },
+  { id:'gcp-svc',     from:'n-gcp',       fS:'bottom', to:'n-systemd',   tS:'top'              },
+];
+
+const FLOWS = {
+  rag: [
+    {
+      nodes:  ['n-surface-a', 'n-app'],
+      arrows: ['rag-q'],
+      ttl:    'RAG Comparison Overview',
+      desc:   'The app exposes a shared question input above two Gradio tabs. Tab 1 fires all three RAG backends in parallel via asyncio.gather() — no orchestration layer, no inter-process calls. The only variable between the three answers is how each backend retrieves context.',
+      tags:   ['asyncio.gather', 'Gradio', 'parallel dispatch', 'app.py'],
+      code:   `<span class="kw">async def</span> <span class="fn">run_comparison</span>(question: str):
+    (v_ctx, v_ans), (g_ctx, g_ans), (c_ctx, c_ans) = <span class="kw">await</span> asyncio.gather(
+        _safe_query(vector_query,  question),
+        _safe_query(graph_query,   question),
+        _safe_query(cognee_query,  question),
+    )`,
+    },
+    {
+      nodes:  ['n-app', 'n-vector', 'n-graph', 'n-cognee'],
+      arrows: ['app-vec', 'app-graph', 'app-cog'],
+      ttl:    'Parallel Backend Dispatch',
+      desc:   'Each backend is called via _safe_query(), which catches exceptions and returns an error tuple rather than crashing. One broken backend never blocks the other two — asyncio.gather() collects all three results regardless.',
+      tags:   ['_safe_query()', 'error isolation', 'tuple[str, str]'],
+      code:   `<span class="kw">async def</span> <span class="fn">_safe_query</span>(fn, question: str) -> tuple[str, str]:
+    <span class="kw">try</span>:
+        <span class="kw">return await</span> fn(question)
+    <span class="kw">except</span> Exception <span class="kw">as</span> exc:
+        msg = <span class="str">f"⚠ Backend error: {exc}"</span>
+        <span class="kw">return</span> msg, msg`,
+    },
+    {
+      nodes:  ['n-vector', 'n-graph', 'n-cognee', 'n-embeddings', 'n-supabase', 'n-neo4j', 'n-lancedb'],
+      arrows: ['vec-sup', 'graph-neo', 'cog-ldb', 'vec-emb', 'graph-emb'],
+      ttl:    'Three Retrieval Strategies',
+      desc:   'Vector: cosine similarity over 160 pgvector chunks, TOP_K=5.\nGraph: Claude routes to hybrid / entity / community mode via tool use, then traverses Neo4j, TOP_K=3.\nCognee: cognee.search(CHUNKS), TOP_K=10 — graph structure built automatically at ingest time.',
+      tags:   ['pgvector', 'Neo4j traversal', 'LanceDB', 'fastembed', 'route()'],
+      code:   `<span class="cm"># vector.py — cosine similarity, TOP_K=5</span>
+cur.execute(<span class="str">"SELECT ... ORDER BY embedding <=> %s::vector LIMIT %s"</span>,
+            (query_vec, COLLECTION, query_vec, TOP_K))
+
+<span class="cm"># graph/routing.py — Claude selects mode</span>
+<span class="kw">async def</span> <span class="fn">route</span>(question) -> tuple[str, str]:
+    <span class="cm"># tool_choice: classify_query → hybrid | entity | community</span>
+
+<span class="cm"># cognee_backend.py — opaque hybrid, TOP_K=10</span>
+results = <span class="kw">await</span> cognee.search(
+    query_type=SearchType.CHUNKS, query_text=question)`,
+    },
+    {
+      nodes:  ['n-vector', 'n-graph', 'n-cognee', 'n-claude-gen', 'n-anthropic'],
+      arrows: ['vec-cgen', 'graph-cgen', 'cog-cgen', 'cgen-anth'],
+      ttl:    'Shared Answer Generation',
+      desc:   'All three backends call the same generate_answer() in backends/shared/claude.py. The system prompt is identical for all three. max_tokens=1024. The only difference is what context each backend passes in — this isolates retrieval as the experimental variable.',
+      tags:   ['generate_answer()', 'claude-sonnet-4-6', 'identical prompt', 'max_tokens=1024'],
+      code:   `SYSTEM_PROMPT = (
+    <span class="str">"You are a helpful customer support assistant for Everstorm Outfitters..."</span>
+)
+
+<span class="kw">async def</span> <span class="fn">generate_answer</span>(question: str, context: str) -> str:
+    response = <span class="kw">await</span> get_client().messages.create(
+        model=CLAUDE_MODEL, max_tokens=<span class="str">1024</span>,
+        system=SYSTEM_PROMPT,
+        messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>,
+                   <span class="str">"content"</span>: <span class="str">f"Context:\n{context}\n\nQuestion: {question}"</span>}])
+    <span class="kw">return</span> response.content[0].text`,
+    },
+    {
+      nodes:  ['n-surface-a', 'n-app', 'n-vector', 'n-graph', 'n-cognee', 'n-embeddings',
+               'n-claude-gen', 'n-claude-eval', 'n-supabase', 'n-neo4j', 'n-lancedb', 'n-anthropic'],
+      arrows: ['rag-q', 'app-vec', 'app-graph', 'app-cog', 'vec-emb', 'graph-emb',
+               'vec-cgen', 'graph-cgen', 'cog-cgen', 'gen-eval', 'vec-sup', 'graph-neo',
+               'cog-ldb', 'cgen-anth', 'eval-anth'],
+      ttl:    'Claude Evaluates All Three',
+      desc:   '_rag_comparison_summary() sends all six context + answer pairs to Claude in a single prompt (max_tokens=1500). Output is a structured ## Verdict table + ## Score Breakdown (5 criteria, 1pt each) + ## System Breakdown per backend.',
+      tags:   ['_rag_comparison_summary()', 'max_tokens=1500', 'scored table', '5 criteria'],
+      code:   `response = <span class="kw">await</span> get_client().messages.create(
+    model=CLAUDE_MODEL,
+    max_tokens=<span class="str">1500</span>,
+    system=_RAG_EVAL_SYSTEM,
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: prompt}],
+)
+<span class="cm"># Output: ## Verdict table (winner 🏆, runner-up 🥈)</span>
+<span class="cm"># ## Score Breakdown: Retrieval | Accuracy | Completeness | Clarity | No Hallucinations</span>
+<span class="cm"># ## System Breakdown per backend</span>`,
+    },
+  ],
+
+  model: [
+    {
+      nodes:  ['n-surface-b', 'n-app-model', 'n-retriever'],
+      arrows: ['mod-q'],
+      ttl:    'Model Comparison Overview',
+      desc:   'Tab 2 controls for retrieval to isolate model quality. The user picks a RAG backend from a dropdown. retrieve() is called exactly once — the same context_str is passed to both models. Any answer difference is pure generation quality.',
+      tags:   ['dropdown', 'retrieve()', 'controlled variable', 'shared context'],
+      code:   `_RETRIEVERS = {
+    <span class="str">"Vector RAG"</span>: vector_retrieve,
+    <span class="str">"Graph RAG"</span>:  graph_retrieve,
+    <span class="str">"Cognee"</span>:     cognee_retrieve,
+}
+
+<span class="kw">async def</span> <span class="fn">run_model_comparison</span>(question: str, backend: str):
+    retrieve_fn = _RETRIEVERS.get(backend, vector_retrieve)
+    context, retrieved = <span class="kw">await</span> _safe_retrieve(retrieve_fn, question)`,
+    },
+    {
+      nodes:  ['n-retriever', 'n-providers'],
+      arrows: ['mod-ret', 'ret-prov'],
+      ttl:    'Single Retrieval',
+      desc:   'Each backend exposes retrieve(question) → (context_str, summary_str) without calling Claude. Vector returns 5 chunks, Graph returns 3 after routing, Cognee returns 10. The context_str is the raw text both models receive — identical for both.',
+      tags:   ['retrieve()', '(context_str, summary_str)', 'no generation', 'TOP_K varies'],
+      code:   `<span class="cm"># backends/vector.py — retrieve without generation</span>
+<span class="kw">async def</span> <span class="fn">retrieve</span>(question: str) -> tuple[str, str]:
+    chunks = <span class="kw">await</span> asyncio.to_thread(_fetch_chunks, question)
+    context = <span class="str">"\n\n---\n\n"</span>.join(
+        <span class="str">f"[{c['source_doc']} | score: {c['score']}]\n{c['chunk_text']}"</span>
+        <span class="kw">for</span> c <span class="kw">in</span> chunks
+    )
+    summary = <span class="str">"\n"</span>.join(<span class="str">f"• {c['source_doc']}  (score: {c['score']})"</span> <span class="kw">for</span> c <span class="kw">in</span> chunks)
+    <span class="kw">return</span> context, summary`,
+    },
+    {
+      nodes:  ['n-app-model', 'n-claude-model', 'n-gemma', 'n-anthropic', 'n-vertex'],
+      arrows: ['mod-cmod', 'mod-gemma', 'cmod-anth', 'gemma-vtx'],
+      ttl:    'Parallel Generation',
+      desc:   'asyncio.gather() runs both models simultaneously. Claude uses AsyncAnthropic (native async). Gemma 4 uses asyncio.to_thread() to wrap the synchronous google-genai SDK. Both use the same system prompt — Everstorm customer support assistant.',
+      tags:   ['asyncio.gather', 'AsyncAnthropic', 'asyncio.to_thread', 'Vertex AI MaaS'],
+      code:   `claude_ans, gemma_ans = <span class="kw">await</span> asyncio.gather(
+    _safe_generate(generate_answer,       question, context),
+    _safe_generate(generate_answer_gemma, question, context),
+)
+
+<span class="cm"># gemma.py — sync SDK wrapped in thread pool</span>
+response = <span class="kw">await</span> asyncio.to_thread(
+    get_client().models.generate_content,
+    model=GEMMA_MODEL, contents=prompt)`,
+    },
+    {
+      nodes:  ['n-surface-b', 'n-app-model', 'n-retriever', 'n-claude-model', 'n-gemma',
+               'n-model-eval', 'n-anthropic', 'n-vertex', 'n-providers'],
+      arrows: ['mod-q', 'mod-ret', 'ret-prov', 'mod-cmod', 'mod-gemma',
+               'cmod-anth', 'gemma-vtx', 'meval-anth'],
+      ttl:    'Generation Verdict',
+      desc:   '_model_comparison_summary() sends both answers to Claude (max_tokens=1000) with a 5-criterion rubric: Accuracy, Completeness, Clarity, Context Usage, No Hallucinations (1pt each). Output mirrors the RAG tab: scored table + system breakdown.',
+      tags:   ['_model_comparison_summary()', 'max_tokens=1000', '5-criterion rubric', 'Claude judge'],
+      code:   `response = <span class="kw">await</span> get_client().messages.create(
+    model=CLAUDE_MODEL,
+    max_tokens=<span class="str">1000</span>,
+    system=_MODEL_EVAL_SYSTEM,
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: prompt}],
+)
+<span class="cm"># Output: ## Verdict table (winner 🏆, runner-up 🥈)</span>
+<span class="cm"># ## Score Breakdown: Accuracy | Completeness | Clarity | Context Usage | No Hallucinations</span>`,
+    },
+  ],
+
+  ingest: [
+    {
+      nodes:  ['n-surface-a', 'n-vector-ingest', 'n-graph-ingest', 'n-cognee-ingest'],
+      arrows: [],
+      ttl:    'Ingest Overview',
+      desc:   'Ingest is a one-time operation per backend — not in the query path. Three independent scripts in ingest/ read 15 Everstorm Outfitters PDFs from data/ and populate their respective backend. Run them once inside the container after deployment.',
+      tags:   ['one-time', 'docker exec', '15 PDFs', 'data/', 'ingest/'],
+      code:   `<span class="cm"># Run once inside the running container</span>
+docker exec -w /app -e PYTHONPATH=/app rag-comparison <span class="kw">\\</span>
+    python ingest/vector_ingest.py    <span class="cm"># → 160 chunks → Supabase</span>
+docker exec -w /app -e PYTHONPATH=/app rag-comparison <span class="kw">\\</span>
+    python ingest/graph_ingest.py     <span class="cm"># → 955 entities → Neo4j</span>
+docker exec -w /app -e PYTHONPATH=/app rag-comparison <span class="kw">\\</span>
+    python ingest/cognee_ingest.py    <span class="cm"># → 15 PDFs → LanceDB</span>`,
+    },
+    {
+      nodes:  ['n-vector-ingest', 'n-supabase'],
+      arrows: ['vingest-sup', 'pdfs-vingest'],
+      ttl:    'Vector Ingest',
+      desc:   'vector_ingest.py loads PDFs via PyMuPDF, splits with RecursiveCharacterTextSplitter(chunk_size=500, overlap=50) producing 160 chunks, batch-embeds with fastembed in one pass, then upserts to Supabase. Creates vector(384) column with HNSW index on first run.',
+      tags:   ['PyMuPDF', 'chunk_size=500', 'overlap=50', '160 chunks', 'HNSW', 'fastembed'],
+      code:   `CHUNK_SIZE    = 500
+CHUNK_OVERLAP = 50
+
+_ensure_schema(conn)  <span class="cm"># creates vector(384) + HNSW index</span>
+
+<span class="cm"># Batch embed all chunks in one pass</span>
+embeddings = list(model.embed([c[<span class="str">"text"</span>] <span class="kw">for</span> c <span class="kw">in</span> chunks]))
+<span class="cm"># "Total: 160 chunks — batch embedding with fastembed..."</span>
+<span class="cm"># "160 vectors written to collection 'everstorm_docs'."</span>`,
+    },
+    {
+      nodes:  ['n-graph-ingest', 'n-anthropic', 'n-neo4j'],
+      arrows: ['gingest-anth', 'gingest-neo', 'pdfs-gingest'],
+      ttl:    'Graph Ingest — 8 Steps',
+      desc:   'graph_ingest.py runs 8 steps. Steps 1-4: Claude extracts entities via extract_graph tool use (7 ENTITY_TYPES, 6 RELATIONSHIP_TYPES) with asyncio.Semaphore(5) concurrency, then writes to Neo4j. Steps 5-8: resolve near-duplicates (cosine ≥ 0.95), detect Louvain communities, summarize each community with Claude.',
+      tags:   ['extract_graph tool', 'Semaphore(5)', 'ENTITY_MERGE_THRESHOLD=0.95', 'Louvain', '955 entities'],
+      code:   `EXTRACTION_CONCURRENCY = 5   <span class="cm"># semaphore</span>
+ENTITY_MERGE_THRESHOLD = 0.95  <span class="cm"># cosine similarity</span>
+ENTITY_TYPES = [<span class="str">"PRODUCT"</span>,<span class="str">"POLICY"</span>,<span class="str">"PROGRAM"</span>,<span class="str">"TIER"</span>,
+                <span class="str">"BENEFIT"</span>,<span class="str">"CONDITION"</span>,<span class="str">"PROCESS"</span>]
+
+<span class="cm"># Result: 955 entities, 855 relationships, 135 communities</span>
+<span class="cm"># Schema: Document → HAS_CHUNK → Chunk → MENTIONS → Entity</span>
+<span class="cm">#         Entity → RELATED → Entity</span>
+<span class="cm">#         Entity → BELONGS_TO → Community</span>`,
+    },
+    {
+      nodes:  ['n-surface-a', 'n-vector-ingest', 'n-graph-ingest', 'n-cognee-ingest',
+               'n-supabase', 'n-neo4j', 'n-lancedb', 'n-anthropic'],
+      arrows: ['pdfs-vingest', 'pdfs-gingest', 'pdfs-cingest',
+               'vingest-sup', 'gingest-neo', 'cingest-ldb', 'gingest-anth'],
+      ttl:    'Cognee Ingest',
+      desc:   'cognee_ingest.py calls _configure() before importing cognee (DATA_PATH, VECTOR_DB_PROVIDER=lancedb, LLM_PROVIDER=anthropic), then cognee.add() once per PDF, then cognee.cognify() once. Cognee stores databases at .cognee_system/ inside the package dir — NOT at DATA_PATH.',
+      tags:   ['cognee.add()', 'cognify()', 'configure before import', '.cognee_system/', 'lancedb'],
+      code:   `<span class="kw">def</span> <span class="fn">_configure</span>() -> None:
+    <span class="cm"># Must run before: import cognee</span>
+    os.environ[<span class="str">"LLM_PROVIDER"</span>]       = <span class="str">"anthropic"</span>
+    os.environ[<span class="str">"VECTOR_DB_PROVIDER"</span>] = <span class="str">"lancedb"</span>
+    os.environ[<span class="str">"EMBEDDING_PROVIDER"</span>] = <span class="str">"fastembed"</span>
+    os.environ[<span class="str">"DATA_PATH"</span>]          = COGNEE_DATA_PATH
+
+<span class="kw">for</span> pdf_path <span class="kw">in</span> pdf_paths:
+    <span class="kw">await</span> cognee.add(str(pdf_path))
+<span class="kw">await</span> cognee.cognify()  <span class="cm"># builds vector + knowledge graph</span>`,
+    },
+  ],
+
+  deploy: [
+    {
+      nodes:  ['n-dockerfile', 'n-dockerhub', 'n-gcp', 'n-systemd'],
+      arrows: [],
+      ttl:    'Deployment Overview',
+      desc:   'The app runs inside Docker on a GCP e2-medium VM (4GB RAM, us-west1-b). A systemd service starts the container on boot and restarts on failure. Cognee LanceDB files are stored on the VM filesystem and volume-mounted into the container so data survives restarts.',
+      tags:   ['e2-medium', 'us-west1-b', 'Docker', 'systemd', 'tcp:7860'],
+      code:   `<span class="cm"># deploy/gcloud_commands.sh</span>
+gcloud compute instances create rag-comparison <span class="kw">\\</span>
+    --machine-type=e2-medium <span class="kw">\\</span>
+    --zone=us-west1-b <span class="kw">\\</span>
+    --scopes=cloud-platform  <span class="cm"># required for Vertex AI — set at creation</span>
+
+gcloud compute firewall-rules create allow-rag-comparison <span class="kw">\\</span>
+    --allow=tcp:7860`,
+    },
+    {
+      nodes:  ['n-surface-b', 'n-dockerfile', 'n-dockerhub'],
+      arrows: ['dev-docker', 'docker-hub'],
+      ttl:    'Build & Push',
+      desc:   'Dockerfile uses python:3.11-slim, installs libmupdf-dev + gcc for PyMuPDF, copies and installs requirements, copies source. EXPOSE 7860, CMD ["python", "app.py"]. Built locally and pushed to Docker Hub.',
+      tags:   ['python:3.11-slim', 'libmupdf-dev', 'docker build', 'docker push', 'EXPOSE 7860'],
+      code:   `<span class="cm"># Dockerfile</span>
+<span class="kw">FROM</span> python:3.11-slim
+<span class="kw">RUN</span> apt-get install -y libmupdf-dev gcc
+<span class="kw">COPY</span> requirements.txt .
+<span class="kw">RUN</span> pip install --no-cache-dir -r requirements.txt
+<span class="kw">COPY</span> . .
+<span class="kw">EXPOSE</span> 7860
+<span class="kw">CMD</span> [<span class="str">"python"</span>, <span class="str">"app.py"</span>]
+
+<span class="cm"># docker build -t johndellenbaugh/rag-comparison:latest .</span>
+<span class="cm"># docker push johndellenbaugh/rag-comparison:latest</span>`,
+    },
+    {
+      nodes:  ['n-dockerhub', 'n-gcp', 'n-systemd', 'n-lancedb'],
+      arrows: ['hub-gcp', 'gcp-svc'],
+      ttl:    'VM Service & Volume Mount',
+      desc:   'The systemd unit mounts /home/johndellenbaugh/.cognee_system into the container at /usr/local/lib/python3.11/site-packages/cognee/.cognee_system — where Cognee actually stores its databases (not DATA_PATH). Without this, Cognee data is lost on every container restart. PYTHONUNBUFFERED=1 ensures logs appear in journalctl.',
+      tags:   ['.cognee_system volume', 'PYTHONUNBUFFERED=1', 'Restart=always', '--env-file'],
+      code:   `<span class="cm"># /etc/systemd/system/rag-comparison.service</span>
+[Service]
+Restart=always
+ExecStart=/usr/bin/docker run --rm --name rag-comparison <span class="kw">\\</span>
+  --env-file /home/johndellenbaugh/.env <span class="kw">\\</span>
+  -e PYTHONUNBUFFERED=1 <span class="kw">\\</span>
+  -v /home/johndellenbaugh/.cognee_system:<span class="pal">\\</span>
+<span class="pal">/usr/local/lib/python3.11/site-packages/cognee/.cognee_system</span> <span class="kw">\\</span>
+  -p 7860:7860 <span class="kw">\\</span>
+  docker.io/johndellenbaugh/rag-comparison:latest`,
+    },
+    {
+      nodes:  ['n-surface-b', 'n-dockerfile', 'n-dockerhub', 'n-gcp', 'n-systemd',
+               'n-lancedb', 'n-vertex', 'n-anthropic'],
+      arrows: ['dev-docker', 'docker-hub', 'hub-gcp', 'gcp-svc'],
+      ttl:    'OAuth Scope for Vertex AI',
+      desc:   'GCP VMs have limited OAuth scopes by default. Calling Vertex AI from inside Docker requires --scopes=cloud-platform at VM creation time (cannot change on a running VM — must stop first). The VM service account also needs roles/aiplatform.user. ADC inside Docker works via the GCP metadata server at 169.254.169.254.',
+      tags:   ['cloud-platform scope', 'roles/aiplatform.user', 'ADC', 'metadata server 169.254.169.254'],
+      code:   `<span class="cm"># Must specify --scopes=cloud-platform at VM creation</span>
+<span class="cm"># Changing scopes requires stopping the VM first:</span>
+gcloud compute instances stop rag-comparison --zone=us-west1-b
+
+gcloud compute instances set-service-account rag-comparison <span class="kw">\\</span>
+    --scopes=cloud-platform
+
+<span class="cm"># Grant IAM role to VM's default service account</span>
+gcloud projects add-iam-policy-binding &lt;project-id&gt; <span class="kw">\\</span>
+    --member=<span class="str">"serviceAccount:&lt;vm-sa-email&gt;"</span> <span class="kw">\\</span>
+    --role=<span class="str">"roles/aiplatform.user"</span>`,
+    },
+  ],
+};
+
+const NT_DESCS = {
+  rag: [
+    'A single question goes to three different search engines at the same time. All three are working simultaneously, and whichever finishes first waits for the others before showing results.',
+    'Each search engine runs in its own protected bubble. If one crashes, the other two keep going and you still see their answers. A broken engine shows an error message instead of blank space.',
+    'Vector search finds sections that sound like the question. Graph search follows concept connections to find related policies. Cognee uses a self-built hybrid approach that combines both strategies automatically.',
+    'All three engines send their findings to the same AI with the same instructions. The only thing that changes is what each engine found — this makes the comparison fair.',
+    'Claude reads all three answers at once and gives each a score on five points: how well it searched, how accurate the answer was, how complete, how clearly it was written, and whether it made anything up.',
+  ],
+  model: [
+    'Pick which search engine gathers the facts. Both AI models then receive exactly the same information — the only thing being measured is how well each model reasons and writes.',
+    'One search engine runs and returns its findings as plain text. The same text is handed to both models — neither knows which engine found it.',
+    'Claude and Gemma 4 write their answers at the same time from identical facts. Running them simultaneously is faster and ensures neither model has an advantage from seeing the other\'s answer.',
+    'Claude grades both answers on five criteria: accuracy, completeness, clarity, how well each model used the provided facts, and whether it invented anything. Then it names a winner and explains the decision.',
+  ],
+  ingest: [
+    'Before the app can answer questions, each search engine must read and process all 15 policy documents. This happens once — results are stored permanently and reused for every question.',
+    'The vector search engine reads each document, breaks it into overlapping sections, and saves a mathematical fingerprint of each section. Searches later compare fingerprints to find matching content.',
+    'Claude reads every document section and identifies key concepts, programs, and policies — then maps how they connect across all 15 documents. This creates a web of relationships rather than isolated text snippets.',
+    'Cognee reads all documents and automatically builds both a text-similarity index and a knowledge graph in a single operation. The structure it builds is not directly visible — that\'s the trade-off for much simpler code.',
+  ],
+  deploy: [
+    'The app runs on a cloud server that starts automatically when turned on and recovers itself if it crashes. Cognee\'s search data is stored directly on the server so it is not lost when the container restarts.',
+    'The app is packaged into a portable container image and uploaded to a public registry. The cloud server downloads this image to run the app — any server with Docker can run the same image.',
+    'The cloud server\'s startup service pulls the latest image, connects Cognee\'s database files into the container, and opens port 7860 for browser access. Without the file connection, Cognee would forget all documents on every restart.',
+    'To use Google\'s Gemma 4 model, the server needs special permissions set up when it is first created. Changing these permissions later requires briefly shutting down the server — a significant operational consideration.',
+  ],
+};
+
+const TAB_KEYS = ['rag', 'model', 'ingest', 'deploy'];
+
+const NT_LABELS = {
+  rag:    'Business Impact',
+  model:  'Model Comparison',
+  ingest: 'Data Pipeline',
+  deploy: 'Operations',
+};
+
+const CLUSTER_TASK_IDS = new Set([
+  'n-app', 'n-vector', 'n-graph', 'n-cognee', 'n-embeddings', 'n-claude-gen', 'n-claude-eval',
+  'n-app-model', 'n-retriever', 'n-claude-model', 'n-gemma', 'n-model-eval',
+  'n-vector-ingest', 'n-graph-ingest', 'n-cognee-ingest',
+  'n-dockerfile', 'n-dockerhub', 'n-gcp', 'n-systemd',
+]);
+
+const PNODE_IDS = new Set(['n-anthropic', 'n-vertex', 'n-supabase', 'n-neo4j']);
+
+const SURFACE_IDS = new Set(['n-surface-a', 'n-surface-b']);
+
+const T3_ARROWS = new Set(['pdfs-vingest', 'pdfs-gingest', 'pdfs-cingest']);
+const T4_ARROWS = new Set(['dev-docker', 'docker-hub', 'hub-gcp', 'gcp-svc']);
+
+let flow = TAB_KEYS[0], step = 0;
+
+function rect(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const outer = document.getElementById('diagram-outer');
+  const er = el.getBoundingClientRect();
+  const sr = outer.getBoundingClientRect();
+  return {
+    l: er.left - sr.left, t: er.top - sr.top,
+    r: er.right - sr.left, b: er.bottom - sr.top,
+    cx: er.left - sr.left + er.width / 2,
+    cy: er.top - sr.top + er.height / 2,
+    w: er.width, h: er.height,
+  };
+}
+
+function edge(r, side, off) {
+  off = off || 0;
+  if (side === 'top')    return { x: r.cx + off, y: r.t };
+  if (side === 'bottom') return { x: r.cx + off, y: r.b };
+  if (side === 'left')   return { x: r.l, y: r.cy + off };
+  if (side === 'right')  return { x: r.r, y: r.cy + off };
+}
+
+function buildPath(def) {
+  const fr = rect(def.from), tr = rect(def.to);
+  if (!fr || !tr) return null;
+  const p1 = edge(fr, def.fS, def.fOff);
+  const p2 = edge(tr, def.tS, def.tOff);
+  if (def.bendBelow != null) {
+    const botY = Math.max(p1.y, p2.y) + def.bendBelow;
+    return `M ${p1.x} ${p1.y} C ${p1.x} ${botY}, ${p2.x} ${botY}, ${p2.x} ${p2.y}`;
+  }
+  const dx = Math.max(Math.abs(p2.x - p1.x) * 0.5, 40);
+  const dy = Math.max(Math.abs(p2.y - p1.y) * 0.5, 40);
+  let c1, c2;
+  if      (def.fS === 'right')  c1 = { x: p1.x + dx, y: p1.y };
+  else if (def.fS === 'left')   c1 = { x: p1.x - dx, y: p1.y };
+  else if (def.fS === 'bottom') c1 = { x: p1.x, y: p1.y + dy };
+  else                          c1 = { x: p1.x, y: p1.y - dy };
+  if      (def.tS === 'left')   c2 = { x: p2.x - dx, y: p2.y };
+  else if (def.tS === 'right')  c2 = { x: p2.x + dx, y: p2.y };
+  else if (def.tS === 'top')    c2 = { x: p2.x, y: p2.y - dy };
+  else                          c2 = { x: p2.x, y: p2.y + dy };
+  return `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
+}
+
+function isVisible(id) {
+  const el = document.getElementById(id);
+  if (!el) return false;
+  return el.getBoundingClientRect().height > 0;
+}
+
+function drawArrows() {
+  const svg = document.getElementById('svg-arrows');
+  [...svg.querySelectorAll('.arrow-path')].forEach(p => p.remove());
+  const outer = document.getElementById('diagram-outer');
+  svg.setAttribute('width', outer.offsetWidth);
+  svg.setAttribute('height', outer.offsetHeight);
+  ARROWS.forEach(def => {
+    if (!isVisible(def.from) || !isVisible(def.to)) return;
+    try {
+      const d = buildPath(def);
+      if (!d) return;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('id', 'a-' + def.id);
+      path.setAttribute('d', d);
+      path.setAttribute('class', 'arrow-path');
+      svg.appendChild(path);
+    } catch(e) {}
+  });
+}
+
+function render() {
+  const steps = FLOWS[flow];
+  const s = steps[step];
+  const total = steps.length;
+  const isFirstTab  = (flow === TAB_KEYS[0]);
+  const isSecondTab = (flow === TAB_KEYS[1]);
+
+  document.querySelectorAll(
+    '.task,.user-flow,.node,.user-cluster,.cluster,.providers-cluster,.pnode'
+  ).forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.arrow-path').forEach(p =>
+    p.classList.remove('lit','lit-pal','lit-warn','lit-desktop','lit-web')
+  );
+
+  s.nodes.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
+    if (CLUSTER_TASK_IDS.has(id)) {
+      const eng = document.getElementById('n-engine');
+      if (eng) eng.classList.add('active');
+    }
+    if (PNODE_IDS.has(id)) {
+      const prov = document.getElementById('n-providers');
+      if (prov) prov.classList.add('active');
+    }
+    if (SURFACE_IDS.has(id)) {
+      const uc = document.getElementById('n-user-cluster');
+      if (uc) uc.classList.add('active');
+    }
+  });
+
+  s.arrows.forEach(aid => {
+    const el = document.getElementById('a-' + aid);
+    if (el) {
+      if      (isFirstTab)                  el.classList.add('lit');
+      else if (isSecondTab)                 el.classList.add('lit-pal');
+      else if (T3_ARROWS.has(aid))          el.classList.add('lit-desktop');
+      else if (T4_ARROWS.has(aid))          el.classList.add('lit-web');
+      else                                  el.classList.add('lit');
+    }
+  });
+
+  const numEl = document.getElementById('s-num');
+  numEl.textContent = `Step ${step + 1}`;
+  numEl.className   = 'step-num' + (isSecondTab ? ' pal' : '');
+
+  document.getElementById('s-ttl').textContent  = s.ttl;
+  document.getElementById('s-desc').textContent = s.desc;
+  document.getElementById('s-code').innerHTML   = s.code;
+  document.getElementById('s-nt').textContent   = (NT_DESCS[flow] || [])[step] || '';
+  document.getElementById('nt-panel-label').textContent = NT_LABELS[flow] || 'Business Impact';
+
+  const tagsEl = document.getElementById('s-tags');
+  tagsEl.innerHTML = s.tags.map(t => `<span class="comp-tag">${t}</span>`).join('');
+
+  document.getElementById('s-ct').textContent    = `${step + 1} / ${total}`;
+  document.getElementById('btn-prev').disabled    = step === 0;
+  document.getElementById('btn-next').disabled    = step === total - 1;
+  document.getElementById('btn-next').textContent = step === total - 1 ? '✓ Done' : 'Next →';
+
+  const dotsEl = document.getElementById('dots');
+  dotsEl.innerHTML = '';
+  for (let i = 0; i < total; i++) {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i === step ? ' cur' : i < step ? ' past' : '');
+    d.title = FLOWS[flow][i].ttl;
+    d.onclick = () => { step = i; render(); };
+    dotsEl.appendChild(d);
+  }
+}
+
+function setFlow(f) {
+  flow = f; step = 0;
+
+  TAB_KEYS.forEach(t => {
+    document.getElementById('tab-' + t).classList.toggle('active', t === f);
+  });
+
+  const show = sel => document.querySelectorAll(sel).forEach(el => el.style.display = '');
+  const hide = sel => document.querySelectorAll(sel).forEach(el => el.style.display = 'none');
+
+  TAB_KEYS.forEach(t => hide('.' + t + '-show'));
+  show('.' + f + '-show');
+
+  const sa = document.getElementById('n-surface-a');
+  const sb = document.getElementById('n-surface-b');
+  if (sa) sa.classList.toggle('dim', f === 'deploy');
+  if (sb) sb.classList.toggle('dim', f === 'ingest');
+
+  requestAnimationFrame(() => { drawArrows(); render(); });
+}
+
+function toggleTech() {
+  const isNT = document.body.classList.toggle('nontechnical');
+  document.getElementById('nt-label').textContent = isNT ? 'OFF' : 'ON';
+  requestAnimationFrame(drawArrows);
+}
+
+function next() { if (step < FLOWS[flow].length - 1) { step++; render(); } }
+function prev() { if (step > 0) { step--; render(); } }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next();
+  if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   prev();
+});
+
+window.addEventListener('load',   () => { setFlow(TAB_KEYS[0]); });
+window.addEventListener('resize', drawArrows);
+</script>
+</body>
+</html>
