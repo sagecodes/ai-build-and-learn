@@ -189,6 +189,118 @@ _KOKORO_LANG = {"English": "a", "British": "b", "Spanish": "e", "French": "f",
                 "Hindi": "h", "Italian": "i", "Japanese": "j", "Portuguese": "p",
                 "Chinese": "z"}
 
+# ── Voxtral: the served model ─────────────────────────────────────────────────────
+# Voxtral loads through a vLLM-omni server, not from_pretrained. The adapter starts the
+# server as a subprocess, waits for its audio API, then POSTs text to /v1/audio/speech.
+# The two-stage config (acoustic transformer + audio tokenizer) is embedded here so it
+# rides along in the code bundle rather than as a stray .yaml. Stage-0 gpu util is 0.5
+# so both stages fit the GB10's unified pool (from the voxtral/ Spark config).
+VOXTRAL_STAGE_YAML = """async_chunk: true
+stage_args:
+  - stage_id: 0
+    stage_type: llm
+    runtime: {process: true, devices: "0"}
+    engine_args:
+      max_num_seqs: 32
+      model_stage: audio_generation
+      model_arch: VoxtralTTSForConditionalGeneration
+      worker_type: ar
+      worker_cls: vllm_omni.worker.gpu_ar_worker.GPUARWorker
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      gpu_memory_utilization: 0.5
+      enforce_eager: false
+      trust_remote_code: true
+      async_scheduling: true
+      engine_output_type: latent
+      enable_prefix_caching: false
+      tokenizer_mode: mistral
+      config_format: mistral
+      load_format: mistral
+      skip_mm_profiling: true
+      enable_chunked_prefill: false
+      max_model_len: 4096
+      custom_process_next_stage_input_func: vllm_omni.model_executor.stage_input_processors.voxtral_tts.generator2tokenizer_async_chunk
+    output_connectors: {to_stage_1: connector_of_shared_memory}
+    is_comprehension: true
+    final_output: false
+    final_output_type: text
+    default_sampling_params: {temperature: 0.0, top_p: 1.0, top_k: -1, max_tokens: 2048, seed: 42, detokenize: True, repetition_penalty: 1.1}
+  - stage_id: 1
+    stage_type: llm
+    runtime: {process: true, devices: "0"}
+    engine_args:
+      max_num_seqs: 32
+      model_stage: audio_tokenizer
+      model_arch: VoxtralTTSForConditionalGeneration
+      worker_type: generation
+      worker_cls: vllm_omni.worker.gpu_generation_worker.GPUGenerationWorker
+      scheduler_cls: vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler
+      async_scheduling: false
+      gpu_memory_utilization: 0.1
+      enforce_eager: true
+      trust_remote_code: true
+      enable_prefix_caching: false
+      skip_mm_profiling: true
+      engine_output_type: audio
+      tokenizer_mode: mistral
+      config_format: mistral
+      load_format: mistral
+      max_num_batched_tokens: 65536
+      max_model_len: 65536
+    engine_input_source: [0]
+    is_comprehension: false
+    final_output: true
+    final_output_type: audio
+    input_connectors: {from_stage_0: connector_of_shared_memory}
+    tts_args: {max_instructions_length: 500}
+    default_sampling_params: {temperature: 0.9, top_p: 0.8, top_k: 40, max_tokens: 2048, seed: 42, detokenize: True, repetition_penalty: 1.05}
+runtime:
+  enabled: true
+  defaults: {window_size: -1, max_inflight: 1}
+  connectors:
+    connector_of_shared_memory:
+      name: SharedMemoryConnector
+      extra: {shm_threshold_bytes: 65536, codec_streaming: true, connector_get_sleep_s: 0.01, connector_get_max_wait_first_chunk: 3000, connector_get_max_wait: 300, codec_chunk_frames: 25, codec_chunk_frames_at_begin: 5, codec_left_context_frames: 25}
+  edges:
+    - {from: 0, to: 1, window_size: -1}
+"""
+
+
+def _start_voxtral_server(spec, port: int = 8000, ready_timeout: int = 900):
+    """Start vllm-omni serving Voxtral and block until its audio API answers.
+
+    Returns {"proc", "base"}. Raises if the server exits early or never gets ready.
+    """
+    import subprocess
+    import tempfile
+    import time as _t
+
+    import httpx
+
+    yaml_path = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+    yaml_path.write(VOXTRAL_STAGE_YAML)
+    yaml_path.close()
+
+    base = f"http://127.0.0.1:{port}"
+    # Inherit stdout/stderr so vLLM's logs land in the pod log (essential for debugging
+    # a server that won't start). This is the noisiest adapter by far.
+    proc = subprocess.Popen(
+        ["vllm-omni", "serve", spec.repo, "--omni",
+         "--stage-configs-path", yaml_path.name, "--host", "127.0.0.1", "--port", str(port)]
+    )
+    deadline = _t.time() + ready_timeout
+    while _t.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"vllm-omni exited early with code {proc.returncode}")
+        try:
+            if httpx.get(f"{base}/v1/audio/voices", timeout=5).status_code == 200:
+                return {"proc": proc, "base": base}
+        except Exception:
+            pass
+        _t.sleep(4)
+    proc.kill()
+    raise RuntimeError(f"vllm-omni server not ready within {ready_timeout}s")
+
 
 def load_model(spec):
     if spec.adapter == "qwen":
@@ -235,7 +347,25 @@ def load_model(spec):
         tokenizer = AutoTokenizer.from_pretrained(spec.repo)
         return (model, tokenizer)
 
+    if spec.adapter == "voxtral":
+        return _start_voxtral_server(spec)
+
     raise ValueError(f"No adapter for {spec.adapter!r}")
+
+
+def close_model(spec, handle) -> None:
+    """Release a loaded model. No-op for in-process models (GC + free_gpu handle those);
+    for Voxtral it terminates the vLLM-omni server subprocess."""
+    if spec.adapter == "voxtral" and isinstance(handle, dict) and handle.get("proc"):
+        proc = handle["proc"]
+        try:
+            proc.terminate()
+            proc.wait(timeout=20)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 def synth_one(handle, spec, text: str) -> tuple[np.ndarray, int, float]:
@@ -294,6 +424,16 @@ def synth_one(handle, spec, text: str) -> tuple[np.ndarray, int, float]:
             gen = model.generate(input_ids=input_ids, prompt_input_ids=prompt_ids)
         sr = int(getattr(model.config, "sampling_rate", spec.sample_rate))
         return to_mono_float32(gen.cpu().numpy().squeeze()), sr, time.time() - t0
+
+    if spec.adapter == "voxtral":
+        import httpx
+        payload = {"input": clean_for_plain(text), "model": spec.repo,
+                   "response_format": "wav", "voice": spec.voice or "casual_male"}
+        t0 = time.time()
+        r = httpx.post(f"{handle['base']}/v1/audio/speech", json=payload, timeout=180.0)
+        r.raise_for_status()
+        wav, sr = sf.read(io.BytesIO(r.content), dtype="float32")
+        return to_mono_float32(wav), int(sr), time.time() - t0
 
     raise ValueError(f"No adapter for {spec.adapter!r}")
 

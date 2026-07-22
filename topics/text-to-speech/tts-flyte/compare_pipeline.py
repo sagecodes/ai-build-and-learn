@@ -167,6 +167,11 @@ async def _run_model(model_key: str, weights: flyte.io.Dir, texts: list[str],
                                      title=f"{disp_key} · synthesizing", meta=meta))
             await flyte.report.flush.aio()
     finally:
+        try:
+            if handle is not None:
+                tts_core.close_model(spec, handle)   # tears down Voxtral's vLLM server
+        except Exception:
+            log.exception(f"[{disp_key}] close_model failed")
         handle = None
         tts_core.free_gpu_memory()
 
@@ -216,6 +221,12 @@ async def generate_parler(model_key: str, weights: flyte.io.Dir, texts: list[str
     return await _run_model(model_key, weights, texts, voice, variant_key)
 
 
+@GPU_ENVS["voxtral"].task(report=True, retries=1)
+async def generate_voxtral(model_key: str, weights: flyte.io.Dir, texts: list[str],
+                           voice: str = "", variant_key: str = "") -> ModelRun:
+    return await _run_model(model_key, weights, texts, voice, variant_key)
+
+
 GEN_TASKS = {
     "qwen": generate_qwen,
     "kokoro": generate_kokoro,
@@ -223,6 +234,7 @@ GEN_TASKS = {
     "dia": generate_dia,
     "csm": generate_csm,
     "parler": generate_parler,
+    "voxtral": generate_voxtral,
 }
 
 
@@ -289,22 +301,40 @@ async def compare(
     await flyte.report.flush.aio()
 
     # Fetch each unique base model ONCE (voice variants share a repo), serial so parallel
-    # HF pulls don't fight for the uplink.
+    # HF pulls don't fight for the uplink. Tolerate a per-model fetch failure (a gated
+    # repo, a network blip): it becomes an error COLUMN, it does not kill the run. One
+    # bad model must never throw away every other model's audio.
     base_keys = list(dict.fromkeys(bk for _, bk, _, _ in jobs))
-    weights = {}
+    weights: dict[str, flyte.io.Dir] = {}
+    fetch_errors: dict[str, str] = {}
     for k in base_keys:
-        weights[k] = await fetch_weights.override(short_name=f"fetch {k}")(k)
+        try:
+            weights[k] = await fetch_weights.override(short_name=f"fetch {k}")(k)
+        except Exception as e:  # gated repo, download failure, ...
+            log.exception(f"[{k}] fetch failed")
+            fetch_errors[k] = f"weights fetch failed: {e}"
 
-    # Parallel synth over all voice columns; one GPU means the scheduler serializes.
-    runs = await asyncio.gather(*[
+    # Parallel synth over the columns whose base fetched OK; one GPU means the scheduler
+    # serializes. return_exceptions so one model's crash doesn't abort the gather.
+    launch = [(rs, bk, vid, vk) for (rs, bk, vid, vk) in jobs if bk in weights]
+    raw = await asyncio.gather(*[
         GEN_TASKS[rs.adapter].override(short_name=f"say {vk}")(bk, weights[bk], texts, vid, vk)
-        for (rs, bk, vid, vk) in jobs
-    ])
+        for (rs, bk, vid, vk) in launch
+    ], return_exceptions=True)
 
     render_specs = [rs for rs, _, _, _ in jobs]
     all_results: list[tts_core.AudioResult] = []
-    for (rs, _, _, _), run in zip(jobs, runs):
-        all_results.extend(await _to_results(rs, run))
+    runs: list[ModelRun] = []
+    launched = {vk: res for (_, _, _, vk), res in zip(launch, raw)}
+    for (rs, bk, _vid, vk) in jobs:
+        res = launched.get(vk)
+        if bk in fetch_errors:
+            all_results.extend(tts_core.AudioResult(vk, t, error=fetch_errors[bk]) for t in texts)
+        elif isinstance(res, Exception):
+            all_results.extend(tts_core.AudioResult(vk, t, error=f"synth failed: {res}") for t in texts)
+        else:
+            runs.append(res)
+            all_results.extend(await _to_results(rs, res))
 
     meta = (f"{len(specs)} models · {len(jobs)} voice columns · {len(texts)} scripts · "
             f"same text · play a row left-to-right to compare")

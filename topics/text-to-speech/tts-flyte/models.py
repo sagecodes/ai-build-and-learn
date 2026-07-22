@@ -213,11 +213,31 @@ SPECS: list[TTSModelSpec] = [
         params="1B",
         download_gb=6.2,
         sample_rate=24000,
+        gated=True,             # requires accepting the license at hf.co/sesame/csm-1b
         # CSM's speaker is an id ([0]/[1]); without an audio context the voice is
         # model-chosen, so no controllable M/F here (that's the cloning task). Single voice.
         native="Conversational speech codec model; speaker id [0]/[1], best with context.",
-        notes="Sesame's natural conversational voice. No named M/F voices without an "
-              "audio prompt, so it runs single-voice here.",
+        notes="Sesame's natural conversational voice. GATED: the HF_TOKEN account must "
+              "accept the license at hf.co/sesame/csm-1b first, else fetch 403s (the run "
+              "degrades to an error column, it doesn't crash). No named M/F voices.",
+    ),
+    # ── Mistral's Voxtral: the only SERVED model (vLLM-omni), non-commercial ───────
+    TTSModelSpec(
+        key="voxtral-4b",
+        repo="mistralai/Voxtral-4B-TTS-2603",
+        adapter="voxtral",
+        family="Voxtral (Mistral, vLLM-omni)",
+        license="CC BY-NC 4.0 (non-commercial)",
+        params="4B",
+        download_gb=8.0,
+        sample_rate=24000,
+        # 20 preset voices; the four the demo uses give clean M/F.
+        voice="casual_male",
+        voices=(Voice("f", "female", "casual_female"), Voice("m", "male", "casual_male")),
+        native="9 languages, 20 preset voices, 24kHz, ~90ms latency. Served via vLLM-omni.",
+        notes="The odd one out architecturally: runs as a vLLM-omni HTTP server the task "
+              "starts and talks to (not from_pretrained). NON-COMMERCIAL license, unlike "
+              "the rest here. Heaviest image (vllm + cu12 shim on the cu130 box).",
     ),
 ]
 
@@ -227,7 +247,7 @@ MODELS: dict[str, TTSModelSpec] = {s.key: s for s in SPECS}
 # The default comparison set: everything commercial-safe, one per capability niche.
 DEFAULT_MODELS: list[str] = [
     "qwen3-1.7b", "qwen3-0.6b", "chatterbox", "kokoro-82m", "dia-1.6b",
-    "parler-mini", "csm-1b",
+    "parler-mini", "csm-1b", "voxtral-4b",
 ]
 
 
