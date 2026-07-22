@@ -27,9 +27,12 @@ import base64
 import gc
 import html
 import io
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")               # headless: no display, render straight to PNG bytes
@@ -180,10 +183,85 @@ def clean_for_plain(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# ── The reference voice (zero-shot cloning) ──────────────────────────────────────
+
+@dataclass
+class RefVoice:
+    """A few seconds of someone's voice, plus what they said, plus a name.
+
+    The transcript is not optional bookkeeping: Qwen takes it as `ref_text`, Dia wants
+    it PREPENDED to the target text, and CSM needs it to build the prior conversation
+    turn. Only Chatterbox infers it. So a transcript that doesn't match the audio
+    degrades three of the five cloners, which is why the demo ships a fixed read-aloud
+    script rather than Whisper-transcribing the reference and inheriting ASR errors.
+
+    Every model wants the reference at its own rate (Dia 44.1k, CSM 24k, Qwen takes a
+    (array, rate) pair, Chatterbox reads the file itself), so `at()` resamples on
+    demand and `to_path()` materializes a wav for the path-based ones.
+    """
+    wav: np.ndarray                # mono float32
+    sample_rate: int
+    transcript: str
+    name: str = "reference"
+
+    @classmethod
+    def from_file(cls, path, transcript: str, name: str = "") -> "RefVoice":
+        wav, sr = sf.read(str(path), dtype="float32")
+        return cls(
+            wav=to_mono_float32(wav), sample_rate=int(sr), transcript=transcript.strip(),
+            name=name or Path(str(path)).stem,
+        )
+
+    @property
+    def seconds(self) -> float:
+        return self.wav.size / float(self.sample_rate) if self.sample_rate else 0.0
+
+    def at(self, target_sr: int) -> np.ndarray:
+        """The reference resampled to `target_sr` (a no-op if it already matches)."""
+        if target_sr == self.sample_rate:
+            return self.wav
+        import torch
+        import torchaudio
+        out = torchaudio.functional.resample(
+            torch.from_numpy(self.wav), self.sample_rate, target_sr
+        )
+        return out.numpy().astype(np.float32)
+
+    def to_path(self, target_sr: int | None = None) -> str:
+        """Write the reference to a temp wav and return the path (Chatterbox wants one)."""
+        sr = target_sr or self.sample_rate
+        fd, path = tempfile.mkstemp(prefix=f"ref_{self.name}_", suffix=".wav")
+        os.close(fd)
+        sf.write(path, self.at(sr), sr, subtype="PCM_16")
+        return path
+
+    def warnings(self) -> list[str]:
+        """Reference-quality problems worth surfacing in the report rather than silently
+        letting them show up as five bad clones. Every cloner here wants >=3s, all of
+        them prefer 8-15s, and a clipped or near-silent clip poisons the speaker
+        embedding as surely as it poisons the synthesis."""
+        out = []
+        if self.seconds < 3:
+            out.append(f"reference is {self.seconds:.1f}s; every model here wants at least 3s")
+        elif self.seconds < 8:
+            out.append(f"reference is {self.seconds:.1f}s; 8-15s clones noticeably better")
+        if self.seconds > 30:
+            out.append(f"reference is {self.seconds:.0f}s; most models only read the first ~15s")
+        peak = float(np.max(np.abs(self.wav))) if self.wav.size else 0.0
+        if peak >= 0.999:
+            out.append("reference clips at full scale; clipping distorts the cloned timbre")
+        elif peak < 0.05:
+            out.append(f"reference peaks at {peak:.3f}; near-silent audio clones poorly")
+        if not self.transcript:
+            out.append("no transcript: Qwen, Dia and CSM all condition on it (Chatterbox won't care)")
+        return out
+
+
 # ── Adapters: one loader + one synth per package ─────────────────────────────────
 #
 # load_model(spec)          -> an opaque handle (model, pipeline, or (processor, model))
 # synth_one(handle, spec, t)-> (wav float32 mono, sample_rate, synth_seconds)
+# synth_clone(h, spec, t, r)-> the same, but in the reference voice `r`
 
 _KOKORO_LANG = {"English": "a", "British": "b", "Spanish": "e", "French": "f",
                 "Hindi": "h", "Italian": "i", "Japanese": "j", "Portuguese": "p",
@@ -208,7 +286,12 @@ stage_args:
       worker_cls: vllm_omni.worker.gpu_ar_worker.GPUARWorker
       scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
       gpu_memory_utilization: 0.5
-      enforce_eager: false
+      # enforce_eager MUST be true on the GB10: with graph capture (false) vLLM tries to
+      # compile CUDA graphs for sm_121, which the Spark's toolchain doesn't emit working
+      # code for, so stage-0 init HANGS and the orchestrator times out at 600s. Eager
+      # skips capture; startup then completes in a couple of minutes. (Stage 1 is already
+      # eager.) Same sm_121 compile caveat the video-gen demo hit with torch.compile.
+      enforce_eager: true
       trust_remote_code: true
       async_scheduling: true
       engine_output_type: latent
@@ -438,6 +521,95 @@ def synth_one(handle, spec, text: str) -> tuple[np.ndarray, int, float]:
     raise ValueError(f"No adapter for {spec.adapter!r}")
 
 
+def synth_clone(handle, spec, text: str, ref: RefVoice) -> tuple[np.ndarray, int, float]:
+    """Say `text` in the voice of `ref`. Same contract as synth_one, plus a reference.
+
+    Kept SEPARATE from synth_one rather than bolted on as an optional argument: the four
+    clone paths don't parallel the plain ones (Qwen calls a different method on a
+    different checkpoint, Dia prepends the transcript and then has to trim the prompt
+    back off, CSM builds a fake conversation turn), so folding them in would put an
+    `if ref` inside every branch of a function the working compare demo depends on.
+
+    The three transcript-conditioned models each want the reference at their own rate,
+    hence ref.at(...) rather than one canonical resample.
+    """
+    if spec.adapter == "qwen":
+        # Only the -Base checkpoints expose this; -CustomVoice raises AttributeError.
+        if not hasattr(handle, "generate_voice_clone"):
+            raise RuntimeError(
+                f"{spec.repo} has no generate_voice_clone(): voice cloning needs a "
+                "Qwen3-TTS *-Base* checkpoint, not -CustomVoice or -VoiceDesign."
+            )
+        t0 = time.time()
+        wavs, sr = handle.generate_voice_clone(
+            text=clean_for_plain(text),
+            language=spec.language,
+            ref_audio=(ref.wav, ref.sample_rate),   # a (array, rate) pair is accepted directly
+            ref_text=ref.transcript,
+        )
+        return to_mono_float32(wavs[0]), int(sr), time.time() - t0
+
+    if spec.adapter == "chatterbox":
+        # The only cloner that needs no transcript: it takes the clip and nothing else.
+        path = ref.to_path()
+        try:
+            t0 = time.time()
+            wav = handle.generate(clean_for_plain(text), audio_prompt_path=path)
+            return to_mono_float32(wav), int(getattr(handle, "sr", spec.sample_rate)), time.time() - t0
+        finally:
+            os.unlink(path)
+
+    if spec.adapter == "dia":
+        import torch
+        processor, model = handle
+        # Dia clones by CONTINUATION: the reference transcript and the target text go in
+        # as one string, the reference audio as the decoder prefix, and the model keeps
+        # talking in that voice. So the raw output starts with a re-rendering of the
+        # reference, and get_audio_prompt_len/audio_prompt_len is what trims it back off.
+        # Skip that trim and every clip is the reference read twice.
+        ref_text = ref.transcript if _TAG.search(ref.transcript) else f"[S1] {ref.transcript}"
+        tgt = text if _TAG.search(text) else f"[S1] {text}"
+        inputs = processor(
+            text=[f"{ref_text} {tgt}"], audio=ref.at(spec.sample_rate),
+            padding=True, return_tensors="pt",
+        ).to(model.device)
+        prompt_len = processor.get_audio_prompt_len(inputs["decoder_attention_mask"])
+        t0 = time.time()
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=3072, guidance_scale=3.0,
+                                 temperature=1.8, top_p=0.90, top_k=45)
+        decoded = processor.batch_decode(out, audio_prompt_len=prompt_len)
+        wav = decoded[0] if isinstance(decoded, (list, tuple)) else decoded
+        return to_mono_float32(wav), spec.sample_rate, time.time() - t0
+
+    if spec.adapter == "csm":
+        import torch
+        processor, model = handle
+        # CSM has no clone API: cloning IS conversational context. Turn the reference
+        # into speaker 0's previous turn (text + audio), then ask for speaker 0's next
+        # turn as text only, and the model stays in the voice it just "heard".
+        conversation = [
+            {"role": "0", "content": [
+                {"type": "text", "text": clean_for_plain(ref.transcript)},
+                {"type": "audio", "path": ref.at(spec.sample_rate)},
+            ]},
+            {"role": "0", "content": [{"type": "text", "text": clean_for_plain(text)}]},
+        ]
+        inputs = processor.apply_chat_template(
+            conversation, tokenize=True, return_dict=True,
+        ).to(model.device)
+        t0 = time.time()
+        with torch.no_grad():
+            audio = model.generate(**inputs, output_audio=True)
+        wav = audio[0] if isinstance(audio, (list, tuple)) else audio
+        return to_mono_float32(wav), spec.sample_rate, time.time() - t0
+
+    raise ValueError(
+        f"Adapter {spec.adapter!r} has no clone path. "
+        "Cloners: qwen (-Base only), chatterbox, dia, csm."
+    )
+
+
 # ── Report data + rendering ──────────────────────────────────────────────────────
 
 @dataclass
@@ -579,3 +751,226 @@ def render_grid(texts, specs, results, *, title="Text-to-speech comparison", met
 def render_status(title: str, body: str) -> str:
     return (f'{REPORT_CSS}<div class="tts-wrap"><h2>{html.escape(title)}</h2>'
             f'<div class="tts-meta">{html.escape(body)}</div></div>')
+
+
+# ── Voice-cloning report ─────────────────────────────────────────────────────────
+#
+# The clone run has something the compare run never did: numbers. So it gets its own
+# renderer rather than badges bolted onto render_grid, and it leads with the scoreboard.
+
+@dataclass
+class CloneScore:
+    """The render-side view of one clip's scores (metrics.ClipScore, flattened)."""
+    similarity: float = 0.0
+    wer: float = 0.0
+    transcript: str = ""
+    watermarked: bool | None = None
+    error: str = ""
+
+
+# From the validated reference palette: sequential blue, one hue. The scoreboard is two
+# ranked bar panels rather than a similarity-vs-WER scatter on purpose. A scatter would
+# need one color per model, and a 5-series scatter is exactly the case where categorical
+# palettes stop being colorblind-separable; two single-hue panels sharing a row order
+# show the same trade-off (a model long in BOTH panels is buying similarity with
+# intelligibility) while keeping one measure per axis.
+_BAR = "#2a78d6"
+_INK = "#0b0b0b"
+_INK_MUTED = "#898781"
+_GRID = "#e1e0d9"
+
+
+def scoreboard_png(rows: list[tuple[str, float, float]], ceiling: float = 0.0) -> str:
+    """Two ranked bar panels (similarity, then WER) as a base64 PNG data URI.
+
+    `rows` is (model_key, mean_similarity, mean_wer), and it is drawn in the order
+    given: the caller sorts by similarity so the two panels share a row order and can
+    be read across. `ceiling` is the reference-vs-itself control, drawn as the dashed
+    line the similarity bars are measured against; without it a bar of "0.82" means
+    nothing, because the scale has no natural top.
+    """
+    if not rows:
+        return ""
+    keys = [r[0] for r in rows]
+    sims = [r[1] for r in rows]
+    wers = [r[2] * 100 for r in rows]
+    y = np.arange(len(keys))
+    height = max(2.0, 0.46 * len(keys) + 1.15)
+
+    fig, (ax_s, ax_w) = plt.subplots(1, 2, figsize=(9.6, height), dpi=120, sharey=True)
+
+    ax_s.barh(y, sims, height=0.62, color=_BAR)
+    ax_s.set_title("speaker similarity vs the reference", fontsize=9,
+                   color=_INK, loc="left", pad=8)
+    ax_s.set_xlim(0, max(1.0, max(sims + [ceiling]) * 1.12))
+    if ceiling:
+        ax_s.axvline(ceiling, color=_INK_MUTED, linestyle="--", linewidth=1.2)
+        # Label in axes-fraction y so it rides just under the title instead of
+        # colliding with the tick row at the bottom of the panel.
+        ax_s.text(ceiling, 1.005, f"ceiling {ceiling:.2f}", fontsize=7,
+                  color=_INK_MUTED, ha="center", va="bottom",
+                  transform=ax_s.get_xaxis_transform())
+    for yi, v in zip(y, sims):        # direct labels: no reading values off the axis
+        ax_s.text(v + 0.012, yi, f"{v:.2f}", va="center", fontsize=8, color=_INK)
+
+    ax_w.barh(y, wers, height=0.62, color=_BAR)
+    ax_w.set_title("word error rate  (lower is better)", fontsize=9,
+                   color=_INK, loc="left", pad=8)
+    ax_w.set_xlim(0, max(5.0, max(wers) * 1.16))
+    for yi, v in zip(y, wers):
+        ax_w.text(v + max(wers) * 0.015 + 0.15, yi, f"{v:.1f}%", va="center",
+                  fontsize=8, color=_INK)
+
+    # Best at the top. Set the limits directly rather than invert_yaxis(): the panels
+    # are sharey, so inverting each one in turn flips the order back and silently puts
+    # the WORST model at the top of a chart whose rows are sorted best-first.
+    ax_s.set_ylim(len(keys) - 0.5, -0.75)
+    for ax in (ax_s, ax_w):
+        ax.set_yticks(y)
+        ax.set_yticklabels(keys, fontsize=8, color=_INK)
+        ax.tick_params(axis="x", labelsize=7, colors=_INK_MUTED, length=0)
+        ax.tick_params(axis="y", length=0)
+        ax.xaxis.grid(True, color=_GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        for side in ("top", "right", "left", "bottom"):
+            ax.spines[side].set_visible(False)
+
+    fig.tight_layout(pad=1.1)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor="white")
+    plt.close(fig)
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+
+def _score_badges(sc: CloneScore | None) -> str:
+    if sc is None:
+        return ""
+    if sc.error:
+        return f'<span class="tts-warn">scoring failed</span>'
+    sim = f'<span class="tts-sim">similarity {sc.similarity:.2f}</span>'
+    wer = f'<span class="tts-wer">WER {sc.wer * 100:.0f}%</span>'
+    mark = ""
+    if sc.watermarked is True:
+        mark = '<span class="tts-mark">🔏 watermarked</span>'
+    elif sc.watermarked is False:
+        mark = '<span class="tts-nomark">no watermark</span>'
+    return sim + wer + mark
+
+
+def _clone_cell(spec, r: AudioResult, sc: CloneScore | None) -> str:
+    """A compare-grid cell plus the two scores and what Whisper actually heard."""
+    if r.error:
+        return (f'<div class="tts-cell"><div class="tts-err">⚠️ {html.escape(r.error)}</div>'
+                f'<div class="tts-cap"><div class="tts-model">{html.escape(spec.key)}</div>'
+                f'</div></div>')
+
+    spec_img = (f'<div class="tts-spec">{_zoom_img(r.spec_uri, f"{spec.key} · {r.text[:60]}")}</div>'
+                if r.spec_uri else "")
+    fast = f'<span class="tts-fast">{r.speedup:.1f}x real-time</span>' if r.speedup else ""
+    # The transcript is the receipt for the WER number: it shows WHICH words went wrong,
+    # which is the difference between "this model is bad" and "this model said 'four
+    # thirty' as 'forty three'".
+    heard = (f'<div class="tts-heard">heard: “{html.escape(sc.transcript)}”</div>'
+             if sc and sc.transcript else "")
+    cap = (
+        f'<div class="tts-cap"><div class="tts-model">{html.escape(spec.key)}</div>'
+        f'{_score_badges(sc)}{fast}{heard}'
+        f'<div class="tts-sub">{r.seconds:.1f}s to synth · {r.audio_seconds:.1f}s audio '
+        f'@ {r.sample_rate/1000:.0f}kHz<br>{html.escape(spec.license)}</div></div>'
+    )
+    return f'<div class="tts-cell">{spec_img}{_player(r)}{cap}</div>'
+
+
+def render_clone_grid(
+    texts, specs, results, scores, *,
+    ref_result: AudioResult | None = None,
+    ref_transcript: str = "",
+    ref_warnings: list[str] | None = None,
+    ceiling: float = 0.0,
+    title: str = "Voice cloning, side by side",
+    meta: str = "",
+) -> str:
+    """The clone report: the reference, then the scoreboard, then the script grid.
+
+    `scores` is keyed (text, model_key) -> CloneScore, the same shape render_grid uses
+    for results, so a missing score renders as a cell without badges rather than an error.
+    """
+    by_pair = {(r.text, r.model_key): r for r in results}
+
+    # 1. The reference. It goes first and it is a player, not a footnote: every number
+    #    below is relative to this clip, so the reader needs to hear it first.
+    ref_block = ""
+    if ref_result is not None:
+        warn = "".join(f'<li>{html.escape(w)}</li>' for w in (ref_warnings or []))
+        warn = f'<ul class="tts-warnlist">{warn}</ul>' if warn else ""
+        ref_block = (
+            '<div class="tts-ref"><div class="tts-refhead">🎙️ The reference voice</div>'
+            f'<div class="tts-refgrid">'
+            f'<div>{_player(ref_result)}'
+            f'<div class="tts-sub">{ref_result.audio_seconds:.1f}s '
+            f'@ {ref_result.sample_rate/1000:.0f}kHz</div></div>'
+            f'<div class="tts-reftext">“{html.escape(ref_transcript)}”{warn}</div>'
+            f'</div></div>'
+        )
+
+    # 2. The scoreboard, ranked by similarity.
+    means: list[tuple[str, float, float]] = []
+    for s in specs:
+        got = [scores[(t, s.key)] for t in texts
+               if (t, s.key) in scores and not scores[(t, s.key)].error]
+        if got:
+            means.append((s.key,
+                          sum(g.similarity for g in got) / len(got),
+                          sum(g.wer for g in got) / len(got)))
+    means.sort(key=lambda m: -m[1])
+    chart = scoreboard_png(means, ceiling=ceiling)
+    board = (f'<div class="tts-board"><img src="{chart}" alt="clone scoreboard"/>'
+             f'<div class="tts-sub">Similarity is a cosine between x-vector speaker '
+             f'embeddings: read it as a RANKING against the dashed ceiling (the '
+             f'reference scored against itself), not as a percentage. Word error rate '
+             f'is Whisper transcribing each clip against the text it was asked to say. '
+             f'A model needs both.</div></div>') if chart else ""
+
+    # 3. The grid, one block per script.
+    blocks = []
+    for text in texts:
+        cells = "".join(
+            _clone_cell(s, by_pair.get((text, s.key), AudioResult(s.key, text, error="no result")),
+                        scores.get((text, s.key)))
+            for s in specs
+        )
+        blocks.append(f'<div class="tts-script">🗣️ {html.escape(text)}</div>'
+                      f'<div class="tts-grid">{cells}</div>')
+
+    return (
+        f'{REPORT_CSS}{CLONE_CSS}<div class="tts-wrap"><h2>{html.escape(title)}</h2>'
+        f'<div class="tts-meta">{html.escape(meta)}</div>'
+        + ref_block + board + "".join(blocks) + "</div>" + _LIGHTBOX
+    )
+
+
+CLONE_CSS = """
+<style>
+  .tts-ref { border: 1px solid #e5e7eb; border-radius: 12px; background: #f9fafb;
+             padding: 12px 14px; margin-bottom: 16px; }
+  .tts-refhead { font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+  .tts-refgrid { display: grid; gap: 14px; grid-template-columns: minmax(240px, 1fr) 2fr;
+                 align-items: start; }
+  .tts-reftext { font-size: 13px; color: #374151; line-height: 1.5; }
+  .tts-warnlist { margin: 8px 0 0; padding-left: 18px; color: #92400e; font-size: 12px; }
+  .tts-board { margin: 0 0 18px; }
+  .tts-board img { width: 100%; height: auto; display: block; }
+  .tts-sim { display: inline-block; font-size: 11px; color: #1e3a8a; background: #dbeafe;
+             border-radius: 999px; padding: 1px 8px; margin: 4px 4px 0 0; font-weight: 600; }
+  .tts-wer { display: inline-block; font-size: 11px; color: #3f3f46; background: #f4f4f5;
+             border-radius: 999px; padding: 1px 8px; margin: 4px 4px 0 0; font-weight: 600; }
+  .tts-mark { display: inline-block; font-size: 11px; color: #065f46; background: #d1fae5;
+              border-radius: 999px; padding: 1px 8px; margin: 4px 4px 0 0; }
+  .tts-nomark { display: inline-block; font-size: 11px; color: #6b7280; background: #f3f4f6;
+                border-radius: 999px; padding: 1px 8px; margin: 4px 4px 0 0; }
+  .tts-warn { display: inline-block; font-size: 11px; color: #92400e; background: #fffbeb;
+              border-radius: 999px; padding: 1px 8px; margin: 4px 4px 0 0; }
+  .tts-heard { font-size: 12px; color: #4b5563; font-style: italic; margin-top: 6px;
+               line-height: 1.4; }
+</style>
+"""

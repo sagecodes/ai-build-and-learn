@@ -1,0 +1,7 @@
+# Reference voice clips are voiceprints. See README.md in this directory: transcripts
+# are committed, audio is not. Force-add (git add -f) only a deliberately public,
+# clearly-licensed clip.
+*.wav
+*.mp3
+*.flac
+*.m4a

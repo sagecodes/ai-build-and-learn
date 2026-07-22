@@ -243,6 +243,18 @@ def _gpu_env(adapter: str) -> flyte.TaskEnvironment:
 
 GPU_ENVS: dict[str, flyte.TaskEnvironment] = {a: _gpu_env(a) for a in ADAPTER_IMAGES}
 
+# The clone run's scoring pass (metrics.py: WavLM x-vectors + Whisper). It reuses the
+# SAME transformers_image object that the Dia/CSM tasks use, so it is a new environment
+# but NOT a new image: both scorers are transformers-native, which is exactly why they
+# were chosen over speechbrain/jiwer. Flyte builds the image once and three envs pull it.
+metrics_env = flyte.TaskEnvironment(
+    name="tts-metrics",
+    image=transformers_image,
+    resources=flyte.Resources(cpu="8", memory="32Gi", gpu=1, disk="40Gi"),
+    secrets=[HF_SECRET],
+    env_vars=_GPU_ENV_VARS,
+)
+
 orch_env = flyte.TaskEnvironment(
     name="tts-orch",
     image=fetch_image,
@@ -250,6 +262,74 @@ orch_env = flyte.TaskEnvironment(
     secrets=[HF_SECRET],
     env_vars=_ENV_VARS,
     depends_on=[cpu_env, *GPU_ENVS.values()],
+)
+
+# The clone orchestrator additionally awaits the scoring task, so it needs metrics_env
+# in its dependency set. Separate from orch_env so the compare run doesn't drag the
+# scoring env into its deployment.
+clone_orch_env = flyte.TaskEnvironment(
+    name="tts-clone-orch",
+    image=fetch_image,
+    resources=flyte.Resources(cpu="2", memory="4Gi", disk="20Gi"),
+    secrets=[HF_SECRET],
+    env_vars=_ENV_VARS,
+    depends_on=[cpu_env, metrics_env, *GPU_ENVS.values()],
+)
+
+# ── The voice-chat app ───────────────────────────────────────────────────────────
+#
+# Unlike the video/image studios next door, this app is NOT a launcher. It holds its
+# models resident in-process, because that IS the feature: reloading Whisper and a TTS
+# model per turn would cost more than the whole conversation. That has a real price on
+# a one-GPU box, and it's the same trade the videogen app.py docstring warns about: an
+# app pod holds the GPU for as long as it is up, so while the voice app is running, the
+# compare and clone pipelines sit Unschedulable behind it.
+#
+# The resolution is `scaledown_after`, not architecture: the app scales to zero when
+# idle and gives the GPU back. Keep it long enough that a pause in conversation doesn't
+# force a model reload, short enough that a forgotten browser tab doesn't hold the box
+# hostage. 15 minutes is that compromise.
+#
+# ollama, not vLLM, serves the LLM here: a model DROPDOWN needs runtime swapping, and
+# vLLM is one model per process. ollama also serves GGUF quantized weights, which is
+# load-bearing on this box (see voice_core: 26B at Q4 measured 14.1 tok/s; bf16 would be
+# ~3x slower per token because the Spark is memory-bandwidth-bound).
+voice_image = (
+    _base("tts-voice")
+    .with_apt_packages("curl")
+    .with_pip_packages(
+        "kokoro>=0.9.4", "misaki[en]>=0.9.4",   # the streaming TTS (78x real-time here)
+        "transformers>=4.57.3", "accelerate",   # Whisper for STT, same stack as metrics.py
+        "gradio==5.42.0", "ollama",
+    )
+    # The ollama server itself, alongside its Python client. Installed from the official
+    # arm64 tarball rather than the convenience script: the script wants systemd, which
+    # a container does not have, and fails the build trying to enable a service.
+    .with_commands([
+        "curl -fsSL https://ollama.com/download/ollama-linux-arm64.tgz "
+        "-o /tmp/ollama.tgz && tar -C /usr -xzf /tmp/ollama.tgz && rm /tmp/ollama.tgz"
+    ])
+)
+
+VOICE_APP_NAME = "tts-voice-chat"
+VOICE_APP_PORT = 7860
+
+# AppEnvironment drops flyte.Resources(gpu=...), so the GPU is requested through a
+# PodTemplate (see the note below). Disk is generous because ollama models land on the
+# pod's ephemeral storage: gemma4:26b alone is ~18GB.
+voice_app_pod = flyte.PodTemplate(
+    primary_container_name="app",
+    pod_spec=V1PodSpec(
+        containers=[
+            V1Container(
+                name="app",
+                resources=V1ResourceRequirements(
+                    requests={"cpu": "8", "memory": "48Gi", "ephemeral-storage": "120Gi"},
+                    limits={"nvidia.com/gpu": "1"},
+                ),
+            )
+        ]
+    ),
 )
 
 # Kept for parity with the video demo's in-pod experiments; unused while the studio is

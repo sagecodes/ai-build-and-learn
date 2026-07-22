@@ -75,6 +75,12 @@ class TTSModelSpec:
     dtype: str = "bfloat16"        # GB10 (Blackwell) is happiest in bf16
     speaker_tagged: bool = False   # Dia: text must be [S1]/[S2] tagged
 
+    # Zero-shot voice cloning: the adapter's synth accepts a RefVoice (a few seconds of
+    # reference audio + its transcript) and speaks the target text in that voice. Only
+    # meaningful for models whose synth path has a clone branch in tts_core.synth_one.
+    clone_capable: bool = False
+    ref_seconds: str = ""          # reference length the model card asks for
+
     gated: bool = False
     native: str = ""               # what the model card actually recommends
     notes: str = ""
@@ -129,6 +135,48 @@ SPECS: list[TTSModelSpec] = [
         notes="The lightweight sibling. Listen for where the smaller model gives up "
               "expressiveness for speed.",
     ),
+    # ── The same Qwen family in CLONE mode: a different CHECKPOINT, same package ───
+    #
+    # Qwen ships three variants per size: -CustomVoice (named built-in speakers, used by
+    # compare_pipeline), -VoiceDesign (voice from a text description) and -Base (zero-shot
+    # cloning from ref_audio + ref_text). Only -Base has generate_voice_clone(), so cloning
+    # is a separate download, NOT a different call on the CustomVoice weights above. Same
+    # qwen-tts package though, so same image: the clone demo adds no new image anywhere.
+    TTSModelSpec(
+        key="qwen3-1.7b-clone",
+        repo="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        extra_repos=("Qwen/Qwen3-TTS-Tokenizer-12Hz",),
+        adapter="qwen",
+        family="Qwen3-TTS (12Hz) Base",
+        license="Apache-2.0",
+        params="1.7B",
+        download_gb=5.2,
+        sample_rate=24000,
+        language="English",
+        clone_capable=True,
+        ref_seconds="3s minimum, 8-15s better",
+        native="Zero-shot clone across 10 languages; ref_audio + ref_text. Clones from 3s.",
+        notes="The only Apache-2.0 cloner in the lineup, and the only one that clones "
+              "CROSS-LINGUALLY (clone English, speak Japanese). Wants the reference "
+              "transcript, so an inaccurate ref_text shows up as a slurred clone.",
+    ),
+    TTSModelSpec(
+        key="qwen3-0.6b-clone",
+        repo="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        extra_repos=("Qwen/Qwen3-TTS-Tokenizer-12Hz",),
+        adapter="qwen",
+        family="Qwen3-TTS (12Hz) Base",
+        license="Apache-2.0",
+        params="0.6B",
+        download_gb=3.2,
+        sample_rate=24000,
+        language="English",
+        clone_capable=True,
+        ref_seconds="3s minimum, 8-15s better",
+        native="Lightweight zero-shot clone, same API as the 1.7B Base.",
+        notes="The size contrast again, this time for cloning: does a third the "
+              "parameters cost you speaker similarity, intelligibility, or both?",
+    ),
     # ── The cloning-capable one everyone benchmarks against ElevenLabs ────────────
     TTSModelSpec(
         key="chatterbox",
@@ -139,10 +187,13 @@ SPECS: list[TTSModelSpec] = [
         params="0.5B",
         download_gb=13.9,       # whole repo; the base English weights are a subset
         sample_rate=24000,      # overridden at runtime by model.sr
+        clone_capable=True,     # generate(audio_prompt_path=...); no ref transcript needed
+        ref_seconds="5-10s",
         native="Emotion-exaggeration control; 10s zero-shot voice clone. Beat ElevenLabs "
                "in a blind test (65% preference).",
-        notes="MIT, and the natural-speech bar for open TTS. We use its DEFAULT voice "
-              "here; cloning is the separate task.",
+        notes="MIT, and the natural-speech bar for open TTS. The compare run uses its "
+              "DEFAULT voice; clone_pipeline conditions it on a reference clip. Watermarks "
+              "its output with Perth (see metrics.py).",
     ),
     # ── The efficiency baseline: 82M, CPU-capable, no cloning ─────────────────────
     TTSModelSpec(
@@ -172,6 +223,8 @@ SPECS: list[TTSModelSpec] = [
         download_gb=6.4,
         sample_rate=44100,
         speaker_tagged=True,    # text is [S1]/[S2] tagged; the adapter adds [S1] if absent
+        clone_capable=True,     # audio prompt + its transcript PREPENDED to the target text
+        ref_seconds="5-10s",
         native="Multi-speaker dialogue with nonverbals (laughs, sighs). Begin with [S1], "
                "alternate [S1]/[S2].",
         notes="Not a like-for-like single-voice model: it's the best open PODCAST/dialogue "
@@ -216,6 +269,8 @@ SPECS: list[TTSModelSpec] = [
         gated=True,             # requires accepting the license at hf.co/sesame/csm-1b
         # CSM's speaker is an id ([0]/[1]); without an audio context the voice is
         # model-chosen, so no controllable M/F here (that's the cloning task). Single voice.
+        clone_capable=True,     # a prior conversation turn (audio + transcript) IS the clone
+        ref_seconds="5-10s",
         native="Conversational speech codec model; speaker id [0]/[1], best with context.",
         notes="Sesame's natural conversational voice. GATED: the HF_TOKEN account must "
               "accept the license at hf.co/sesame/csm-1b first, else fetch 403s (the run "
@@ -237,7 +292,10 @@ SPECS: list[TTSModelSpec] = [
         native="9 languages, 20 preset voices, 24kHz, ~90ms latency. Served via vLLM-omni.",
         notes="The odd one out architecturally: runs as a vLLM-omni HTTP server the task "
               "starts and talks to (not from_pretrained). NON-COMMERCIAL license, unlike "
-              "the rest here. Heaviest image (vllm + cu12 shim on the cu130 box).",
+              "the rest here. Heaviest image (vllm + cu12 shim on the cu130 box). DEFERRED "
+              "from the default set: needs enforce_eager (set) AND its server cold-starts "
+              "past vLLM-omni's hardcoded 600s orchestrator timeout on an ephemeral pod. "
+              "Fix later via a persistent warm server or a launcher that raises the timeout.",
     ),
 ]
 
@@ -245,9 +303,22 @@ SPECS: list[TTSModelSpec] = [
 MODELS: dict[str, TTSModelSpec] = {s.key: s for s in SPECS}
 
 # The default comparison set: everything commercial-safe, one per capability niche.
+# voxtral-4b is intentionally NOT in the default set: it works as code (image builds,
+# adapter + serve logic verified), but its vLLM-omni server cold-starts past its own
+# hardcoded 600s orchestrator timeout on an ephemeral GB10 pod, so a per-task boot
+# fails. It stays fully wired (run it with --models '["voxtral-4b"]' to iterate) pending
+# the fix: a persistent warm server, or a custom launcher that raises init_timeout.
 DEFAULT_MODELS: list[str] = [
     "qwen3-1.7b", "qwen3-0.6b", "chatterbox", "kokoro-82m", "dia-1.6b",
-    "parler-mini", "csm-1b", "voxtral-4b",
+    "parler-mini", "csm-1b",
+]
+
+# The voice-CLONING set (clone_pipeline.py). Every one of these rides an image the
+# compare demo already built: the two Qwen -Base checkpoints reuse the qwen image, and
+# Dia + CSM reuse the shared transformers image. Kokoro and Parler are absent because
+# they cannot clone at all: Kokoro has fixed voicepacks, Parler takes a text description.
+CLONE_MODELS: list[str] = [
+    "qwen3-1.7b-clone", "qwen3-0.6b-clone", "chatterbox", "dia-1.6b", "csm-1b",
 ]
 
 
@@ -264,6 +335,24 @@ def resolve_models(models: list[str] | None) -> list[TTSModelSpec]:
     """A list of keys (or None for the default set) -> the specs, order preserved."""
     keys = models or DEFAULT_MODELS
     return [get_spec(k) for k in keys]
+
+
+def resolve_cloners(models: list[str] | None) -> list[TTSModelSpec]:
+    """Same, for the clone run, but refuses models that cannot clone.
+
+    Called first thing in the orchestrator, so asking for --models '["kokoro-82m"]'
+    fails before any weights are fetched and before a single GPU pod is scheduled. The
+    alternative is worse than slow: Kokoro would load fine, ignore the reference clip
+    entirely, and render its stock voice into the grid as if it had cloned something.
+    """
+    specs = [get_spec(k) for k in (models or CLONE_MODELS)]
+    if bad := [s.key for s in specs if not s.clone_capable]:
+        raise ValueError(
+            f"Not clone-capable: {', '.join(bad)}. "
+            f"Cloners: {', '.join(s.key for s in SPECS if s.clone_capable)}. "
+            "(Kokoro has fixed voicepacks; Parler takes a text description, not a clip.)"
+        )
+    return specs
 
 
 def jobs_for(spec: TTSModelSpec, gender: str = "all") -> list[tuple[str, str, str]]:

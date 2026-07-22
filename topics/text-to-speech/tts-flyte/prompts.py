@@ -92,9 +92,78 @@ SUITE: list[Script] = [
 QUICK: list[Script] = [SUITE[0], SUITE[1], SUITE[2]]
 
 
+# ── The cloning suite ────────────────────────────────────────────────────────────
+#
+# Different job, so different scripts. The compare suite asks "is this good speech";
+# the clone suite asks "is this still THEM, and did it say the words". Each script
+# targets a way a clone specifically comes apart, which the SIM/WER pair can measure:
+#
+#   - identity DRIFT over a long utterance (SIM computed on the whole clip hides it,
+#     so this one is deliberately long enough to hear the voice wander),
+#   - identity loss under EXPRESSION, the most common real failure: the clone holds up
+#     on flat narration and snaps back to the model's own default voice the moment the
+#     line needs feeling,
+#   - generalization to phonemes the reference recording never contained,
+#   - normalization, which is now objectively scored instead of judged by ear.
+#
+# No dialogue script here: a two-speaker line is incoherent when the whole point is
+# that every word comes out in one specific person's voice.
+CLONE_SUITE: list[Script] = [
+    Script(
+        text="I was going to call you back, but the whole afternoon got away from me.",
+        axis="control: short, neutral, conversational",
+        listen_for="The baseline every other row is read against. Short and prosodically "
+                   "easy, so whatever similarity score a model posts here is roughly its "
+                   "ceiling. If a model is already unrecognizable on this line, its "
+                   "scores below are noise.",
+    ),
+    Script(
+        text="Honestly? That is the single best news I have heard all month, and I am "
+             "not even exaggerating!",
+        axis="identity under expression",
+        listen_for="The failure mode that matters most in practice. Models that clone "
+                   "timbre but not identity hold the voice on flat narration and lose it "
+                   "the moment the line gets excited: the pitch lifts and it becomes the "
+                   "model's own default speaker again. Watch for a similarity score that "
+                   "drops sharply against the control row.",
+    ),
+    Script(
+        text="The point I keep coming back to is that none of this was obvious at the "
+             "start, and if you had asked me a year ago I would have told you the "
+             "opposite, with total confidence, and I would have been completely wrong.",
+        axis="identity drift over a long utterance",
+        listen_for="Long enough for the voice to wander. Clones often start accurate and "
+                   "decay toward a generic voice as the reference falls out of the "
+                   "attention window. Listen to the first and last clauses back to back; "
+                   "a whole-clip similarity score averages this away.",
+    ),
+    Script(
+        text="Rural jurors squarely judged the thorough authenticity of the sixth "
+             "witness statement.",
+        axis="phonemes the reference never contained",
+        listen_for="Zero-shot cloning has to generalize the speaker beyond the sounds in "
+                   "the reference clip. Clustered r/j/th/x sounds are where a thin clone "
+                   "audibly falls back on the base model's articulation.",
+    ),
+    Script(
+        text="Call me back at 555 0147 before 4:30, the invoice came to $2,840.75.",
+        axis="text normalization, now objectively scored",
+        listen_for="The compare demo judged this by ear; here Whisper transcribes it and "
+                   "the word error rate scores it. This is also the row where SIM and WER "
+                   "most often disagree: a model can say this in a perfect clone of the "
+                   "voice while getting the digits wrong.",
+    ),
+]
+
+# Two rows: the control and the expression one, the pair whose SIM gap is the headline.
+CLONE_QUICK: list[Script] = [CLONE_SUITE[0], CLONE_SUITE[1]]
+
+
 SUITES: dict[str, list[Script]] = {
     "full": SUITE,
     "quick": QUICK,
+    "clone": CLONE_SUITE,
+    "clone-quick": CLONE_QUICK,
 }
 
 
