@@ -107,6 +107,28 @@ train_env = flyte.TaskEnvironment(
     name="isaac-train",
     image=train_image,
     resources=flyte.Resources(cpu="8", memory="64Gi", gpu=1, disk="80Gi"),
+    # ── Why these are listed here and not imported ──────────────────────────────
+    #
+    # `flyte run` bundles code with copy_style="loaded_modules" by default
+    # (_run.py:98): it walks sys.modules after importing the task file and ships only
+    # what got loaded. The usual way to make a sibling module reach the pod is
+    # therefore to import it at the top of pipeline.py, and that is what the note in
+    # the smoke-test section of pipeline.py describes.
+    #
+    # It cannot work for these three. terrains.py and spark_envs.py import
+    # `isaaclab.terrains` at module level, and pipeline.py is imported by BOTH task
+    # environments: the orchestrator runs on the plain isaac-sim image, which has no
+    # Isaac Lab in it at all. A top-level import would ship the files and break every
+    # orchestrator pod with ModuleNotFoundError before it could schedule anything.
+    #
+    # `include` is the supported way out. It is unioned into whatever the copy style
+    # discovered (_run.py:266 -> additional_files), so these ride along without anyone
+    # importing them, and they are only ever imported inside the training pod's child
+    # process, which does have Isaac Lab. Paths are relative to this file.
+    #
+    # record.py is in the list even though its top level is import-safe, because
+    # nothing imports it either: it is spawned by path, as a script.
+    include=("record.py", "spark_envs.py", "terrains.py"),
 )
 
 orch_env = flyte.TaskEnvironment(

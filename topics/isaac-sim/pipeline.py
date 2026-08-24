@@ -45,6 +45,7 @@ import logging
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import flyte
@@ -55,6 +56,11 @@ import flyte.report
 # pod. checks.py is safe to import (its isaacsim imports are inside functions),
 # smoke_test.py is not (it boots a SimulationApp on import), which is exactly why the
 # runner lives in checks.py and this spawns checks.__file__ below.
+#
+# terrains.py, spark_envs.py and record.py are the exception that proves the rule: they
+# cannot be imported here, because this module is loaded by the ORCHESTRATOR too and
+# that image has no Isaac Lab. They reach the pod through `train_env.include` instead.
+# See the long comment in config.py.
 import checks
 import train as trainer
 from config import gpu_env, orch_env, train_env
@@ -151,6 +157,52 @@ async def walk_task(
     }
 
 
+@train_env.task(report=True)
+async def parkour_task(
+    task_id: str = "Spark-Parkour-Anymal-C-v0",
+    num_envs: int = 4096,
+    iterations: int = 1500,
+    steps: int = 300,
+    terrain_level: int = 9,
+    terrain_col: int = 12,
+) -> dict:
+    """Train on our own terrain, then film it with our own cameras.
+
+    Same one-pod shape as `walk_task`, with the two differences that make this episode 2:
+
+      * the task is one of ours (`Spark-*`), registered into NVIDIA's train.py through
+        `--external_callback spark_envs.register`, so the terrain is a 13-sub-terrain
+        parkour course instead of NVIDIA's six;
+      * the replay is record.py, not `play.py --video`, because the Kit viewport capture
+        renders everything on this box except the robot.
+
+    `terrain_level` and `terrain_col` choose which patch to film on. They default to the
+    hardest row of the parkour course, on gaps, because a random patch is usually a
+    boring one. See _place() in record.py.
+    """
+    t0 = time.monotonic()
+    rewards, tail = trainer.train(task_id, num_envs, iterations)
+    log.info("trained %s iterations, reward %.2f -> %.2f", len(rewards), rewards[0], rewards[-1])
+
+    clips = trainer.record_clips(task_id, steps=steps, terrain_level=terrain_level, terrain_col=terrain_col)
+    secs = time.monotonic() - t0
+    trainer.report_parkour(task_id, num_envs, iterations, rewards, clips, secs, tail)
+
+    patch = clips.get("patch") or {}
+    return {
+        "task": task_id,
+        "num_envs": num_envs,
+        "iterations": iterations,
+        "reward_start": rewards[0],
+        "reward_final": rewards[-1],
+        "reward_max": max(rewards),
+        "minutes": round(secs / 60, 1),
+        "filmed_on": patch.get("sub_terrain"),
+        "difficulty": patch.get("difficulty"),
+        "clips": sorted((clips.get("clips") or {}).keys()),
+    }
+
+
 @orch_env.task(report=True)
 async def smoke(steps: int = 240, drop_height: float = 2.0) -> dict:
     """Entry point. CPU-only orchestrator so it cannot deadlock its own GPU child."""
@@ -174,6 +226,33 @@ async def walk(
     runs, so asking for the GPU here would deadlock its own GPU child forever.
     """
     result = await walk_task(task_id=task_id, num_envs=num_envs, iterations=iterations)
+    log.info("result: %s", result)
+    return result
+
+
+@orch_env.task(report=True)
+async def parkour(
+    task_id: str = "Spark-Parkour-Anymal-C-v0",
+    num_envs: int = 4096,
+    iterations: int = 1500,
+    steps: int = 300,
+    terrain_level: int = 9,
+    terrain_col: int = 12,
+) -> dict:
+    """Teach a robot to cross rough ground, and put what it sees in the report.
+
+        flyte run pipeline.py parkour
+        flyte run pipeline.py parkour --iterations 5      # is the plumbing alive?
+        flyte run pipeline.py parkour --task_id Spark-Stairs-Unitree-Go2-v0
+
+    Valid task ids are `Spark-{Parkour,Stairs,Stones}-<Robot>-v0` for the ten robots in
+    spark_envs.BASE_TASKS. CPU-only orchestrator, same as `walk`: it holds its resources
+    while its child runs, so asking for the GPU here deadlocks its own GPU child.
+    """
+    result = await parkour_task(
+        task_id=task_id, num_envs=num_envs, iterations=iterations,
+        steps=steps, terrain_level=terrain_level, terrain_col=terrain_col,
+    )
     log.info("result: %s", result)
     return result
 
