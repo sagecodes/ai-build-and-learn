@@ -112,7 +112,7 @@ def _write_report(checks: list[dict], gpu: str, stdout_tail: str, stderr_tail: s
     )
     failed = [c["name"] for c in checks if not c["ok"]]
     verdict = "all checks passed" if checks and not failed else f"FAILED: {', '.join(failed) or 'no results'}"
-    flyte.report.log(
+    flyte.report.replace(
         f"<h2>Isaac Sim in a Flyte pod</h2>"
         f"<p><b>{len(checks) - len(failed)}/{len(checks)}</b> &mdash; {verdict} "
         f"(smoke_test.py exit {rc})</p>"
@@ -136,7 +136,9 @@ async def walk_task(
     produced a walking Anymal-C on this box in 27 minutes, mean reward -2.45 -> 11.38.
     """
     t0 = time.monotonic()
-    rewards, tail = trainer.train(task_id, num_envs, iterations)
+    # The terrain-level curve is discarded here on purpose: this task is the episode-1
+    # FLAT demo, which has no terrain curriculum, so the list is always empty.
+    rewards, _levels, tail = trainer.train(task_id, num_envs, iterations)
     log.info("trained %s iterations, reward %.2f -> %.2f", len(rewards), rewards[0], rewards[-1])
 
     # Filmed AFTER training, and never allowed to fail the run: half an hour of
@@ -162,9 +164,15 @@ async def parkour_task(
     task_id: str = "Spark-Parkour-Anymal-C-v0",
     num_envs: int = 4096,
     iterations: int = 1500,
-    steps: int = 300,
-    terrain_level: int = 9,
+    # Steps are 50 Hz env steps, not frames of video: 600 is twelve seconds of robot
+    # time, and 1000 is the episode limit (episode_length_s = 20.0).
+    steps: int = 600,
+    terrain_level: int = -1,
     terrain_col: int = 12,
+    timeline: int = 4,
+    snapshot_every: int = 250,
+    snapshot_steps: int = 250,
+    snapshot_level: int = 4,
 ) -> dict:
     """Train on our own terrain, then film it with our own cameras.
 
@@ -176,20 +184,68 @@ async def parkour_task(
       * the replay is record.py, not `play.py --video`, because the Kit viewport capture
         renders everything on this box except the robot.
 
-    `terrain_level` and `terrain_col` choose which patch to film on. They default to the
-    hardest row of the parkour course, on gaps, because a random patch is usually a
-    boring one. See _place() in record.py.
+    `terrain_level` and `terrain_col` choose which patch to film on, because a random
+    patch is usually a boring one. `terrain_level=-1`, the default, means "wherever the
+    curriculum got to"; pass a row number to override. See _place() in record.py.
+
+    `snapshot_every` films the CURRENT policy every N iterations and puts the clip in
+    the live report, so a three-hour run is watchable while it runs instead of only
+    afterwards. Set 0 to turn it off. Those clips are filmed on a fixed row
+    (`snapshot_level`) so they are comparable to each other, which is the opposite of
+    what the hero shot wants. See Snapshotter in train.py.
     """
     t0 = time.monotonic()
-    rewards, tail = trainer.train(task_id, num_envs, iterations)
-    log.info("trained %s iterations, reward %.2f -> %.2f", len(rewards), rewards[0], rewards[-1])
+    snap = (
+        trainer.Snapshotter(task_id, every=snapshot_every, steps=snapshot_steps,
+                            level=snapshot_level, col=terrain_col)
+        if snapshot_every > 0
+        else None
+    )
+    try:
+        rewards, levels, tail = trainer.train(task_id, num_envs, iterations, snap=snap)
+    finally:
+        # Before anything else touches the GPU: the daemon is holding a booted Kit, and
+        # the final render is about to want the box to itself.
+        if snap is not None:
+            snap.close()
+    log.info("trained %s iterations, reward %.2f -> %.2f, terrain row %.2f -> %.2f",
+             len(rewards), rewards[0], rewards[-1],
+             levels[0] if levels else -1, levels[-1] if levels else -1)
 
-    clips = trainer.record_clips(task_id, steps=steps, terrain_level=terrain_level, terrain_col=terrain_col)
+    # Film where the policy actually GOT TO, not where we hoped it would.
+    #
+    # terrain_level=-1 means "ask the curriculum". Hardcoding row 9 is right when the
+    # policy can do row 9 and embarrassing when it cannot: the clip is then a trained
+    # robot falling into a 0.6 m trench it never learned to cross, which reads as a
+    # broken demo rather than an honest difficulty ceiling. The mean terrain row at the
+    # end of training IS the answer to "how hard can this policy go", so use it.
+    level = terrain_level
+    if level < 0:
+        level = round(levels[-1]) if levels else 0
+        log.info("filming on terrain row %s (curriculum reached %.2f)", level, levels[-1] if levels else 0.0)
+
+    clips = trainer.record_clips(task_id, steps=steps, terrain_level=level,
+                                 terrain_col=terrain_col, timeline=timeline)
     secs = time.monotonic() - t0
-    trainer.report_parkour(task_id, num_envs, iterations, rewards, clips, secs, tail)
+    snaps = snap.clips if snap else []
+    trainer.report_parkour(task_id, num_envs, iterations, rewards, levels, clips, secs, tail,
+                           snaps=snaps, snap_level=snapshot_level if snap else None)
+
+    # Get the trained policy OUT of the pod before it evaporates.
+    #
+    # rsl_rl writes checkpoints to /tmp/isaac-run inside the container, and when the task
+    # finishes that filesystem goes with it. An 87-minute run whose only surviving output
+    # is an embedded mp4 cannot be re-filmed, compared against, or deployed: the actual
+    # product of training is the weights. Learned the expensive way, once.
+    # The blob URI travels in the dict rather than the File object itself: this task is
+    # annotated `-> dict`, and an untyped dict is not a place Flyte can serialise a File.
+    # The upload has already happened either way, so the path is all anyone needs to
+    # fetch it later.
+    policy = await trainer.export_policy(task_id)
 
     patch = clips.get("patch") or {}
     return {
+        "policy": policy.path if policy else None,
         "task": task_id,
         "num_envs": num_envs,
         "iterations": iterations,
@@ -197,9 +253,14 @@ async def parkour_task(
         "reward_final": rewards[-1],
         "reward_max": max(rewards),
         "minutes": round(secs / 60, 1),
+        # The curriculum result. On rough terrain this matters more than the reward:
+        # it is the mean difficulty ROW the envs ended up on, out of num_rows.
+        "terrain_row_start": round(levels[0], 2) if levels else None,
+        "terrain_row_final": round(levels[-1], 2) if levels else None,
         "filmed_on": patch.get("sub_terrain"),
         "difficulty": patch.get("difficulty"),
         "clips": sorted((clips.get("clips") or {}).keys()),
+        "snapshots": len(snaps),
     }
 
 
@@ -235,14 +296,21 @@ async def parkour(
     task_id: str = "Spark-Parkour-Anymal-C-v0",
     num_envs: int = 4096,
     iterations: int = 1500,
-    steps: int = 300,
-    terrain_level: int = 9,
+    # Steps are 50 Hz env steps, not frames of video: 600 is twelve seconds of robot
+    # time, and 1000 is the episode limit (episode_length_s = 20.0).
+    steps: int = 600,
+    terrain_level: int = -1,
     terrain_col: int = 12,
+    timeline: int = 4,
+    snapshot_every: int = 250,
+    snapshot_steps: int = 250,
+    snapshot_level: int = 4,
 ) -> dict:
     """Teach a robot to cross rough ground, and put what it sees in the report.
 
         flyte run pipeline.py parkour
         flyte run pipeline.py parkour --iterations 5      # is the plumbing alive?
+        flyte run pipeline.py parkour --iterations 3000 --snapshot_every 200
         flyte run pipeline.py parkour --task_id Spark-Stairs-Unitree-Go2-v0
 
     Valid task ids are `Spark-{Parkour,Stairs,Stones}-<Robot>-v0` for the ten robots in
@@ -251,7 +319,9 @@ async def parkour(
     """
     result = await parkour_task(
         task_id=task_id, num_envs=num_envs, iterations=iterations,
-        steps=steps, terrain_level=terrain_level, terrain_col=terrain_col,
+        steps=steps, terrain_level=terrain_level, terrain_col=terrain_col, timeline=timeline,
+        snapshot_every=snapshot_every, snapshot_steps=snapshot_steps,
+        snapshot_level=snapshot_level,
     )
     log.info("result: %s", result)
     return result

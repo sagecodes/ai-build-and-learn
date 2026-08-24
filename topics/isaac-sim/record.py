@@ -35,6 +35,9 @@ from `root_pos_w` / `root_quat_w` works for every articulation in the zoo.
 
 Run it as a script; it is spawned as a child process, never imported into Flyte's
 interpreter. See the shutdown note at the top of pipeline.py.
+
+`--serve` keeps it up and films whatever checkpoint is named on stdin, which is how the
+report gets clips DURING a three-hour training run rather than only after it. See serve().
 """
 
 from __future__ import annotations
@@ -57,9 +60,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", required=True, help="gym id, e.g. Spark-Parkour-Anymal-C-Play-v0")
     p.add_argument("--checkpoint", default=None, help="path to model_*.pt (default: newest for the task)")
     p.add_argument("--logs", default="logs/rsl_rl", help="root to search for checkpoints")
-    p.add_argument("--steps", type=int, default=300, help="env steps to record")
+    # STEPS ARE 50 Hz, NOT FRAMES OF VIDEO. The locomotion envs run sim.dt=0.005 with
+    # decimation=4 (velocity_env_cfg.py:363), so one env step is 20 ms of robot time and
+    # the old default of 300 was a SIX SECOND clip. 600 is twelve seconds; the episode
+    # limit is episode_length_s=20.0, i.e. 1000 steps, which is the real ceiling here.
+    p.add_argument("--steps", type=int, default=600, help="env steps to record (50 per second of robot time)")
     p.add_argument("--out", default="clips", help="directory for the mp4s and summary.json")
-    p.add_argument("--fps", type=int, default=30)
+    # 50, to match that control rate. At 30 the footage plays at 0.6x and every gait
+    # looks more deliberate than it is, which is a flattering lie.
+    p.add_argument("--fps", type=int, default=50)
+    p.add_argument("--crf", type=int, default=20,
+                   help="x264 quality, lower is better. The thumbnail strip uses a higher one")
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)
     p.add_argument("--onboard", action="store_true", help="also record the robot's own RGB and depth")
@@ -69,7 +80,46 @@ def build_parser() -> argparse.ArgumentParser:
                    help="difficulty ROW to spawn on (default: random, which usually means easy)")
     p.add_argument("--terrain_col", type=int, default=None,
                    help="sub-terrain COLUMN to spawn on (default: 0, the first in the dict)")
+    # The learning timeline. Cheap because Kit boots once for the whole strip.
+    p.add_argument("--timeline", type=int, default=4,
+                   help="how many EARLIER checkpoints to film as a progress strip (0 to skip)")
+    p.add_argument("--timeline_steps", type=int, default=250,
+                   help="env steps per timeline clip; shorter than the hero shot on purpose")
+    # Serve mode. The other end is Snapshotter in train.py; see serve() for the protocol.
+    p.add_argument("--serve", action="store_true",
+                   help="stay up and film checkpoints named on stdin, one JSON command per line")
     return p
+
+
+def _iter_of(ckpt: Path) -> int:
+    """Iteration number out of `model_1500.pt`. -1 if it is not that shape."""
+    stem = ckpt.stem
+    return int(stem.split("_")[-1]) if stem.startswith("model_") and stem.split("_")[-1].isdigit() else -1
+
+
+def earlier_checkpoints(final: Path, count: int) -> list[Path]:
+    """`count` checkpoints spread across training, oldest first, excluding the final one.
+
+    rsl_rl saves every 50 iterations, so a 1500-iteration run leaves ~30 files sitting in
+    the log directory that nothing ever looks at. They are the only record of what the
+    policy looked like WHILE it was learning, and filming a handful of them is what turns
+    a clip of a robot into a clip of a robot getting better.
+
+    Evenly spaced by iteration rather than by file index, and the first real checkpoint is
+    always included: `model_0.pt` is the untrained policy, which is the most useful frame
+    of the whole strip because it is the before picture.
+    """
+    if count <= 0:
+        return []
+    pool = sorted(
+        (p for p in final.parent.glob("model_*.pt") if _iter_of(p) >= 0 and p != final),
+        key=_iter_of,
+    )
+    if len(pool) <= count:
+        return pool
+    # Spread over the pool, always keeping the earliest.
+    idx = sorted({round(i * (len(pool) - 1) / max(count - 1, 1)) for i in range(count)})
+    return [pool[i] for i in idx]
 
 
 def newest_checkpoint(logs: Path, experiment: str) -> Path:
@@ -226,7 +276,7 @@ def _place(env, scene, level: int | None, col: int | None) -> dict:
     return patch
 
 
-def _encode(frames, path: Path, fps: int) -> None:
+def _encode(frames, path: Path, fps: int, crf: int = 20) -> None:
     """Write RGB uint8 frames to H.264. PyAV, because it is what the image already has."""
     import av
 
@@ -236,9 +286,11 @@ def _encode(frames, path: Path, fps: int) -> None:
     container = av.open(str(path), mode="w")
     stream = container.add_stream("libx264", rate=fps)
     stream.width, stream.height, stream.pix_fmt = w, h, "yuv420p"
-    # Visually lossless-ish. These clips are watched at full size in a Flyte report and
-    # then base64'd into HTML, so the size/quality knob is worth setting explicitly.
-    stream.options = {"crf": "20", "preset": "medium"}
+    # Visually lossless-ish at the default. These clips are watched at full size in a
+    # Flyte report and then base64'd into HTML, so the size/quality knob is worth setting
+    # explicitly: every snapshot in the live report is re-encoded into the page on every
+    # repaint, and a 12-second clip at crf 20 adds up fast.
+    stream.options = {"crf": str(crf), "preset": "medium"}
     for frame in frames:
         container.mux(stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")))
     container.mux(stream.encode())
@@ -340,14 +392,21 @@ def main() -> None:
     env = RslRlVecEnvWrapper(env, clip_actions=getattr(agent_cfg, "clip_actions", None))
 
     experiment = agent_cfg.experiment_name
-    checkpoint = Path(args.checkpoint) if args.checkpoint else newest_checkpoint(Path(args.logs), experiment)
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    runner.load(str(checkpoint))
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
-    print(f"[record] {args.task} <- {checkpoint}", flush=True)
+    policy = None
+
+    # Serve mode resolves nothing up front: the checkpoints it films do not exist yet
+    # when it boots, because the run that writes them is still on iteration 1.
+    checkpoint: Path | None = None
+    earlier: list[Path] = []
+    if not args.serve:
+        checkpoint = Path(args.checkpoint) if args.checkpoint else newest_checkpoint(Path(args.logs), experiment)
+        earlier = earlier_checkpoints(checkpoint, args.timeline)
+        print(f"[record] {args.task} <- {checkpoint}", flush=True)
+        if earlier:
+            print(f"[record] timeline: {[_iter_of(c) for c in earlier]} then final", flush=True)
 
     scene = env.unwrapped.scene
-    patch = _place(env, scene, args.terrain_level, args.terrain_col)
 
     robot = scene["robot"]
     chase: Camera = scene["chase_cam"]
@@ -361,68 +420,165 @@ def main() -> None:
         w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
         return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
-    chase_frames: list = []
-    onboard_frames: list = []
-    depth_frames: list = []
-    scans: list = []
+    def film(
+        steps: int, want_onboard: bool,
+        level: int | None = args.terrain_level, col: int | None = args.terrain_col,
+    ) -> tuple[list, list, list, list, dict]:
+        """Roll the CURRENTLY LOADED policy for `steps` and return the frames.
 
-    # get_observations() returns a single TensorDict in this rsl_rl; older tutorials
-    # unpack (obs, extras) and fail with "not enough values to unpack".
-    obs = env.get_observations()
-    with torch.inference_mode():
-        for _ in range(args.steps):
-            pos = robot.data.root_pos_w
-            yaw = yaw_of(robot.data.root_quat_w)
+        Everything expensive is already built by the time this is called: Kit is up, the
+        terrain mesh is generated, the cameras exist. Filming another checkpoint is then
+        just `runner.load()` plus this loop, which is why the whole learning timeline
+        costs one Kit boot instead of one per clip.
 
-            # Behind and to the side, in the robot's own frame, so the camera swings with
-            # it instead of ending up nose-on when the robot turns around.
-            back, side, up = 2.8, 1.4, 1.2
-            eye = torch.stack(
-                [
-                    pos[:, 0] - back * torch.cos(yaw) - side * torch.sin(yaw),
-                    pos[:, 1] - back * torch.sin(yaw) + side * torch.cos(yaw),
-                    pos[:, 2] + up,
-                ],
-                dim=1,
-            )
-            # Aim a touch above the root so the body sits on the horizon line rather
-            # than dead centre. Built by cloning rather than adding a fresh tensor:
-            # `root_pos_w.device` is an isaacsim Device wrapper, not a torch.device, so
-            # `torch.tensor(..., device=pos.device)` dies with
-            #   TypeError: argument 'device' must be torch.device, not Device
-            target = pos.clone()
-            target[:, 2] += 0.1
-            look(chase, eye, target)
+        `level` and `col` default to the command-line patch and are arguments only so
+        that serve() can move the camera to a different patch between clips.
+        """
+        chase_frames: list = []
+        onboard_frames: list = []
+        depth_frames: list = []
+        scans: list = []
+        cam2 = onboard if want_onboard else None
 
-            if onboard is not None:
-                head = torch.stack(
-                    [pos[:, 0] + 0.35 * torch.cos(yaw), pos[:, 1] + 0.35 * torch.sin(yaw), pos[:, 2] + 0.05], dim=1
+        patch = _place(env, scene, level, col)
+        # get_observations() returns a single TensorDict in this rsl_rl; older tutorials
+        # unpack (obs, extras) and fail with "not enough values to unpack".
+        obs = env.get_observations()
+        with torch.inference_mode():
+            for _ in range(steps):
+                pos = robot.data.root_pos_w
+                yaw = yaw_of(robot.data.root_quat_w)
+
+                # Behind and to the side, in the robot's own frame, so the camera swings
+                # with it instead of ending up nose-on when the robot turns around.
+                back, side, up = 2.8, 1.4, 1.2
+                eye = torch.stack(
+                    [
+                        pos[:, 0] - back * torch.cos(yaw) - side * torch.sin(yaw),
+                        pos[:, 1] - back * torch.sin(yaw) + side * torch.cos(yaw),
+                        pos[:, 2] + up,
+                    ],
+                    dim=1,
                 )
-                # Aim slightly down: a walking robot cares about the next two footholds,
-                # not the horizon.
-                ahead = torch.stack(
-                    [head[:, 0] + 2.0 * torch.cos(yaw), head[:, 1] + 2.0 * torch.sin(yaw), head[:, 2] - 0.8], dim=1
-                )
-                look(onboard, head, ahead)
+                # Aim a touch above the root so the body sits on the horizon line rather
+                # than dead centre. Built by cloning rather than adding a fresh tensor:
+                # `root_pos_w.device` is an isaacsim Device wrapper, not a torch.device,
+                # so `torch.tensor(..., device=pos.device)` dies with
+                #   TypeError: argument 'device' must be torch.device, not Device
+                target = pos.clone()
+                target[:, 2] += 0.1
+                look(chase, eye, target)
 
-            actions = policy(obs)
-            obs, _, _, _ = env.step(actions)
+                if cam2 is not None:
+                    head = torch.stack(
+                        [pos[:, 0] + 0.35 * torch.cos(yaw), pos[:, 1] + 0.35 * torch.sin(yaw),
+                         pos[:, 2] + 0.05], dim=1
+                    )
+                    # Aim slightly down: a walking robot cares about the next two
+                    # footholds, not the horizon.
+                    ahead = torch.stack(
+                        [head[:, 0] + 2.0 * torch.cos(yaw), head[:, 1] + 2.0 * torch.sin(yaw),
+                         head[:, 2] - 0.8], dim=1
+                    )
+                    look(cam2, head, ahead)
 
-            chase_frames.append(chase.data.output["rgb"][0, ..., :3].cpu().numpy().astype(np.uint8))
-            if onboard is not None:
-                onboard_frames.append(onboard.data.output["rgb"][0, ..., :3].cpu().numpy().astype(np.uint8))
-                depth_frames.append(onboard.data.output["distance_to_image_plane"][0].cpu().numpy())
+                actions = policy(obs)
+                obs, _, _, _ = env.step(actions)
 
-            # The height scanner already exists on every rough locomotion env: it is the
-            # terrain observation the policy is actually conditioned on. Recording it
-            # lets the report show what the policy SEES next to what the camera sees.
-            if "height_scanner" in scene.sensors:
-                hs = scene["height_scanner"]
-                scans.append((hs.data.pos_w[0, 2] - hs.data.ray_hits_w[0, :, 2]).cpu().numpy())
+                chase_frames.append(chase.data.output["rgb"][0, ..., :3].cpu().numpy().astype(np.uint8))
+                if cam2 is not None:
+                    onboard_frames.append(cam2.data.output["rgb"][0, ..., :3].cpu().numpy().astype(np.uint8))
+                    depth_frames.append(cam2.data.output["distance_to_image_plane"][0].cpu().numpy())
+
+                # The height scanner already exists on every rough locomotion env: it is
+                # the terrain observation the policy is actually conditioned on. Recording
+                # it lets the report show what the policy SEES next to the camera view.
+                if "height_scanner" in scene.sensors:
+                    hs = scene["height_scanner"]
+                    scans.append((hs.data.pos_w[0, 2] - hs.data.ray_hits_w[0, :, 2]).cpu().numpy())
+
+        return chase_frames, onboard_frames, depth_frames, scans, patch
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    _encode(chase_frames, out / "chase.mp4", args.fps)
+
+    # ── Serve mode: film the policy WHILE it is being trained ───────────────────
+    def serve() -> None:
+        """Film on demand. One JSON command per stdin line, one JSON result per clip.
+
+        The whole point is that Kit boots ONCE. A snapshot is then `runner.load()` plus
+        a short roll, tens of seconds, against the two-and-a-bit minutes a fresh process
+        spends booting Kit and generating the 200-patch terrain mesh. That difference is
+        what makes filming every few hundred iterations affordable while a training run
+        is using the same GPU.
+
+        Commands are `{"checkpoint": path, "iteration": n, "steps": n, "level": n,
+        "col": n}`, and `{"stop": true}` ends the loop. Results are
+        `{"ok": true, "iteration": n, "clip": path, ...}` or `{"ok": false, "error": ...}`.
+        The other end is Snapshotter in train.py.
+        """
+        nonlocal policy
+        print("[record] serve: ready", flush=True)
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                cmd = json.loads(line)
+            except ValueError:
+                print(f"[record] serve: not JSON, ignoring: {line[:120]}", flush=True)
+                continue
+            if cmd.get("stop"):
+                print("[record] serve: stopping", flush=True)
+                break
+
+            it = int(cmd.get("iteration", -1))
+            try:
+                # A checkpoint half-written by the training process raises here, and
+                # that is the common failure: nothing in this loop is allowed to end the
+                # daemon, because the next request a minute later will be fine.
+                runner.load(str(cmd["checkpoint"]))
+                policy = runner.get_inference_policy(device=env.unwrapped.device)
+                frames, _, _, _, patch = film(
+                    int(cmd.get("steps", args.steps)),
+                    want_onboard=False,
+                    level=cmd.get("level", args.terrain_level),
+                    col=cmd.get("col", args.terrain_col),
+                )
+                clip = out / f"snap_{max(it, 0):06d}.mp4"
+                _encode(frames, clip, args.fps, args.crf)
+                result = {"ok": bool(frames), "iteration": it, "clip": str(clip),
+                          "frames": len(frames), "row": patch.get("row")}
+            except Exception as exc:  # noqa: BLE001 - deliberately everything
+                result = {"ok": False, "iteration": it, "error": f"{type(exc).__name__}: {exc}"}
+            print(json.dumps(result), flush=True)
+
+    if args.serve:
+        serve()
+        env.close()
+        simulation_app.close()
+        return
+
+    # ── The learning timeline ───────────────────────────────────────────────────
+    # Earlier checkpoints, filmed oldest-first, so the report can show the gait being
+    # learned rather than only its end state. Chase camera only and a shorter roll:
+    # this is a thumbnail strip, not the hero shot.
+    timeline = []
+    for ckpt in earlier:
+        it = _iter_of(ckpt)
+        runner.load(str(ckpt))
+        policy = runner.get_inference_policy(device=env.unwrapped.device)
+        frames, _, _, _, _ = film(args.timeline_steps, want_onboard=False)
+        clip = out / f"iter_{it:06d}.mp4"
+        _encode(frames, clip, args.fps, args.crf)
+        timeline.append({"iteration": it, "clip": str(clip), "frames": len(frames)})
+        print(f"[record] timeline iter {it}: {len(frames)} frames -> {clip.name}", flush=True)
+
+    # The hero shot last, so the env ends on the final policy.
+    runner.load(str(checkpoint))
+    policy = runner.get_inference_policy(device=env.unwrapped.device)
+    chase_frames, onboard_frames, depth_frames, scans, patch = film(args.steps, args.onboard)
+    _encode(chase_frames, out / "chase.mp4", args.fps, args.crf)
 
     summary = {
         "task": args.task,
@@ -430,11 +586,12 @@ def main() -> None:
         "steps": args.steps,
         "frames": len(chase_frames),
         "patch": patch,
+        "timeline": timeline,
         "clips": {"chase": str(out / "chase.mp4")},
     }
 
     if onboard_frames:
-        _encode(onboard_frames, out / "onboard.mp4", args.fps)
+        _encode(onboard_frames, out / "onboard.mp4", args.fps, args.crf)
         summary["clips"]["onboard"] = str(out / "onboard.mp4")
         d = np.stack(depth_frames)
         # Isaac hands depth back as (H, W, 1), so the stack is (N, H, W, 1) and every
@@ -443,7 +600,7 @@ def main() -> None:
         # Drop the trailing axis if it is there; older builds return (N, H, W) already.
         if d.ndim == 4:
             d = d[..., 0]
-        _encode(_colourise_depth(d), out / "depth.mp4", args.fps)
+        _encode(_colourise_depth(d), out / "depth.mp4", args.fps, args.crf)
         summary["clips"]["depth"] = str(out / "depth.mp4")
         summary["depth_range_m"] = _depth_range(d)
 

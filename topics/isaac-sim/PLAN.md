@@ -90,6 +90,40 @@ Isaac Lab **6.1.17** at `/home/sage/isaac/IsaacLab`, Isaac Sim 6.0.1 at
   because it is the obvious episode 3.
 - **Measured baseline from episode 1**: Anymal-C flat, 4096 envs, 1500 iterations = 27 min
   on the Spark, mean reward -2.45 -> 11.38. rsl_rl collects 24 steps/env/iteration.
+- **num_envs sweep on the parkour task** (Anymal-C, 12 iterations each, measured
+  2026-08-24 on the host). Rough terrain costs ~4x flat per iteration: 4.08 s/iter here
+  against 1.08 s/iter for the flat baseline, which is the height-scanner raycasts, the
+  200-patch terrain mesh and a 235-dim observation instead of ~48.
+
+  | num_envs | s/iter | env-steps/s | 1500 iters | peak host RSS |
+  |---|---|---|---|---|
+  | 2048 | 2.48 | 19,819 | 62 min | 5.9 GB |
+  | **4096** | **4.08** | **24,094** | **102 min** | **7.1 GB** |
+  | 8192 | 7.80 | 25,206 | 195 min | 10.0 GB |
+
+  **4096 is the knee.** Throughput saturates there: 8192 buys 4.6% more env-steps/sec for
+  double the wall clock. It is also the batch size NVIDIA's rough Anymal-C PPO config is
+  tuned for, so moving off it means retuning hyperparameters, not just waiting longer.
+
+  Memory is NOT the constraint on this box, compute is. Peak host RSS at 8192 envs is
+  10 GB against a 119 GB unified pool, so the `train_env` request of 64Gi has enormous
+  headroom and there is no point capping envs for memory reasons.
+- **`--steps` is 50 Hz env steps, NOT frames of video.** `velocity_env_cfg.py:363` sets
+  `decimation=4` on `sim.dt=0.005`, so one env step is 20 ms of robot time:
+
+  | steps | robot time |
+  |---|---|
+  | 90 | 1.8 s (the first snapshot default: every clip read as a robot giving up) |
+  | 250 | 5 s (snapshots now) |
+  | 600 | 12 s (the hero shot now) |
+  | 1000 | 20 s, and the hard ceiling: `episode_length_s = 20.0` |
+
+  The encode fps must match that control rate too. It was 30, so every clip also played
+  at 0.6x, which flatters the gait. Now 50.
+- **`Curriculum/terrain_levels` is printed to stdout** every iteration by rsl_rl, e.g.
+  `Curriculum/terrain_levels: 3.4065`. It is the mean difficulty row the envs are on, and
+  it is the number that says the PARKOUR worked rather than that the walking worked.
+  train.py parses it into a second curve.
 
 ---
 
@@ -141,6 +175,31 @@ of the parkour task, pending a real training run to film.
 - Still to do: contact forces, and a `TiledCamera` instead of `Camera` if the render cost
   ever matters (it does not at one robot).
 
+### Phase 3b. Mid-training replays in the live report `[~]`
+The MuJoCo demo films the current policy at every eval boundary and drops the clip into
+the live report; a reward curve says a number went up, footage says it went up for the
+right reason. Isaac cannot copy the shape, because training is a child process and its
+weights are not ours to reach into. What it does have is rsl_rl writing `model_*.pt`
+every 50 iterations, which is a perfectly good stream of live policies.
+
+- `record.py --serve` stays up and films whatever checkpoint is named on stdin, one JSON
+  command per line. Kit boots ONCE, so a snapshot is `runner.load()` plus a short roll
+  instead of the ~2 min a fresh process spends booting Kit and building the 200-patch
+  terrain mesh. That difference is what makes filming every few hundred iterations
+  affordable while training holds the same GPU.
+- `Snapshotter` in train.py drives it: started lazily on the first request (so its Kit
+  boot does not land on top of the training process's own), fed from a checkpoint scan
+  on iteration boundaries, drained on a thread so a 30 s render never stalls the loop
+  that is consuming rsl_rl's stdout. It skips a boundary if the previous clip is still
+  rendering, so the report stays current instead of queueing stale clips.
+- Checkpoints are filtered by AGE (5 s), not just mtime: the newest file is regularly a
+  `torch.save` still in flight, and loading one raises deep in unpickling.
+- Snapshots film a FIXED row (`snapshot_level`, default 4 of 10), which is the opposite
+  of what the hero shot wants: the strip is only worth looking at if the ground stays
+  the same and the policy is the only thing changing.
+- Everything is best-effort. Failed load, dead daemon, empty clip: it logs and the run
+  carries on. Nothing here is worth losing three hours of training over.
+
 ### Phase 4. Robot zoo `[ ]`
 One terrain, N robots, one report, clips side by side.
 - Candidates: G1 (continuity with the MuJoCo episode), Go2, Anymal-C, Digit, Cassie,
@@ -189,6 +248,28 @@ isaac-sim image, which has no Isaac Lab. `terrains.py` and `spark_envs.py` impor
 `isaaclab.terrains` at module level, so importing them there breaks every orchestrator
 pod. They ride along via `train_env.include=(...)` in config.py instead, which is unioned
 into whatever the copy style found.
+
+**`flyte.report.log` APPENDS. Use `replace`.** A live-updating report has to call
+`flyte.report.replace(...)` then `flyte.report.flush()`, which is what the MuJoCo demo
+next door does throughout. `log()` appends to the main tab, so repainting a progress
+chart every 25 iterations stacks ~60 complete copies of the report, videos included, and
+the reader scrolls through all of them. `Tab.replace` exists too, so the rsl_rl log tail
+lives in its own tab instead of pushing the clips off screen. Several different charts in
+one tab is fine; the same chart sixty times is not.
+
+**Echo child stdout, or the pod log is one line.** `_run_streaming` consumes rsl_rl's
+stdout to parse the curves, which means `kubectl logs` shows NOTHING for the whole run
+unless the parser also prints. A 100-minute training run that is only observable through
+a report is a bad trade for one `log.info`.
+
+**Pre-run GPU ritual on the Spark**, in order:
+1. `nvidia-smi` reports `[N/A]` for memory on GB10. `torch.cuda.mem_get_info()` is the
+   only honest read.
+2. `free` actively misleads: it claimed 109 GB "available" while CUDA could see 15.7 GiB,
+   because 94 GB was page cache that CUDA cannot use. `sync && echo 3 | sudo tee
+   /proc/sys/vm/drop_caches` (needs a real TTY) took CUDA from 15.7 to 109.3 GiB.
+3. Check rustfs RSS. It leaks, and it steals from the same unified pool.
+4. Confirm no pod is still `Terminating` on the GPU, or the new one sits Unschedulable.
 
 **Never leave `--branch main` in a Dockerfile.** The training image's tag is an md5 of
 `Dockerfile.train`'s contents, so it rebuilds whenever that file changes, and the first
