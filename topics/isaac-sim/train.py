@@ -179,7 +179,7 @@ class Snapshotter:
 
     def __init__(
         self, task_id: str, every: int, steps: int = 250, level: int = 4, col: int = 12,
-        width: int = 640, height: int = 360, fps: int = 50, crf: int = 26,
+        width: int = 480, height: int = 270, fps: int = 50, crf: int = 32,
     ) -> None:
         # The Play variant, same derivation as record_clips(): a caller cannot ask for a
         # snapshot of a different terrain than the one being trained on.
@@ -196,9 +196,13 @@ class Snapshotter:
         self.col = col
         self.size = (width, height)
         self.fps = fps
-        # A coarser crf than the hero shot: these are 640x360 thumbnails that get
-        # base64'd into the live report on EVERY repaint, so their size is a running
-        # cost rather than a one-off.
+        # A MUCH coarser crf than the hero shot, and the number is measured rather than
+        # taste. These are path-traced frames, so they are full of sampling noise, and
+        # x264 spends enormous bitrate preserving noise: the first snapshot filmed at
+        # 640x360 crf 26 came out at 6.3 MB for five seconds. Each of these is base64'd
+        # into the live report on EVERY repaint, so at five clips that is a 42 MB page
+        # rewritten every ninety seconds for three hours. See the note in record.py's
+        # _encode for the measurements.
         self.crf = crf
         self.out = WORKDIR / "snapshots"
         self.clips: list[dict] = []
@@ -258,9 +262,10 @@ class Snapshotter:
             if res.get("ok"):
                 self.clips.append({"iteration": res["iteration"], "clip": res["clip"],
                                    "frames": res.get("frames", 0)})
-                log.info("snapshot iter %s: %s frames on row %s -> %s",
-                         res["iteration"], res.get("frames"), res.get("row"),
-                         Path(res["clip"]).name)
+                log.info("snapshot iter %s: %s frames (%.1fs) on row %s -> %s, %s KB",
+                         res["iteration"], res.get("frames"),
+                         res.get("frames", 0) / 50, res.get("row"),
+                         Path(res["clip"]).name, res.get("kb"))
             else:
                 log.warning("snapshot iter %s failed: %s", res.get("iteration"), res.get("error"))
         self._dead = True
@@ -457,7 +462,11 @@ def record_clips(
     if rc != 0 or not summary_path.exists():
         log.warning("record.py exited %s; continuing without clips. tail:\n%s", rc, "\n".join(tail))
         return {}
-    return json.loads(summary_path.read_text())
+    summary = json.loads(summary_path.read_text())
+    # record.py prints this too, but _run_streaming eats its stdout, so without this the
+    # only place the report's own weight is visible is inside a pod that no longer exists.
+    log.info("clip sizes KB: %s", summary.get("clip_kb"))
+    return summary
 
 
 async def export_policy(task_id: str) -> File | None:

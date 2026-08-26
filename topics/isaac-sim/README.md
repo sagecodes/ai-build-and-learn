@@ -162,6 +162,65 @@ One consequence worth knowing: Flyte only bundles modules the task module import
 
 **pip will warn, and you can ignore it.** flyte's pydantic (2.13.4) and typing_extensions (4.16.0) violate `isaaclab`'s declared pins (`<2.12`, `==4.12.2`). Measured, not assumed: `isaacsim` imports, `isaaclab` enumerates its full task registry, and the physics checks still pass 4/4. Those pins are metadata, not runtime constraints. Revisit if RL training misbehaves.
 
+## Watching it learn, while it learns
+
+A three-hour training run whose only output is a reward curve tells you a number went up.
+It does not tell you the robot learned to walk rather than to shuffle on its knees, and you
+find that out at minute 180. The MuJoCo demo next door solves this with brax's
+`policy_params_fn`, which hands over the live weights at every eval boundary.
+
+Isaac cannot copy that shape, because training runs as a child process and its weights are
+not ours to reach into. What it does have is rsl_rl writing `model_*.pt` every 50
+iterations, which is a perfectly good stream of live policies if something will render them.
+
+So `record.py --serve` stays up and films whatever checkpoint is named on stdin, one JSON
+command per line, and `Snapshotter` in `train.py` feeds it from a checkpoint scan on
+iteration boundaries. The clips go straight into the live Flyte report, newest one large
+with the earlier ones as a strip beside it.
+
+The design decisions that matter, all of them things that went wrong first:
+
+- **One daemon, not one process per clip.** A fresh `record.py` costs about two minutes
+  before its first frame: Kit boots, extensions load, the 200-patch terrain mesh is
+  generated. Paying that fifteen times over a run, on the same GPU that is training, is
+  minutes of contention bought for nothing. Booted once, a snapshot is `runner.load()` plus
+  a short roll.
+- **The daemon starts lazily**, on the first request rather than at t=0, so its Kit boot
+  does not land on top of the training process doing its own.
+- **Its stdout is drained on a thread.** Blocking the main loop for the render would fill
+  the training child's stdout pipe and stall training itself.
+- **Checkpoints are filtered by age, not just mtime.** The newest file is regularly a
+  `torch.save` still in flight, and loading one raises deep inside unpickling.
+- **Snapshots film a fixed difficulty row.** The hero shot follows the curriculum, which is
+  right for a hero shot and wrong here: a progress strip is only readable if the ground
+  stays the same and the policy is the only thing changing.
+
+Two things about clip sizing are worth stating plainly, because both produced a broken
+report before they produced a working one.
+
+**`--steps` counts 50 Hz env steps, not frames.** The locomotion envs run `sim.dt = 0.005`
+with `decimation = 4`, so one step is 20 ms of robot time. The first snapshots were 90
+steps, which is 1.8 seconds, and every clip read as a robot that took two steps and gave
+up. `episode_length_s = 20.0` is the real ceiling, i.e. 1000 steps. Snapshots now film 250
+(5 s) and the hero shot 600 (12 s). The encode fps has to match the control rate too: at 30
+against 50 Hz, everything played at 0.6x, which flatters the gait.
+
+**Path-tracer noise is what sets the file size, and crf is the only knob that touches it.**
+These frames come out of RT2, so every pixel carries sampling noise, and noise is the one
+thing H.264 cannot compress. Measured on the same five-second clip:
+
+| resolution | crf | size |
+|---|---|---|
+| 640x360 | 26 | 5.84 MB |
+| 640x360 | 32 | 0.34 MB |
+| 480x270 | 30 | 0.14 MB |
+
+At crf 26 a five-second thumbnail was 6.3 MB, roughly 10 Mbps. Every snapshot is base64'd
+into the report on every repaint, so five of those is a 40 MB page rewritten every ninety
+seconds for three hours, and all of it goes through the blob store. The cliff between 26
+and 32 is x264 deciding the grain is not worth bits. Be on the far side of it for anything
+that repaints.
+
 ## Where this goes next
 
 Once the simulator exists, the actual event is the comparison the MuJoCo run sets up:

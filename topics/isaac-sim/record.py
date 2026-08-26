@@ -69,10 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
     # 50, to match that control rate. At 30 the footage plays at 0.6x and every gait
     # looks more deliberate than it is, which is a flattering lie.
     p.add_argument("--fps", type=int, default=50)
-    p.add_argument("--crf", type=int, default=20,
+    p.add_argument("--crf", type=int, default=24,
                    help="x264 quality, lower is better. The thumbnail strip uses a higher one")
-    p.add_argument("--width", type=int, default=1280)
-    p.add_argument("--height", type=int, default=720)
+    # 960x540, not 1280x720. The report renders the chase clip at max-width 760 px, so
+    # 720p was already being downscaled in the browser: those extra pixels only ever
+    # existed to be base64'd into the page. The onboard cameras are half this again.
+    p.add_argument("--width", type=int, default=960)
+    p.add_argument("--height", type=int, default=540)
     p.add_argument("--onboard", action="store_true", help="also record the robot's own RGB and depth")
     p.add_argument("--rendering_mode", default="quality", choices=["performance", "balanced", "quality"])
     # Where on the terrain grid to film. See _place() for why these matter so much.
@@ -276,23 +279,42 @@ def _place(env, scene, level: int | None, col: int | None) -> dict:
     return patch
 
 
-def _encode(frames, path: Path, fps: int, crf: int = 20) -> None:
-    """Write RGB uint8 frames to H.264. PyAV, because it is what the image already has."""
+def _encode(frames, path: Path, fps: int, crf: int = 20, scale: float = 1.0) -> None:
+    """Write RGB uint8 frames to H.264. PyAV, because it is what the image already has.
+
+    `scale` shrinks on the way out, for clips the report shows small anyway: the timeline
+    strip renders at 300 px wide, so encoding it at the camera's full 1280x720 spends
+    megabytes on pixels no one will ever see.
+    """
     import av
 
     if not frames:
         return
     h, w = frames[0].shape[:2]
+    if scale != 1.0:
+        # x264 needs even dimensions for yuv420p.
+        w, h = int(w * scale) // 2 * 2, int(h * scale) // 2 * 2
     container = av.open(str(path), mode="w")
     stream = container.add_stream("libx264", rate=fps)
     stream.width, stream.height, stream.pix_fmt = w, h, "yuv420p"
-    # Visually lossless-ish at the default. These clips are watched at full size in a
-    # Flyte report and then base64'd into HTML, so the size/quality knob is worth setting
-    # explicitly: every snapshot in the live report is re-encoded into the page on every
-    # repaint, and a 12-second clip at crf 20 adds up fast.
+    # ── crf is load-bearing here, far more than it looks ────────────────────────
+    # These frames come out of a PATH TRACER, so every pixel carries sampling noise,
+    # and noise is the one thing H.264 cannot compress: at crf 26 x264 faithfully
+    # preserves the grain and a five-second 640x360 clip lands at 6.3 MB, which is
+    # roughly 10 Mbps for a thumbnail. Measured on the same clip, re-encoded:
+    #
+    #     640x360 crf 26   5.84 MB      480x270 crf 30   0.14 MB
+    #     640x360 crf 32   0.34 MB      480x270 crf 34   0.05 MB
+    #
+    # The cliff between 26 and 32 is x264 deciding the grain is not worth bits. For
+    # anything that gets base64'd into a report on every repaint, be on the far side
+    # of that cliff.
     stream.options = {"crf": str(crf), "preset": "medium"}
     for frame in frames:
-        container.mux(stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")))
+        picture = av.VideoFrame.from_ndarray(frame, format="rgb24")
+        if scale != 1.0:
+            picture = picture.reformat(width=w, height=h, format="yuv420p")
+        container.mux(stream.encode(picture))
     container.mux(stream.encode())
     container.close()
 
@@ -548,7 +570,10 @@ def main() -> None:
                 clip = out / f"snap_{max(it, 0):06d}.mp4"
                 _encode(frames, clip, args.fps, args.crf)
                 result = {"ok": bool(frames), "iteration": it, "clip": str(clip),
-                          "frames": len(frames), "row": patch.get("row")}
+                          "frames": len(frames), "row": patch.get("row"),
+                          # Reported because it is the number that decides whether the
+                          # live report stays loadable. See _encode.
+                          "kb": round(clip.stat().st_size / 1024) if clip.exists() else 0}
             except Exception as exc:  # noqa: BLE001 - deliberately everything
                 result = {"ok": False, "iteration": it, "error": f"{type(exc).__name__}: {exc}"}
             print(json.dumps(result), flush=True)
@@ -570,7 +595,9 @@ def main() -> None:
         policy = runner.get_inference_policy(device=env.unwrapped.device)
         frames, _, _, _, _ = film(args.timeline_steps, want_onboard=False)
         clip = out / f"iter_{it:06d}.mp4"
-        _encode(frames, clip, args.fps, args.crf)
+        # Quarter size and a coarser crf: the report shows these at 300 px wide, so the
+        # camera's full 1280x720 would be megabytes spent on pixels nobody sees.
+        _encode(frames, clip, args.fps, max(args.crf, 30), scale=0.5)
         timeline.append({"iteration": it, "clip": str(clip), "frames": len(frames)})
         print(f"[record] timeline iter {it}: {len(frames)} frames -> {clip.name}", flush=True)
 
@@ -627,6 +654,14 @@ def main() -> None:
             "peak": [round(float(v), 4) for v in arr[peak]],
         }
         np.save(out / "height_scan.npy", arr)
+
+    # Sizes, on one line, because every one of these ends up base64'd into the report
+    # and a run that quietly produced a 90 MB page should say so in its own log.
+    summary["clip_kb"] = {
+        name: round(Path(p).stat().st_size / 1024)
+        for name, p in summary["clips"].items() if Path(p).exists()
+    }
+    print(f"[record] clip sizes KB: {summary['clip_kb']}", flush=True)
 
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2), flush=True)
