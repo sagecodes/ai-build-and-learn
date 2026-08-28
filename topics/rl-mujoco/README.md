@@ -189,7 +189,10 @@ The **command** entry is what "joystick" means. Each episode samples a random ta
 
 ### The reward: two terms that want walking, twenty-two that decide how it looks
 
-The reward is a weighted sum, and Playground's tuned scales look like this (abridged from the env's default config):
+The reward is a weighted sum. The weights are DeepMind's, not ours: they live in Playground's own
+`default_config()`, at `mujoco_playground/_src/locomotion/g1/joystick.py:53`, and nothing in this repo
+declares them. Abridged and reordered here to put the task terms first (the real list is 24 keys, grouped
+by joint / feet / energy / pose):
 
 ```python
 tracking_lin_vel  =  1.0     # exp(-error^2 / 0.25): match commanded velocity

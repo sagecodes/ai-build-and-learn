@@ -8,3 +8,7 @@ __pycache__/
 *.pyc
 outputs/
 logs/
+
+# Staged by nvgfx.sh from the host NVIDIA driver: 260 MB of NVIDIA's binaries,
+# pinned to this box's driver version. Re-stage, never commit.
+nvgfx/

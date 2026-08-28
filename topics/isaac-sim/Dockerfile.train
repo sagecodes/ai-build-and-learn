@@ -50,10 +50,31 @@ RUN python3 -m pip install --no-cache-dir \
 # Isaac Lab. It finds its simulator through a symlink named _isaac_sim and ONLY
 # through that symlink, so the link has to exist before --install runs.
 # --install pulls in rsl_rl, rl_games, skrl and Stable-Baselines3.
-ARG ISAACLAB_REF=main
-RUN git clone --depth=1 --branch ${ISAACLAB_REF} https://github.com/isaac-sim/IsaacLab /isaac-lab \
- && ln -sfn /isaac-sim /isaac-lab/_isaac_sim \
+#
+# PINNED TO A COMMIT, and it has to be. This was `--branch main`, and the cost of that
+# showed up the first time the image was rebuilt: upstream had added `tabs 4` to line 16
+# of isaaclab.sh, `tabs` looks up the `ansi+tabs` terminfo entry, the container's
+# terminfo database does not have it, and `set -e` on line 13 turned a cosmetic tab-stop
+# call into
+#     'ansi+tabs': unknown terminal type.
+#     ERROR: process ... did not complete successfully: exit code: 1
+# 1.5 seconds into a 25 GB build. Nothing in this repo had changed.
+#
+# 6a7acb03 is v3.0.0-beta2.patch1-11-g6a7acb032, which is the tree the bare-metal build
+# at ~/isaac/IsaacLab is on, i.e. the one every line number cited in spark_envs.py,
+# terrains.py and record.py was read from. Host and pod now run the same Isaac Lab,
+# which is the whole point of having both.
+#
+# Fetched by SHA rather than cloned by branch: --depth=1 --branch only accepts a ref
+# name, and GitHub serves a shallow fetch of an arbitrary commit.
+ARG ISAACLAB_REF=6a7acb0320a0bdc15b13e44e83b575e00797faf4
+RUN export TERM=xterm \
+ && git init /isaac-lab \
  && cd /isaac-lab \
+ && git remote add origin https://github.com/isaac-sim/IsaacLab \
+ && git fetch --depth=1 origin ${ISAACLAB_REF} \
+ && git checkout --detach FETCH_HEAD \
+ && ln -sfn /isaac-sim /isaac-lab/_isaac_sim \
  && ./isaaclab.sh --install \
  && chmod -R a+rX /isaac-lab
 
@@ -77,3 +98,30 @@ ENTRYPOINT []
 CMD ["python3"]
 
 USER isaac-sim
+
+# ── The graphics half of the NVIDIA driver ──────────────────────────────────────
+#
+# Populated by ./nvgfx.sh from the host driver. It is NOT in git (see .gitignore): these
+# are NVIDIA's binaries and they are pinned to the exact driver the host kernel module is
+# running, so they have to be re-staged rather than committed.
+#
+# COPY of an empty directory is not an error, which is deliberate: forget to run nvgfx.sh
+# and you get the original "Failed to create any GPU devices" at replay time rather than a
+# build failure. The README says to run it; this says why.
+COPY nvgfx/ /opt/nvgfx/
+
+#
+# Appended at the very END of the file on purpose: ENV is a zero-byte metadata layer,
+# but it still invalidates everything below it, and below this point in Dockerfile.train
+# there is ~25 GB of torch and Isaac Lab. Putting it last keeps the cache.
+#
+# /opt/nvgfx is where nvgfx.sh stages libGLX_nvidia and the rest of the `graphics`
+# capability, and where train_env's pod_template bind-mounts them. Read the header of
+# nvgfx.sh for why they are not simply injected like libcuda is; the one-line version is
+# that the Flyte devbox container runs with NVIDIA_DRIVER_CAPABILITIES=compute,utility
+# and k3s lives inside it, so no pod can widen that.
+#
+# It goes at the FRONT of the path so the ICD resolves `libGLX_nvidia.so.0` here, and it
+# is harmless when the directory does not exist: the loader skips missing entries, so an
+# image run without the mount behaves exactly as it did before.
+ENV LD_LIBRARY_PATH=/opt/nvgfx:${LD_LIBRARY_PATH}
