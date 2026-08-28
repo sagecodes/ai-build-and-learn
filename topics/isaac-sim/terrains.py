@@ -301,6 +301,20 @@ SPARK_LEAP_CFG = TerrainGeneratorCfg(
 )
 """Gap-dominated, fine curriculum, low first rung. Pair with the `leap` reward profile."""
 
+# `vault` is the SAME GROUND as `leap`, and that is the entire point of it.
+#
+# `leap` answered "can a blind reward set be relaxed enough to allow a jump?" with a
+# measured no: 5000 stable iterations, monotonic curriculum to row 6.6, and flight time
+# that started at 0.08 s and finished at 0.08 s. It crossed 0.245 m trenches by STEPPING
+# over them, which is roughly a Go2's front-to-rear foot span and exactly what you would
+# predict from a policy that never leaves the ground.
+#
+# `vault` changes one thing and holds everything else fixed: the reward now READS THE
+# HEIGHT SCANNER. See `_vault_profile` in spark_envs.py. Sharing this generator object is
+# safe because `_derive_env_cfg` deep-copies it per task (trap #1 in spark_envs.py), and
+# sharing it is required, not merely convenient: if the terrain moved too, a difference
+# between the two runs would not be attributable to the reward.
+
 # Which column to point a camera at, per terrain, when you want the sub-terrain the
 # config is NAMED for rather than whichever patch the robot happened to spawn on.
 #
@@ -314,6 +328,8 @@ FILM_COLS: dict[str, int] = {
     "stairs": 5,
     "stones": 5,
     "leap": 5,
+    # Same generator as `leap`, so the same column is the same block of trenches.
+    "vault": 5,
 }
 
 
@@ -322,5 +338,6 @@ TERRAINS: dict[str, TerrainGeneratorCfg] = {
     "stairs": SPARK_STAIRS_CFG,
     "stones": SPARK_STONES_CFG,
     "leap": SPARK_LEAP_CFG,
+    "vault": SPARK_LEAP_CFG,
 }
 """Name -> config, so a CLI flag or a Flyte task parameter can pick one."""

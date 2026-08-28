@@ -13,7 +13,7 @@ That turns out to be two different problems wearing the same coat, and separatin
 
 The second problem is the interesting one, and this repo does not fully solve it. It gets a Go2 across 0.245 m trenches on ground it was never trained for, by removing what was forbidding the behaviour and stabilising what was destroying the training. It also shows, with a measurement rather than an opinion, that the remaining gap is not a tuning problem. [Section 8](#8-why-the-dog-would-not-jump) is the whole autopsy, including the two things that turned out to matter more than the reward weights everyone reaches for first.
 
-The first half of this README is a tutorial: what Isaac Sim actually is, how a physics step works, how it becomes an RL environment, and where the terrain and curriculum machinery lives. The second half is the demo, including the reward autopsy above and every trap that cost real time on this box.
+This README is in three parts. **Sections 1 to 4 are a tutorial**: what Isaac Sim actually is, how a physics step works, how it becomes an RL environment, and where the terrain and curriculum machinery lives. **Sections 5 to 10 are the demo**, including the reward autopsy above and every trap that cost real time on this box. **Sections 11 to 14 are for building your own thing**: importing a robot that NVIDIA never shipped, the sensors and the second workflow this demo does not use, what the other six task families in Isaac Lab optimise and how each one's reward is written, and the shortlist of things worth building here next.
 
 **Contents**
 
@@ -27,6 +27,10 @@ The first half of this README is a tutorial: what Isaac Sim actually is, how a p
 8. [Why the dog would not jump](#8-why-the-dog-would-not-jump), which is the point of the episode
 9. [Things that cost real debugging time](#9-things-that-cost-real-debugging-time)
 10. [A guided tour of the code](#10-a-guided-tour-of-the-code), if you are presenting it
+11. [Bringing your own robot](#11-bringing-your-own-robot): assets, converters, articulations, actuators
+12. [Sensors, and the two workflows](#12-sensors-and-the-two-workflows)
+13. [The rest of Isaac Lab](#13-the-rest-of-isaac-lab-and-the-reward-that-defines-each-task), and the reward that defines each task
+14. [What to build next here](#14-what-to-build-next-here)
 
 ---
 
@@ -595,12 +599,426 @@ If you are presenting this, roughly this order:
 
 ---
 
+## 11. Bringing your own robot
+
+Everything above uses robots that were already in the box. The first thing anyone wants to do next is bring their own, and none of the ten tasks in `BASE_TASKS` shows you how, because they all start from a USD file NVIDIA already published.
+
+### Where the assets actually come from
+
+There is no robot in this repo, and there is no robot in the Isaac Sim container either. `UNITREE_GO2_CFG` (`isaaclab_assets/robots/unitree.py:142`) points at:
+
+```python
+usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/Unitree/Go2/go2.usd"
+```
+
+and that constant resolves, through `isaaclab/utils/assets.py:50`, to a setting parsed out of `apps/isaaclab.python.kit`:
+
+```
+persistent.isaac.asset_root.cloud = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0"
+```
+
+So every training pod streams the robot, and the terrain materials, and the ANYmal policy the navigation task uses, from an S3 bucket in us-west-2 on first touch. That is worth knowing for three reasons: it is why a first run is slower than the second, it is the thing that breaks in an air-gapped cluster, and it is the reason `NUCLEUS_ASSET_ROOT_DIR` is a variable rather than a constant. Point that setting at a local mirror and the whole asset layer moves with it.
+
+Three constants sit on top of the same root, and picking the wrong one is a 404 rather than an error you can read:
+
+| Constant | Resolves to | Holds |
+|---|---|---|
+| `NUCLEUS_ASSET_ROOT_DIR` | the bucket root | everything below |
+| `ISAAC_NUCLEUS_DIR` | `.../Isaac` | props, environments, sensors |
+| `ISAACLAB_NUCLEUS_DIR` | `.../Isaac/IsaacLab` | the robots and the pre-trained policies |
+
+### URDF in, USD out
+
+Isaac Sim does not load URDF at runtime. It converts, once, and then loads USD. Three converters ship in `isaaclab/sim/converters/`, and each has a CLI wrapper in `scripts/tools/`:
+
+```bash
+# URDF (ROS robots)
+./isaaclab.sh -p scripts/tools/convert_urdf.py my_robot.urdf my_robot.usd \
+    --joint-stiffness 0.0 --joint-damping 0.0 --merge-joints
+
+# MJCF (anything from the MuJoCo episode next door)
+./isaaclab.sh -p scripts/tools/convert_mjcf.py my_robot.xml my_robot.usd
+
+# A single mesh, for props and obstacles rather than articulations
+./isaaclab.sh -p scripts/tools/convert_mesh.py crate.obj crate.usd --collision-approximation convexDecomposition
+```
+
+The MJCF one is the interesting door: an MJX model from `topics/rl-mujoco` converts into a USD that Isaac Lab can drive, which makes a genuine cross-simulator comparison possible on the same articulation rather than on two people's idea of the same robot.
+
+`--merge-joints` is the flag that bites. URDF authors routinely insert fixed joints as naming scaffolding, and each one that survives becomes an articulation link that PhysX has to solve. Merging them is usually free and occasionally destroys a frame something else refers to by name.
+
+### What an `ArticulationCfg` is made of
+
+This is the Go2, trimmed to its load-bearing parts, and it is the file you write when you bring your own robot:
+
+```python
+UNITREE_GO2_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/Unitree/Go2/go2.usd",
+        activate_contact_sensors=True,           # without this, contact sensors read zero, silently
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(max_depenetration_velocity=1.0, ...),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False,       # cheap, and the reason legs pass through each other
+            solver_position_iteration_count=4,
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.4),                     # the number the leap profile reads to scale the gap ladder
+        joint_pos={".*L_hip_joint": 0.1, "F[L,R]_thigh_joint": 0.8, ".*_calf_joint": -1.5, ...},
+    ),
+    soft_joint_pos_limit_factor=0.9,
+    actuators={"base_legs": DCMotorCfg(joint_names_expr=[".*_hip_joint", ...], effort_limit=23.5, ...)},
+)
+```
+
+Four things in there are worth calling out because they are silent when wrong:
+
+- **`activate_contact_sensors=True` is a spawn-time flag, not a sensor setting.** Forget it and every `ContactSensor` in the scene reports zero forces forever. Section 8's whole flight measurement, and the `base_contact` termination, are downstream of this one boolean.
+- **Joint names are regex.** `.*_calf_joint` matches four joints on a quadruped and zero on a typo, and zero matches is not an error. Print `robot.joint_names` once after import and check the count.
+- **`init_state.pos[2]` is a real API.** `spark_envs._leap_profile` reads it to scale the gap ladder per robot, which is only legitimate because every config in `isaaclab_assets` sets it to the nominal standing height.
+- **`enabled_self_collisions=False` is the default for a reason.** Self-collision is expensive and, on a legged robot at 4096 envs, mostly buys you a policy that has learned not to cross its own legs. Turn it on when the task is manipulation.
+
+### Actuators are the sim-to-real knob
+
+The `actuators` dict is where a simulated robot stops matching a real one, and Isaac Lab gives you a ladder of fidelity rather than a switch:
+
+| Model | What it does | Cost |
+|---|---|---|
+| `ImplicitActuatorCfg` | PhysX solves the PD internally. Stiffness and damping are solver terms | free, and the least realistic |
+| `IdealPDActuatorCfg` | PD computed explicitly, torque applied as an external force | cheap |
+| `DCMotorCfg` | adds a torque-speed curve: `saturation_effort`, `velocity_limit` | cheap, and what Go2/G1/H1 use |
+| `DelayedPDActuatorCfg` | adds a randomised action delay, in steps | cheap, and closer to a real control loop |
+| `RemotizedPDActuatorCfg` | for linkage-driven joints where the effective gear ratio varies with angle | Cassie and Digit knees |
+| `ActuatorNetLSTMCfg` / `ActuatorNetMLPCfg` | a learned network from `(pos error, velocity, history)` to measured torque | one forward pass per step |
+
+The Anymals are the only robots here that use the learned one (`anymal.py:45`), and they load it from Nucleus as TorchScript:
+
+```python
+ANYDRIVE_3_LSTM_ACTUATOR_CFG = ActuatorNetLSTMCfg(
+    network_file=f"{ISAACLAB_NUCLEUS_DIR}/ActuatorNets/ANYbotics/anydrive_3_lstm_jit.pt",
+    ...
+)
+```
+
+That is the ANYbotics sim-to-real result in a config field: they measured a real ANYdrive under load, fit a network to it, and now every simulated ANYmal in Isaac Lab inherits a drivetrain that lags and saturates the way the hardware does. If you ever wonder why the Anymals feel different to train than the Unitrees on identical terrain, this line is most of the answer.
+
+### Adding a robot to this repo
+
+Once a robot has an `ArticulationCfg` and a registered rough-terrain task, it costs one line here:
+
+```python
+# spark_envs.py
+BASE_TASKS = {
+    ...,
+    "my_robot": "Isaac-Velocity-Rough-MyRobot-v0",
+}
+ROBOT_LABELS = {..., "my_robot": "MyRobot"}
+```
+
+and `register()` derives eight tasks from it, the leap profile scales its own gap ladder off the new robot's standing height, and `record.py` films it with the same chase camera. That property is the entire reason `spark_envs.py` derives rather than copies.
+
+---
+
+## 12. Sensors, and the two workflows
+
+### The sensor menu
+
+Section 2 introduces the height scanner because the stock task uses it. The `isaaclab.sensors` package ships eight; these are the six worth knowing for a locomotion task, and this repo already touches three: `record.py` creates its own cameras, and reads the height scanner and the contact sensor that the environment already owns.
+
+| Sensor | What it is | Used here |
+|---|---|---|
+| `RayCaster` | ray casts against a static mesh. The height scanner is this, pointed down | the `height_scan` observation |
+| `RayCasterCamera` | the same machinery arranged as an image plane. Depth without the renderer | not yet, and it should be |
+| `ContactSensor` | per-body net contact force and air time | `base_contact`, `feet_air_time`, and the flight measurement |
+| `Camera` / `TiledCamera` | real RTX rendering. `TiledCamera` batches all envs into one render pass | `record.py`, for the chase and onboard views |
+| `Imu` | linear acceleration and angular velocity at a body frame | no, and it is what a real robot actually has |
+| `FrameTransformer` | relative pose between named frames | no |
+
+**The height scanner is a cheat sensor and it is worth being explicit about that.** It ray casts against the terrain mesh, which means it returns exact ground height through the robot's own body, in the dark, with no noise beyond the uniform noise the config adds. No Go2 has one. Everything in section 8 is measured with it, so every number in this repo is an upper bound on what the same policy would do on hardware. Section 14 has the two ways out.
+
+**`TiledCamera` versus `Camera` is not a style choice.** `Camera` renders one viewport per instance. `TiledCamera` renders every environment into a single tiled image in one pass, which is the difference between filming one robot and training 4096 policies from pixels. If a vision task ever lands in this repo, it is `TiledCamera` or nothing.
+
+**`RayCasterCamera` gives you depth without the renderer.** That matters here more than anywhere, because section 9 is the story of a pod that had CUDA but no Vulkan. A ray-cast depth image is computed in Warp against the terrain mesh, so it runs in a training pod that cannot start the RTX renderer at all. `dexsuite` ships both variants side by side (`config/kuka_allegro/camera_cfg.py`: `depth64` on a `TiledCamera`, `raycaster_depth64` on a `RayCasterCamera`) which makes it the reference for choosing between them.
+
+### Manager-based and direct, and why this repo is manager-based
+
+Everything in this README so far is the **manager-based** workflow: the environment is a pile of config classes, and eight managers (`Action`, `Observation`, `Reward`, `Termination`, `Command`, `Curriculum`, `Event`, `Recorder`) assemble the MDP out of named terms at startup. Roughly half of Isaac Lab's tasks are not written that way.
+
+The **direct** workflow is a single class subclassing `DirectRLEnvCfg` and `DirectRLEnv`, where you write `_get_observations`, `_get_rewards`, `_get_dones` and `_reset_idx` as methods. No managers, no terms, no registry of named rewards.
+
+| | Manager-based | Direct |
+|---|---|---|
+| The reward is | a dict of named terms with weights | one method returning a tensor |
+| Changing it means | editing a config field | editing code |
+| You get for free | per-term logging (`Episode_Reward/feet_air_time`), curricula, events | nothing |
+| It costs you | eight managers of indirection | writing the plumbing yourself |
+| Used by | all locomotion, navigation, locomanipulation, dexsuite | AMP, factory, forge, the hands, quadcopter |
+
+This repo is manager-based because it had to be. The entire leap profile is fifty lines that reach into `cfg.rewards.lin_vel_z_l2.weight` and `cfg.terminations`, and the whole live report is built on rsl_rl logging one scalar per reward term. In a direct env, `REWARD_PROFILES` would be a fork of the environment class, and section 8's "the air-time term sat at -0.0033 the whole way" would have been a print statement someone had to remember to add.
+
+Choose direct when the reward is genuinely one computation over intermediate state that no term boundary respects. Factory's keypoint distance is the honest example: three squashing kernels over one distance that is expensive to compute, and splitting it into terms would compute it three times.
+
+---
+
+## 13. The rest of Isaac Lab, and the reward that defines each task
+
+Six task families ship alongside the velocity tasks this repo builds on. Each one is a different answer to "what is the objective", which is exactly the question section 8 ran aground on, so they are worth reading as a menu of ways out rather than as a catalogue.
+
+Everything below is registered in a stock Isaac Lab install. No new download.
+
+### Navigation: pay for arriving, not for velocity
+
+`Isaac-Navigation-Flat-Anymal-C-v0`, manager-based, and the smallest complete environment in Isaac Lab. Four rewards:
+
+```python
+# navigation/config/anymal_c/navigation_env_cfg.py:77
+termination_penalty          = RewTerm(mdp.is_terminated,                weight=-400.0)
+position_tracking            = RewTerm(mdp.position_command_error_tanh,  weight=0.5,  params={"std": 2.0})
+position_tracking_fine_grained = RewTerm(mdp.position_command_error_tanh, weight=0.5, params={"std": 0.2})
+orientation_tracking         = RewTerm(mdp.heading_command_error_abs,    weight=-0.2)
+```
+
+and `position_command_error_tanh` is four lines:
+
+```python
+distance = torch.linalg.norm(command[:, :3], dim=1)
+return 1 - torch.tanh(distance / std)
+```
+
+**The coarse-plus-fine pair is the whole trick.** One term at `std=2.0` is a gradient that reaches from three metres out; one at `std=0.2` is nearly flat until the last half metre and then very steep. Together they say "get closer" everywhere and "get exact" at the end, without either being a sparse reward. Every goal-reaching task in Isaac Lab does this, and section 14 is where it comes back.
+
+The other half of this env is the action space, and it is the part worth stealing:
+
+```python
+# navigation/config/anymal_c/navigation_env_cfg.py:52
+pre_trained_policy_action = mdp.PreTrainedPolicyActionCfg(
+    policy_path=f"{ISAACLAB_NUCLEUS_DIR}/Policies/ANYmal-C/Blind/policy.pt",
+    low_level_decimation=4,
+    low_level_actions=LOW_LEVEL_ENV_CFG.actions.joint_pos,
+    low_level_observations=LOW_LEVEL_ENV_CFG.observations.policy,
+)
+```
+
+The action term `torch.jit.load`s a walking policy and the high-level policy's action **is the velocity command** fed to it. Rates fall out of the decimation: the low level runs at 50 Hz, `decimation = LOW_LEVEL_ENV_CFG.decimation * 10` puts the high level at 5 Hz. So the observation is three terms (base velocity, gravity, the pose command), the episode is 8 seconds, and the thing trains in minutes because it is a tiny MDP wrapped around a policy that already works.
+
+That is directly buildable here: the leap policy is a checkpoint, `train.py` already exports TorchScript alongside ONNX, and pointing `policy_path` at it turns this repo's walking result into somebody else's action space.
+
+### Humanoid AMP: no reward function at all
+
+`Isaac-Humanoid-AMP-{Walk,Run,Dance}-Direct-v0`, direct workflow, and the reason to read it is this method:
+
+```python
+# direct/humanoid_amp/humanoid_amp_env.py:107
+def _get_rewards(self) -> torch.Tensor:
+    return torch.ones((self.num_envs,), dtype=torch.float32, device=self.sim.device)
+```
+
+A constant. Then in the agent config:
+
+```yaml
+# agents/skrl_walk_amp_cfg.yaml
+task_reward_scale: 0.0
+style_reward_scale: 2.0
+```
+
+The constant is multiplied by zero. **One hundred percent of the learning signal comes from a discriminator**, a third network next to the policy and the value function, trained to tell "a window of this policy's motion" from "a window of the reference motion". The policy's reward is how well it fools that discriminator. The reference is a `.npz` of joint positions, velocities and body poses in `motions/`, sampled at random times by `MotionLoader`, and the env publishes a two-frame `amp_obs` window in `self.extras` for the agent to discriminate on.
+
+**This is the direct answer to the wall in section 8.** There, the objective could not express a jump and no weight fixed it. Here there is no weight to fix: you show it a motion and the objective becomes "move like that". A leap from mocap, or from a MuJoCo rollout, or from a hand-animated key sequence, needs no reward engineering at all.
+
+Two costs, and both are real for this repo. It is **skrl-only**: the only agent entry point registered is `skrl_amp_cfg_entry_point`, so `train.py` and every chart in the live report would need a second scraper. And the reward number stops meaning anything, because it is a discriminator score against a moving opponent, so "mean reward went up" is no longer evidence of anything. The measurement would have to be the flight-phase one from section 8, which this repo already has.
+
+### Locomanipulation: extend a walking reward set with a task
+
+`Isaac-Tracking-LocoManip-Digit-v0` inherits the Digit walking rewards and adds end-effector tracking on top:
+
+```python
+# locomanipulation/tracking/config/digit/loco_manip_env_cfg.py:24
+class DigitLocoManipRewards(DigitRewards):
+    joint_deviation_arms = None                                       # delete an inherited term
+    left_ee_pos_tracking          = RewTerm(position_command_error,      weight=-2.0)
+    left_ee_pos_tracking_fine_grained = RewTerm(position_command_error_tanh, weight=2.0, params={"std": 0.05})
+    left_end_effector_orientation_tracking = RewTerm(orientation_command_error, weight=-0.2)
+    # and the same three for the right arm
+```
+
+Coarse plus fine again, at `std=0.05` this time because a wrist has to land within centimetres. Note `joint_deviation_arms = None`: **setting an inherited term to `None` deletes it**, which is the same idiom H1 uses on `lin_vel_z_l2` and which `_leap_profile` already guards against. The `__post_init__` then flattens the terrain, removes the height scanner and drops the terrain curriculum, because a Digit balancing two wrist targets does not need holes as well.
+
+`Isaac-PickPlace-Locomanipulation-G1-Abs-v0` is the odd one out and worth knowing about precisely because of what it is not: it has **no reward terms at all**. Its only agent entry point is `robomimic_bc_cfg_entry_point` pointing at `bc_rnn_low_dim.json`. It is behaviour cloning from teleoperated demonstrations recorded with `scripts/tools/record_demos.py`, not RL. Isaac Lab is not only an RL framework, and this is the task that proves it.
+
+### Drone navigation: the same reward, a different embodiment
+
+`Isaac-Navigation-3DObstacles-ARL-Robot-1-v0`:
+
+```python
+# drone_arl/navigation/config/arl_robot_1/navigation_env_cfg.py:244
+goal_dist_exp1    = RewTerm(distance_to_goal_exp_curriculum,   weight=2.0, params={"std": 7.0})
+goal_dist_exp2    = RewTerm(distance_to_goal_exp_curriculum,   weight=4.0, params={"std": 0.5})
+velocity_reward   = RewTerm(velocity_to_goal_reward_curriculum, weight=0.5)
+action_rate_l2    = RewTerm(mdp.action_rate_l2,                weight=-0.05)
+action_magnitude_l2 = RewTerm(mdp.action_l2,                   weight=-0.05)
+termination_penalty = RewTerm(mdp.is_terminated,               weight=-100.0)
+```
+
+Coarse at `std=7.0`, fine at `std=0.5`, a term paying for velocity pointed at the goal, two smoothness penalties, and a large penalty for hitting anything. That is the same skeleton as the ANYmal navigation env on a completely different robot, which is the point of including it: **goal-reaching rewards are a fixed shape, and terrain, gravity and embodiment are the variables.** The `_curriculum` suffix on the first three is a per-term curriculum, distinct from the terrain curriculum this repo uses.
+
+### Factory and Forge: contact-rich assembly, and the nested-kernel reward
+
+`Isaac-Factory-PegInsert-Direct-v0` and friends, direct workflow. The reward is a distance between two sets of keypoints, one rigidly attached to the held part and one to the target pose, pushed through **three** squashing kernels at different scales:
+
+```python
+# direct/factory/factory_tasks_cfg.py:79
+keypoint_coef_baseline = [5, 4]      # general movement toward the fixed object
+keypoint_coef_coarse   = [50, 2]     # aligning the assets
+keypoint_coef_fine     = [100, 0]    # the last inch, or threading
+```
+
+plus two binary terms, `curr_engaged` and `curr_success`, that fire on thresholds. Same coarse-to-fine idea as the navigation tasks, one rung deeper, because peg insertion has three genuinely different phases and one kernel cannot be steep enough for the third without being flat in the first.
+
+Forge adds force sensing and contact-aware control on the same task family. If the interest is industrial rather than legged, this is where Isaac earns its keep over MuJoCo, and the direct workflow stops looking like extra work.
+
+### Dexsuite: the asymmetric actor-critic, and the template for vision
+
+`Isaac-Dexsuite-Kuka-Allegro-{Lift,Reorient}-v0`, manager-based, and its reward is a clean staircase:
+
+```python
+# manipulation/dexsuite/dexsuite_env_cfg.py:361
+fingers_to_object    = RewTerm(mdp.object_ee_distance,             weight=1.0,  params={"std": 0.4})
+position_tracking    = RewTerm(mdp.position_command_error_tanh,    weight=2.0,  params={"std": 0.2})
+orientation_tracking = RewTerm(mdp.orientation_command_error_tanh, weight=4.0,  params={"std": 1.5})
+success              = RewTerm(mdp.success_reward,                 weight=10)
+action_l2 / action_rate_l2                                         weight=-0.005 each
+```
+
+Reach the object, then move it to a pose, then a large bonus for being there. But the reason to open this file is the agent config:
+
+```python
+# manipulation/dexsuite/config/kuka_allegro/agents/rsl_rl_ppo_cfg.py:86
+obs_groups={"actor": ["policy", "proprio", "base_image"], "critic": ["policy", "proprio", "perception"]},
+actor=CNN_POLICY_CFG,
+```
+
+**The actor sees a depth image and the critic sees privileged state.** That is asymmetric actor-critic, in two lines of config, using `RslRlCNNModelCfg` for the encoder, and it is the exact shape a vision-based locomotion policy needs: the value function may cheat during training because it is thrown away at deployment; the policy may not, because it has to run on the robot. This is the only worked example of it in Isaac Lab, and section 14 points back at it.
+
+Alongside it, `dexsuite/adr_curriculum.py` is automatic domain randomization: a `DifficultyScheduler` curriculum term that climbs with success rate, and then a stack of `mdp.modify_term_cfg` terms that widen observation noise and physics ranges as it does. `modify_term_cfg` is the general mechanism and it is worth knowing on its own: it takes an `address` string like `"observations.proprio.joint_pos.noise.n_min"` and rewrites that config field mid-run, which means **any** field in the environment config can be put on a curriculum without writing a curriculum function for it.
+
+### The one-line summary of all of it
+
+| Task family | Workflow | Where the objective lives |
+|---|---|---|
+| Velocity (this repo) | manager | ~12 reward terms, hand-weighted, tracking a commanded velocity |
+| Navigation | manager | 4 terms: coarse and fine distance to a goal pose |
+| Drone navigation | manager | the same 4, plus per-term curricula |
+| Locomanipulation tracking | manager | a walking reward set plus 6 end-effector tracking terms |
+| Pick-place (G1) | manager | nowhere. Behaviour cloning from demonstrations |
+| Humanoid AMP | direct | a discriminator against mocap. The env's reward is a constant |
+| Factory / Forge | direct | three nested kernels over one keypoint distance |
+| Dexsuite | manager | a reach-then-place staircase, with an asymmetric actor-critic |
+
+---
+
+## 14. What to build next here
+
+Section 8 ends on a wall: velocity tracking cannot express a jump, and 2900 flat iterations say more training will not change that. Everything below is a way past it or around it, ordered by what it costs against what it settles. All of it is config in this repo plus machinery that already exists in Isaac Lab.
+
+### The cheap experiment: an exploration bonus
+
+rsl_rl ships Random Network Distillation and **nothing in Isaac Lab uses it**. `grep -rn RslRlRndCfg source/isaaclab_tasks` returns nothing, and yet the field is right there on the PPO config (`isaaclab_rl/rsl_rl/rl_cfg.py:217`).
+
+RND keeps two networks over an observation slice, one frozen random target and one predictor trained to match it, and pays an intrinsic reward equal to how badly the predictor misses (`rsl_rl/extensions/rnd.py:163`). States the agent has visited often are predicted well and pay nothing; novel states pay. That is aimed precisely at the sentence section 8 ends on: *PPO will not find that first crossing by chance when every failed attempt terminates the episode.* Being airborne over a trench is the most novel state on the course.
+
+It is an `AGENT_PROFILES` dict next to `REWARD_PROFILES`, keyed the same way:
+
+```python
+algorithm.rnd_cfg = RslRlRndCfg(
+    weight=0.005,
+    weight_schedule=RslRlRndCfg.LinearWeightScheduleCfg(  # curiosity early, task reward late
+        final_value=0.0, initial_step=0, final_step=1500,
+    ),
+    reward_normalization=True,
+    state_normalization=True,
+)
+obs_groups = {"actor": ["policy"], "critic": ["policy"], "rnd_state": ["rnd_state"]}
+```
+
+The one non-obvious part is that last line: `get_rnd_state` reads `self.obs_groups["rnd_state"]`, so the key has to exist and the environment has to publish a matching observation group. Give it the base linear velocity and the height scan and it is curious about *where the robot is relative to the ground*, which is the right thing to be curious about here. Give it the whole policy observation and it will be curious about joint noise.
+
+Cost: one 3-hour run against a baseline that already has published numbers. It may not work. That is still a result, and it is a falsifiable one, which is more than "try more weights" ever was.
+
+### The real fix: ask for the jump
+
+The honest conclusion of section 8 is that the objective is wrong, not the weights. Two shapes, and the second is the one to build:
+
+**Hierarchical**, the navigation env's shape. Freeze the converged leap policy, load it with `PreTrainedPolicyActionCfg`, and train a 5 Hz policy whose action is the velocity command. Cheap to train and directly reuses a checkpoint this repo already produced. It inherits the ceiling, though: the low level still cannot jump, so the high level learns to route around trenches rather than over them. Worth building as a demo, not as an answer.
+
+**A goal command on the flat task**, which is the answer. Replace `base_velocity` with a pose command on the far side of a trench and pay coarse-plus-fine for arriving, exactly as section 13's four navigation terms do:
+
+```python
+cfg.commands.target = mdp.UniformPose2dCommandCfg(...)
+cfg.rewards.reach        = RewTerm(position_command_error_tanh, weight=1.0, params={"std": 2.0})
+cfg.rewards.reach_fine   = RewTerm(position_command_error_tanh, weight=1.0, params={"std": 0.2})
+```
+
+The difference from the current leap profile is not the size of the numbers. It is that **crossing a trench now has a gradient before it succeeds**: a robot that gets halfway across and falls scores better than one that never left the lip, where under velocity tracking it scored worse. That is the property PPO needs and the one the current task cannot provide at any weight.
+
+This is a new task family rather than a profile, which is exactly what `REWARD_PROFILES` being keyed by terrain was designed to make cheap. `Spark-Leapgoal-*` alongside `Spark-Leap-*`, sharing the terrain and nothing else.
+
+### Take the cheat sensor away
+
+Every result in this repo is measured with a height scanner that ray casts exact ground truth through the robot's own body. Two supported ways to earn it back, both listed in section 12:
+
+**Distill it.** rsl_rl has a full distillation runner and Isaac Lab registers `rsl_rl_distillation_cfg_entry_point` on the ANYmal-D. Read that file first and then ignore its shape: it maps `obs_groups = {"student": ["policy"], "teacher": ["policy"]}`, the same group twice, so it demonstrates plumbing and teaches nothing. The version worth building points the teacher at the height scan and the student at proprioception plus a short history, then measures the gap. That number, "how much of the 0.245 m survives without the scanner", is the most interesting single measurement left in this project.
+
+**Or give it eyes.** `RslRlCNNModelCfg` plus the asymmetric `obs_groups` from dexsuite, with a `RayCasterCamera` rather than a `TiledCamera` so it runs in a pod that has CUDA and no Vulkan. Considerably more work, and the more honest demo.
+
+### Three knobs that are simply not wired up
+
+- **Symmetry augmentation.** `RslRlSymmetryCfg` (`rl_cfg.py:220`) mirrors observations and actions to get four samples per rollout step at no simulation cost. `mdp/symmetry/anymal.py` is the only implementation in the tree, so a Go2 version means writing `compute_symmetric_states` against its joint order: left-right, front-back, and the diagonal. It is registered on the Anymals as `rsl_rl_with_symmetry_cfg_entry_point`, and Isaac Lab's `train.py` selects it with `--agent`. **`spark_envs.register()` only ever emits `rsl_rl_cfg_entry_point`**, so nothing derived here can currently be reached by `--agent` at all. That is a five-line fix in the `gym.register` kwargs and it unlocks the recurrent and distillation variants at the same time.
+- **A recurrent policy.** `RslRlPpoActorCriticRecurrentCfg`, one entry point away once the above is fixed. The case for it here is concrete: a trench passes out of the scanner's view before the front feet reach it.
+- **A command curriculum.** The terrain gets promoted a row at a time; the velocity command range never moves. `_leap_profile` sets `lin_vel_x = (-1.0, 2.0)` at iteration 1 and the policy spends its first few hundred iterations being asked for 2 m/s it cannot produce on ground it cannot cross. A `CurriculumTermCfg` that widens the range with the terrain level is a dozen lines, and with `mdp.modify_term_cfg` (section 13, dexsuite) addressing `"commands.base_velocity.ranges.lin_vel_x"` it is closer to three.
+
+And one measurement, not a feature: **three seeds**. The headline claim, that row 6.6 is a converged ceiling rather than an unlucky run, currently rests on one run per configuration. Three seeds serialise fine overnight on one GPU and would make it unarguable.
+
+### Getting the policy off the box
+
+Worth stating because this repo exports a policy every 50 iterations and never says what for. `train.py` writes TorchScript and ONNX next to each checkpoint, which is enough to load somewhere else and not enough to *run* somewhere else: an exported network is a function from a tensor to a tensor, and everything that gives those tensors meaning (which observation terms, in which order, with which scaling, and how the actions map back onto joint targets) lives in the environment config that did not come with it.
+
+Isaac Lab's answer is **LEAPP** (Lightweight Export Annotations for Policy Pipelines), and it is a good fit here for a narrow reason: it supports manager-based environments trained with rsl_rl, and nothing else. That is exactly this repo.
+
+```bash
+./isaaclab.sh -p -m pip install leapp
+python scripts/reinforcement_learning/leapp/rsl_rl/export.py \
+    --task Isaac-Velocity-Rough-Unitree-Go2-v0 --checkpoint /path/to/model_4950.pt
+python scripts/reinforcement_learning/leapp/deploy.py \
+    --task Isaac-Velocity-Rough-Unitree-Go2-v0 --leapp_model exported/model.yaml
+```
+
+The export writes the policy plus a YAML describing its input and output semantics, and `deploy.py` runs that bundle back through `LeappDeploymentEnv`, which is the cheapest possible check that the export did not silently reorder an observation. The related `--export_io_descriptors` flag on Isaac Lab's `train.py` dumps the same semantics at training time and is also unused here.
+
+**Those commands name a stock task on purpose, and that is the catch.** Neither `export.py` nor `deploy.py` accepts `--external_callback`; only `train.py` and `play.py` do (`grep -c external_callback` over the four scripts gives 4, 4, 0, 0). So `--task Spark-Leap-Go2-v0` does not resolve in either of them, because nothing in that process ever calls `spark_envs.register()`. Section 4's no-fork extension hook buys you training and replay, and stops at the door of the deployment path. The fix is a two-line patch to those scripts or a `sitecustomize` that registers on import, not a redesign, but it is much cheaper to find written down here than at the end of a training run.
+
+---
+
 ## Reference
+
+**The platform**
 
 - [Isaac Sim](https://github.com/isaac-sim/IsaacSim) and its [docs](https://docs.isaacsim.omniverse.nvidia.com/)
 - [Isaac Lab](https://github.com/isaac-sim/IsaacLab), and the [manager-based env tutorial](https://isaac-sim.github.io/IsaacLab/main/source/tutorials/03_envs/create_manager_rl_env.html)
-- [rsl_rl](https://github.com/leggedrobotics/rsl_rl)
+- [The direct workflow tutorial](https://isaac-sim.github.io/IsaacLab/main/source/tutorials/03_envs/create_direct_rl_env.html), which is section 12's other half
+- [Adding your own robot](https://isaac-sim.github.io/IsaacLab/main/source/how-to/write_articulation_cfg.html) and the [URDF importer](https://docs.isaacsim.omniverse.nvidia.com/latest/robot_setup/import_urdf.html), for section 11
 - [OpenUSD](https://openusd.org/)
 - [Warp](https://github.com/NVIDIA/warp) and Newton
+
+**The learning half**
+
+- [rsl_rl](https://github.com/leggedrobotics/rsl_rl)
+- [LEAPP](https://github.com/nvidia-isaac/leapp), the export path in section 14, and its [Isaac Lab guide](https://isaac-sim.github.io/IsaacLab/main/source/policy_deployment/05_leapp/exporting_policies_with_leapp.html)
+- Curiosity-driven exploration for legged robots ([Schwarke et al., 2023](https://proceedings.mlr.press/v229/schwarke23a.html)), which is the RND that `RslRlRndCfg` implements
+- Symmetry considerations in RL for legged locomotion ([Mittal et al., 2024](https://arxiv.org/abs/2403.04359)), behind `RslRlSymmetryCfg`
+- AMP: Adversarial Motion Priors ([Peng et al., 2021](https://xbpeng.github.io/projects/AMP/)), the objective behind the humanoid tasks in section 13
+- [robomimic](https://robomimic.github.io/), the imitation-learning path the G1 pick-place task uses instead of a reward
+
+**Next door and further out**
+
 - The MuJoCo episode next door: [`topics/rl-mujoco`](../rl-mujoco)
 - Extreme Parkour ([paper](https://extreme-parkour.github.io/)), for what a purpose-built parkour reward looks like when velocity tracking is not the objective

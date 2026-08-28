@@ -202,6 +202,35 @@ def fell_into_hole(env, threshold: float = -0.4, asset_cfg=None):
     return (root_z - env.scene.env_origins[:, 2]) < threshold
 
 
+GO2_NOMINAL_HEIGHT = 0.40
+"""Base height of the robot every hand-tuned distance in this file is written against."""
+
+
+def _nominal_height(cfg) -> float:
+    """The robot's standing base height, off its own config rather than a table here.
+
+    Read from `init_state.pos[2]` so a new entry in BASE_TASKS needs no bookkeeping, and
+    defaulted to the Go2 rather than raising: a robot whose config does not spell this out
+    gets Go2-sized numbers, which is wrong but survivable, where a crash twenty minutes
+    into a zoo run is not.
+    """
+    init = getattr(getattr(cfg.scene, "robot", None), "init_state", None)
+    if init is not None and getattr(init, "pos", None):
+        return float(init.pos[2])
+    return GO2_NOMINAL_HEIGHT
+
+
+def _size_scale(cfg) -> float:
+    """How much bigger than a Go2 is this robot? Used to scale every tuned distance.
+
+    A rough proxy (a quadruped crosses a gap with its front-to-rear foot span, a biped
+    with its step length) but both scale with leg length and so does this number. Capped
+    at 2.0 because H1 and Digit stand at 1.05 m, and 2.6x would ask a biped for a
+    metre-wide gap, which is past the point where the reward set can help.
+    """
+    return min(_nominal_height(cfg) / GO2_NOMINAL_HEIGHT, 2.0)
+
+
 def _leap_profile(cfg, play: bool) -> None:
     """Let the robot leave the ground, and give the curriculum a rung it can reach."""
 
@@ -281,20 +310,9 @@ def _leap_profile(cfg, play: bool) -> None:
     # afternoon, measure zero flight time the whole way, and produce a chart that looks
     # like a triumph and means nothing.
     #
-    # Base height is the proxy, read off the robot's own config rather than tabulated here
-    # so a new entry in BASE_TASKS needs no bookkeeping. It is a rough proxy (a quadruped
-    # crosses with its front-to-rear foot span, a biped with its step length) but both
-    # scale with leg length and so does this number.
-    #
-    # Capped at 2.0 because H1 and Digit stand at 1.05 m, and 2.6x would ask a biped for a
-    # metre-wide gap, which is past the point where the reward set can help.
-    nominal = 0.40  # the Go2, which the base ladder is tuned for
-    height = nominal
-    robot = getattr(cfg.scene, "robot", None)
-    init = getattr(robot, "init_state", None)
-    if init is not None and getattr(init, "pos", None):
-        height = float(init.pos[2])
-    scale = min(height / nominal, 2.0)
+    # Base height is the proxy. See `_size_scale` above for why, and for the cap.
+    height = _nominal_height(cfg)
+    scale = _size_scale(cfg)
 
     if scale != 1.0:
         gen = cfg.scene.terrain.terrain_generator
@@ -344,9 +362,253 @@ def _leap_profile(cfg, play: bool) -> None:
         cfg.scene.terrain.max_init_terrain_level = 1
 
 
+# ── Reading the terrain in the reward, not just in the observation ──────────────
+#
+# The fact `leap` never used: THE ROBOT COULD ALREADY SEE THE GAP.
+#
+# `Isaac-Velocity-Rough-*` mounts a `RayCasterCfg` on the base (velocity_env_cfg.py:112):
+# a 1.6 m x 1.0 m grid at 0.1 m resolution, 187 rays, yaw-aligned, cast straight down onto
+# `/World/ground`. `mdp.height_scan` feeds that into the policy every step, so a trench is
+# already 187 numbers in the input vector. Over our 1.0 m-deep gap it reads about +0.9
+# against -0.1 on flat ground: nine times the +/-0.1 observation noise, and well inside the
+# +/-1.0 clip. Not a camera and not pixels, and that is why it runs in a pod with CUDA and
+# no Vulkan.
+#
+# So the dog was never blind. EVERY REWARD TERM IN `_leap_profile` WAS. `lin_vel_z_l2`,
+# `feet_air_time`, `dof_acc_l2`, `action_rate_l2` and the two tracking terms are all
+# proprioceptive: not one of them can tell the lip of a trench from the middle of the
+# platform. `leap` paid for hang time everywhere and for velocity everywhere, and the run
+# measured 0.08 s of flight at iteration 0 and 0.08 s at iteration 4750.
+#
+# ── Why this is the missing gradient, and not just another weight ───────────────
+# Section 8 of the README ends on a real wall: velocity tracking pays enormously for
+# having crossed a trench and nothing at all for trying, so every failed attempt scores
+# identically badly and PPO has nothing to climb. Relaxing `lin_vel_z_l2` from -2.0 to
+# -0.05 made an attempt AFFORDABLE. It did not make one WORTH MAKING.
+#
+# Two terms below fix that, and the ordering they create is the whole point:
+#
+#     walked to the lip  <  jumped and fell in  <  jumped and nearly made it  <  crossed
+#
+# Under `leap`, the middle two were indistinguishable from the first. Neither term needs
+# the robot to succeed before it pays, which is the property the old objective could not
+# provide at any weight.
+#
+# ── On privilege ────────────────────────────────────────────────────────────────
+# These read `ray_hits_w` raw: no noise, no clip. That is deliberate and it is not a
+# cheat. A reward function is simulator-side scaffolding that never ships with the policy,
+# so it is allowed ground truth the actor is not. THE OBSERVATION IS UNTOUCHED: the policy
+# sees exactly the noisy, clipped scan `leap` saw, which is what keeps a `vault` run a
+# fair comparison against the `leap` baseline rather than a different task.
+
+
+def _gap_fraction(env, sensor_cfg, depth: float, x_range, y_half: float):
+    """What fraction of a window of the height scan is a hole? Returns 0..1 per env.
+
+    ── The reference height ────────────────────────────────────────────────────────
+    `env.scene.env_origins[:, 2]`, the same frame `fell_into_hole` uses and for the same
+    reason: our patches sit at twelve different heights across the curriculum grid, so a
+    world-frame z means nothing, and the rays under the base are no good either because
+    the robot is airborne for exactly the part of the manoeuvre we care about. The patch
+    origin is fixed, is the surface the robot spawned on, and the terrain curriculum
+    rewrites it on every promotion (terrain_importer.py:329).
+
+    On `MeshGapTerrainCfg` the platform and the far side both sit at patch level and the
+    trench floor is a hardcoded 1.0 m below (mesh_terrains.py:584), so `depth` cleanly
+    separates the two. Rails go UP, so they read negative and never trip this.
+
+    ── Fraction, not maximum ───────────────────────────────────────────────────────
+    A max-depth version saturates the instant any ray finds the trench, which is 0.7 m
+    out, and then sits flat for the whole approach: it pays a takeoff just as well from
+    too far away as from the lip. The fraction peaks when the gap fills the window, which
+    IS the takeoff moment, so the shaping term has a maximum in the right place instead of
+    a plateau. For a 0.25 m trench in a 0.6 m window that peak is around 0.4, not 1.0; the
+    weights below are set against that, not against a normalised signal.
+
+    ── Guards ──────────────────────────────────────────────────────────────────────
+    A ray that hits no mesh comes back `wp.inf` (kernels.py:197), and `ref - inf` is
+    -inf, which is harmless. `ref - (-inf)` would be +inf and would read as an infinitely
+    deep hole, so both ends are guarded rather than just the one that bites today. The
+    5.0 m ceiling is the same guard for any finite-but-absurd hit off the terrain border.
+    """
+    import torch  # kept out of this module's top level, same as fell_into_hole
+
+    sensor = env.scene.sensors[sensor_cfg.name]
+
+    # Ray offsets in the sensor's LOCAL frame, so +x is robot-forward regardless of yaw:
+    # `ray_alignment="yaw"` rotates these at cast time, it does not rewrite them. Row 0 is
+    # enough because every env shares one pattern. Recomputed per call on purpose: it is
+    # 187 elements of comparison against a 4096 x 187 x 3 tensor read, and a cached mask
+    # on a live sensor object is a stale-state bug waiting for the first config change.
+    starts = sensor.ray_starts.torch[0]
+    window = (
+        (starts[:, 0] >= x_range[0]) & (starts[:, 0] <= x_range[1])
+        & (starts[:, 1].abs() <= y_half)
+    )
+
+    hit_z = sensor.data.ray_hits_w.torch[:, window, 2]
+    drop = env.scene.env_origins[:, 2].unsqueeze(1) - hit_z
+    deep = torch.isfinite(hit_z) & (drop > depth) & (drop < 5.0)
+    return deep.float().mean(dim=1)
+
+
+def gap_takeoff(env, sensor_cfg, asset_cfg, depth: float, x_range, y_half: float,
+                min_speed: float = 0.5, vz_cap: float = 2.5):
+    """Pay upward velocity, but only with a trench in front and forward speed already on.
+
+    This is the term that gets the first hop off the ground. It is dense, it fires several
+    steps BEFORE the robot commits, and it does not care whether the attempt works.
+
+    Three factors, and each one is load-bearing:
+
+      * `gap`, from the forward window, so pushing off in the middle of the platform pays
+        nothing. This is the "when it sees a gap" half of the whole idea.
+      * `vz` clamped to positive, so the landing does not pay. Capped at `vz_cap` so a
+        catapult off a rail cannot dominate the return.
+      * `fwd`, a ramp to full at `min_speed`. WITHOUT THIS THE TERM IS A POGO STICK: a
+        robot that stands at the lip of a trench and bounces would farm `gap * vz`
+        indefinitely, and hopping on the spot is a real attractor once `lin_vel_z_l2` is
+        down at -0.05. Requiring forward speed means the only way to collect is to be
+        moving at the gap, which is the behaviour we are buying.
+
+    `lin_vel_z_l2` still charges -0.05 * vz^2 underneath this, so a 2.0 m/s takeoff costs
+    -0.20 and earns roughly +0.8 at weight 1.0. Net positive at the lip, net negative
+    anywhere else, which is exactly the shape wanted.
+
+    ── Two different frames, on purpose ────────────────────────────────────────────
+    `vz` is WORLD frame and `vx` is BASE frame, and mixing them is deliberate.
+
+    Isaac Lab's own `lin_vel_z_l2` reads `root_lin_vel_b[:, 2]`, the base-frame z, and as
+    a penalty that is fine. As a REWARD it is exploitable: the base z-axis points out of
+    the robot's back, so pitching nose-up tilts it into the direction of travel and a
+    robot running flat out at 2 m/s with a 30 degree rear reads +1.0 m/s of "vertical"
+    velocity without a single foot leaving the ground. Paying for that buys a dog that
+    pops a wheelie at every trench. `root_lin_vel_w[:, 2]` is the height of the base
+    actually changing, which is the thing being bought.
+
+    `vx` stays base-frame because the question there is "is it moving along its own
+    heading", not "is it moving north".
+    """
+    gap = _gap_fraction(env, sensor_cfg, depth, x_range, y_half)
+    data = env.scene[asset_cfg.name].data
+    vz = data.root_lin_vel_w.torch[:, 2].clamp(min=0.0, max=vz_cap)
+    fwd = (data.root_lin_vel_b.torch[:, 0] / min_speed).clamp(min=0.0, max=1.0)
+    return gap * vz * fwd
+
+
+def gap_flight(env, sensor_cfg, contact_cfg, asset_cfg, depth: float, x_range,
+               y_half: float, vx_cap: float = 3.0):
+    """Pay forward progress while every foot is off the ground and a trench is beneath.
+
+    The payoff term, and the one that gives a FAILED crossing a gradient. A robot that
+    launches and drops into the trench is airborne over a hole for the ~0.3 s of its fall
+    and collects some of this before `fell_into_hole` ends the episode; a robot that gets
+    further collects more. That single ordering is what `leap` could not express: under it,
+    "jumped and nearly made it" and "never left the lip" scored the same.
+
+    Diving in on purpose is not a hack worth worrying about, and the arithmetic is worth
+    writing down rather than hoping. A fall banks roughly 0.3 s of this term and then
+    forfeits the remaining ~15 s of a 1.5-weighted tracking term, which is two orders of
+    magnitude more. Failing stays very expensive. It is just no longer INDISTINGUISHABLE
+    from not trying, and that is the entire fix.
+
+    `x_range` is centred on the base rather than ahead of it: by the time this term should
+    pay, the gap is under the robot, not in front of it.
+
+    Airborne means EVERY tracked foot has non-zero `current_air_time`. A trot has one or
+    two feet down at all times, so an ordinary stride scores zero here no matter how long
+    or fast it is; only a genuine flight phase pays. That is the same definition record.py
+    measures the clips with, so the reward curve and the reported flight seconds are
+    talking about the same event.
+    """
+    import torch  # for the zeros_like fallback below
+
+    under = _gap_fraction(env, sensor_cfg, depth, x_range, y_half)
+
+    air = env.scene.sensors[contact_cfg.name].data.current_air_time
+    if air is None:  # track_air_time off; the term is meaningless, not fatal
+        return torch.zeros_like(under)
+    airborne = (air.torch[:, contact_cfg.body_ids] > 0.0).all(dim=1).float()
+
+    vx = env.scene[asset_cfg.name].data.root_lin_vel_b.torch[:, 0].clamp(min=0.0, max=vx_cap)
+    return under * airborne * vx
+
+
+def _vault_profile(cfg, play: bool) -> None:
+    """`leap`, plus the two reward terms that read the height scanner.
+
+    Deliberately built ON TOP of `_leap_profile` rather than beside it. Everything that
+    profile does is still necessary: a jump the reward set forbids at -14.6 cannot be
+    bought back by adding a bonus, a run that has no terminate-on-fall trains on a
+    heavy-tailed reward and keeps getting knocked over, and a curriculum that starts on
+    row 5 spends hundreds of iterations climbing down to ground it can learn on. `vault`
+    adds ONE new idea to that, so a difference between the two runs is attributable to it.
+    """
+    _leap_profile(cfg, play)
+
+    from isaaclab.managers import RewardTermCfg, SceneEntityCfg
+
+    # Windows scale with the robot for the same reason the gap ladder does: 0.7 m in front
+    # of a Go2's base is its next footfall, and in front of an H1's it is under its own
+    # knee. Same `_size_scale` the gap widths use, so a robot on a 2x ladder gets a 2x
+    # window and the two stay in step.
+    scale = _size_scale(cfg)
+
+    # The reference geometry, all in metres and all Go2-sized before scaling:
+    #   depth  0.30  well under the 1.0 m trench, well over the 0.35 m rails and the
+    #                0.20 m boxes, so only a real hole trips it.
+    #   ahead  0.10 to 0.70  the takeoff window. The scanner reaches 0.80 m and a Go2's
+    #                front feet are ~0.20 m ahead of its base, so this is "the lip is
+    #                between one and four steps away". Starting at 0.10 rather than 0.0
+    #                keeps the two windows from overlapping under the body.
+    #   under -0.40 to 0.40  the flight window, centred: by now the gap is beneath.
+    #   y_half 0.30  narrower than the scanner's 0.50 so a trench off to the side, which
+    #                the robot is running PARALLEL to, does not read as one in the way.
+    depth = round(0.30 * scale, 3)
+    ahead = (round(0.10 * scale, 3), round(0.70 * scale, 3))
+    under = (round(-0.40 * scale, 3), round(0.40 * scale, 3))
+    y_half = round(0.30 * scale, 3)
+
+    # Reuse whatever foot bodies this robot's own `feet_air_time` term resolved, rather
+    # than tabulating a regex per robot: Go2 is `.*_foot`, the base cfg is `.*FOOT`, and
+    # the bipeds differ again. Deep-copied because `SceneEntityCfg.resolve` writes
+    # `body_ids` back into the object and two terms should not share one.
+    air_term = getattr(cfg.rewards, "feet_air_time", None)
+    contact_cfg = (
+        copy.deepcopy(air_term.params["sensor_cfg"])
+        if air_term is not None and "sensor_cfg" in air_term.params
+        else SceneEntityCfg("contact_forces", body_names=".*FOOT")
+    )
+
+    scan_cfg = SceneEntityCfg("height_scanner")
+    robot_cfg = SceneEntityCfg("robot")
+
+    # Weights, against a `track_lin_vel_xy_exp` that is 1.5 on the Go2 and is the biggest
+    # thing in the set. Both terms are scaled by `step_dt` by the manager like every other
+    # term, so these are comparable with the stock numbers as written.
+    #
+    # takeoff 1.0: peaks near gap 0.4 * vz 2.0 = 0.8 for the handful of steps a push-off
+    #   lasts. Large enough to survive the -0.20 that `lin_vel_z_l2` charges for the same
+    #   push, small enough that it cannot out-earn just running when there is no gap.
+    # flight 2.0: the payoff, and intentionally the better deal. Around 0.4 * 1.5 = 0.6
+    #   per step at weight 2.0 is 1.2, near the tracking ceiling, for the ~15 steps a
+    #   crossing takes. A crossing should be the best thing that can happen on this course.
+    cfg.rewards.gap_takeoff = RewardTermCfg(
+        func=gap_takeoff, weight=1.0,
+        params={"sensor_cfg": scan_cfg, "asset_cfg": robot_cfg,
+                "depth": depth, "x_range": ahead, "y_half": y_half},
+    )
+    cfg.rewards.gap_flight = RewardTermCfg(
+        func=gap_flight, weight=2.0,
+        params={"sensor_cfg": scan_cfg, "contact_cfg": contact_cfg, "asset_cfg": robot_cfg,
+                "depth": depth, "x_range": under, "y_half": y_half},
+    )
+
+
 # Terrain name -> the reward edits that terrain needs, or absent for "none, keep NVIDIA's".
 REWARD_PROFILES = {
     "leap": _leap_profile,
+    "vault": _vault_profile,
 }
 
 

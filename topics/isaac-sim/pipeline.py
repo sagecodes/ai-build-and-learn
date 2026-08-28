@@ -202,7 +202,8 @@ async def parkour_task(
         else None
     )
     try:
-        rewards, levels, airtime, tail = trainer.train(task_id, num_envs, iterations, snap=snap)
+        rewards, levels, airtime, gapflight, tail = trainer.train(
+            task_id, num_envs, iterations, snap=snap)
     finally:
         # Before anything else touches the GPU: the daemon is holding a booted Kit, and
         # the final render is about to want the box to itself.
@@ -230,7 +231,7 @@ async def parkour_task(
     snaps = snap.clips if snap else []
     trainer.report_parkour(task_id, num_envs, iterations, rewards, levels, clips, secs, tail,
                            snaps=snaps, snap_level=snapshot_level if snap else None,
-                           airtime=airtime)
+                           airtime=airtime, gapflight=gapflight)
 
     # Get the trained policy OUT of the pod before it evaporates.
     #
@@ -274,6 +275,14 @@ async def parkour_task(
         # Where the air-time reward term ended up. Positive means the policy is taking
         # flights rather than strides; see _AIR_RE in train.py.
         "airtime_term_final": round(airtime[-1], 4) if airtime else None,
+        # `vault` only. Zero until the robot is airborne over a trench while moving
+        # forward, so unlike every other number in this dict it cannot be earned by a
+        # policy that never jumps. None on a `leap` or `parkour` run, which do not have
+        # the term at all. `gap_flight_first` is the logged point it first went non-zero:
+        # the iteration the jump appeared.
+        "gap_flight_final": round(gapflight[-1], 4) if gapflight else None,
+        "gap_flight_max": round(max(gapflight), 4) if gapflight else None,
+        "gap_flight_first": next((i for i, v in enumerate(gapflight) if v > 0), None),
     }
 
 
@@ -400,6 +409,78 @@ async def leap(
     section of the report: seconds of unbroken flight measured off the contact sensor
     during the replay. Reward and terrain row both climb whether or not the robot ever
     leaves the ground; that number does not.
+    """
+    result = await parkour_task(
+        task_id=task_id, num_envs=num_envs, iterations=iterations,
+        steps=steps, terrain_level=terrain_level, terrain_col=terrain_col, timeline=timeline,
+        snapshot_every=snapshot_every, snapshot_steps=snapshot_steps,
+        snapshot_level=snapshot_level,
+    )
+    log.info("result: %s", result)
+    return result
+
+
+@orch_env.task(report=True)
+async def vault(
+    task_id: str = "Spark-Vault-Go2-v0",
+    num_envs: int = 4096,
+    iterations: int = 4000,
+    steps: int = 600,
+    terrain_level: int = -1,
+    terrain_col: int = 5,
+    timeline: int = 4,
+    snapshot_every: int = 250,
+    snapshot_steps: int = 250,
+    snapshot_level: int = 4,
+) -> dict:
+    """Same terrain as `leap`, but the reward reads the height scanner.
+
+        flyte run pipeline.py vault
+        flyte run pipeline.py vault --iterations 5             # is the plumbing alive?
+        flyte run pipeline.py vault --task_id Spark-Vault-A1-v0
+
+    `leap` settled a question and the answer was no. Five thousand stable iterations, a
+    monotonic curriculum to row 6.6, and a flight measurement that read 0.08 s untrained
+    and 0.08 s at iteration 4750. It crossed 0.245 m trenches by STEPPING over them, which
+    is about a Go2's front-to-rear foot span, and 2900 flat iterations at the end say more
+    time was never going to change it.
+
+    The diagnosis in section 8 of the README is that the objective is wrong rather than
+    the weights, and the specific wrongness is this: velocity tracking pays enormously for
+    HAVING CROSSED and nothing whatever for TRYING. Every failed attempt scored the same
+    as never leaving the lip, so PPO had nothing to climb toward the first crossing.
+
+    This entry point fixes that with the one thing `leap` had available and never used.
+    The robot could already see the gap: `Isaac-Velocity-Rough-*` puts a 187-ray height
+    scanner on the base and feeds it to the policy every step. Every reward term was
+    blind to it. `spark_envs.REWARD_PROFILES["vault"]` keeps all of `leap` and adds two
+    terms that read the same sensor:
+
+      * `gap_takeoff`, which pays upward velocity ONLY with a trench in the forward scan
+        window and forward speed already on. Dense, fires before the robot commits, and
+        gated on speed so bouncing at the lip earns nothing.
+      * `gap_flight`, which pays forward progress while every foot is off the ground and
+        the scanner reads a hole underneath. This is what gives a failed attempt a
+        gradient: a robot that gets halfway across now scores better than one that never
+        left the lip, where under `leap` it scored the same.
+
+    Note what is deliberately held fixed. Same terrain generator object, same observation
+    (the policy still sees the noisy, clipped scan and nothing new), same everything else
+    in the profile. The rewards read the scan RAW, which is fine and standard: a reward
+    function is simulator-side and never ships with the policy. That makes this run
+    directly comparable with the published `Spark-Leap-Go2-v0` numbers.
+
+    The result to read is `gap_flight_first` in the returned dict and the "Airborne over a
+    hole" chart in the report. That term is structurally zero until the robot is airborne
+    over a trench, so the iteration it lifts off zero is the iteration the jump appeared.
+    Cross-check it against `flight_s`, which record.py measures off the contact sensor
+    during the replay and which does not know the reward exists.
+
+    Caveat worth saying out loud on stream: the height scanner is a PRIVILEGED sensor. It
+    ray casts through the robot's own body onto the terrain mesh from 20 m up, with no
+    occlusion and no field of view, so nothing on a real Go2 produces it. This is the
+    teacher half of the standard two-stage sim-to-real recipe; the student half is the
+    distillation run described in section 14 and it is not built yet.
     """
     result = await parkour_task(
         task_id=task_id, num_envs=num_envs, iterations=iterations,

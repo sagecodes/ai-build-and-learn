@@ -101,6 +101,21 @@ _AIR_RE = re.compile(r"Episode_Reward/feet_air_time:\s*(-?[\d.]+)")
 # down because dof_acc_l2 was -1250 on the iteration a quarter of the robots fell into a
 # trench". The first leap run was diagnosed by inference from four scraped numbers; there
 # was no reason for that to be hard.
+# The headline number for a `vault` run, and the reason that profile exists. `gap_flight`
+# pays forward speed while every foot is off the ground AND the height scanner sees a
+# trench underneath (spark_envs.gap_flight), so unlike `feet_air_time` it CANNOT be earned
+# by a long stride, a bounce on flat ground, or anything else that is not a crossing.
+#
+# It starts at exactly 0.0 and stays there for as long as the policy shuffles to the lip,
+# because a robot that never leaves the ground over a hole cannot collect a single step of
+# it. The iteration it becomes non-zero is the iteration the jump was invented. That is a
+# sharper signal than the air-time term, which on `leap` sat at -0.0033 for 4750
+# iterations and left it genuinely ambiguous whether anything was happening.
+#
+# Absent from a `leap` or `parkour` log, which is fine: the series stays empty and the
+# chart it feeds does not render.
+_GAP_RE = re.compile(r"Episode_Reward/gap_flight:\s*(-?[\d.eE+]+)")
+
 _TERM_RE = re.compile(r"(Episode_(?:Reward|Termination)/[\w.]+):\s*(-?[\d.eE+]+)")
 
 
@@ -386,6 +401,7 @@ def train(
     rewards: list[float] = []
     levels: list[float] = []
     airtime: list[float] = []
+    gapflight: list[float] = []
     tail: list[str] = []
     # Term name -> its value as of the most recent iteration. Overwritten rather than
     # accumulated: this is a snapshot for the periodic log line, not a curve.
@@ -412,6 +428,8 @@ def train(
             levels.append(float(m.group(1)))
         if m := _AIR_RE.search(line):
             airtime.append(float(m.group(1)))
+        if m := _GAP_RE.search(line):
+            gapflight.append(float(m.group(1)))
         if m := _TERM_RE.search(line):
             terms[m.group(1)] = float(m.group(2))
         if m := _REWARD_RE.search(line):
@@ -422,15 +440,17 @@ def train(
             if len(rewards) - state["flushed"] >= 25:
                 state["flushed"] = len(rewards)
                 report_progress(task_id, num_envs, rewards, levels, state["iter"], state["total"],
-                                snap.clips if snap else [], airtime)
+                                snap.clips if snap else [], airtime, gapflight)
                 # Echo to stdout as well. Without this the pod log is ONE line for the
                 # whole run: this function consumes rsl_rl's stdout and would otherwise
                 # swallow it, so `kubectl logs` shows nothing and a 100-minute run is
                 # only observable through the report.
-                log.info("iter %s/%s | reward %.2f | terrain row %s | air-time term %s",
+                log.info("iter %s/%s | reward %.2f | terrain row %s | air-time term %s"
+                         "%s",
                          state["iter"], state["total"], rewards[-1],
                          f"{levels[-1]:.2f}" if levels else "n/a",
-                         f"{airtime[-1]:+.4f}" if airtime else "n/a")
+                         f"{airtime[-1]:+.4f}" if airtime else "n/a",
+                         f" | gap-flight term {gapflight[-1]:+.4f}" if gapflight else "")
                 # The breakdown, sorted by magnitude so whatever is dominating the return
                 # is first. Ten terms is enough to see a penalty run away and short enough
                 # to stay one line per repaint rather than a wall.
@@ -447,7 +467,7 @@ def train(
     rc = _run_streaming(argv, on_line)
     if rc != 0:
         raise RuntimeError(f"training exited {rc}. log tail:\n" + "\n".join(tail))
-    return rewards, levels, airtime, tail
+    return rewards, levels, airtime, gapflight, tail
 
 
 def record(task_id: str, video_length: int = 300) -> Path | None:
@@ -917,11 +937,50 @@ def _scan_when(scan: dict) -> str:
     return f" &middot; frame {scan['peak_frame']} of {scan.get('frames', '?')}, the busiest one"
 
 
+def _gapflight_svg(gapflight: list[float]) -> str:
+    """The gap-flight reward term over training. On `vault`, this is the answer.
+
+    Drawn separately from the air-time chart above it because the two say different
+    things, and the difference is the whole reason `vault` exists.
+
+    `feet_air_time` is blind: it pays a long stride and a bounce on flat ground exactly as
+    well as it pays a trench crossing, so its sign is suggestive and no more.
+    `gap_flight` is not: it is forward speed multiplied by "every foot is off the ground"
+    multiplied by "the height scanner sees a hole underneath", so there is no way to earn
+    it except by being airborne over a gap while moving. It is structurally pinned at 0.0
+    until the robot leaves the ground over a trench for the first time.
+
+    So this chart has no interesting shape, only an interesting MOMENT: the point it
+    lifts off zero is the iteration the jump was invented, and everything after that is
+    the policy getting better at something it can already do. If the line is still flat at
+    the end of the run, the run failed, and it failed unambiguously.
+    """
+    if len(gapflight) < 2:
+        return ""
+    lift = next((i for i, v in enumerate(gapflight) if v > 0), None)
+    when = (
+        f" First non-zero at point <b>{lift}</b> of {len(gapflight)}: "
+        f"the first airborne crossing."
+        if lift is not None else
+        " <b>Never left zero.</b> No env has yet been airborne over a gap while moving "
+        "forward, so the policy is still stepping across rather than jumping."
+    )
+    return (
+        f"<h3>Airborne over a hole, as a reward term</h3>"
+        f"{_curve_svg(gapflight, stroke='#fc6', title='Episode_Reward/gap_flight', fmt='+.4f', zero=True)}"
+        f"<p style='color:#888;font-size:12px'>"
+        f"<code>Episode_Reward/gap_flight</code>, one point per logged iteration: forward "
+        f"speed while every foot is in the air and the height scanner reads a trench "
+        f"beneath the base. Unlike the air-time term above, this one cannot be earned by "
+        f"walking.{when}</p>"
+    )
+
+
 def report_parkour(
     task_id: str, num_envs: int, iterations: int, rewards: list[float],
     levels: list[float], clips: dict, secs: float, tail: list[str],
     snaps: list[dict] | None = None, snap_level: int | None = None,
-    airtime: list[float] | None = None,
+    airtime: list[float] | None = None, gapflight: list[float] | None = None,
 ) -> None:
     """Final report for a run on our own terrain: curve, clips, and the sensor view."""
     patch = clips.get("patch") or {}
@@ -974,6 +1033,7 @@ def report_parkour(
         f"{_flight_html(patch.get('flight') or {}, snaps)}"
         f"{_curve_svg(rewards, title='mean reward')}"
         f"{_levels_svg(levels)}"
+        f"{_gapflight_svg(gapflight or [])}"
         f"{_airtime_svg(airtime or [])}"
         f"{_timeline_html(clips.get('timeline') or [])}"
         f"{_snapshots_html(snaps or [], snap_level, max_clips=6, title='Filmed while it trained')}"
@@ -991,6 +1051,7 @@ def report_parkour(
 def report_progress(
     task_id: str, num_envs: int, rewards: list[float], levels: list[float], it: int, total: int,
     snaps: list[dict] | None = None, airtime: list[float] | None = None,
+    gapflight: list[float] | None = None,
 ) -> None:
     """Live repaint while training. Watching the terrain row climb is the good bit."""
     now = f" &middot; mean terrain row <b>{levels[-1]:.2f}</b>" if levels else ""
@@ -998,6 +1059,9 @@ def report_progress(
     # have nothing to do with jumping, so the sign of this term is the one number on the
     # page that says whether the thing being trained for is happening yet.
     air = f" &middot; air-time term <b>{airtime[-1]:+.4f}</b>" if airtime else ""
+    # On a `vault` run this outranks everything else on the line: it is zero until the
+    # robot is airborne over a trench, so a non-zero value IS the result.
+    gap = f" &middot; gap-flight term <b>{gapflight[-1]:+.4f}</b>" if gapflight else ""
     latest = next((s["flight"] for s in sorted(snaps or [], key=lambda s: -s["iteration"])
                    if s.get("flight")), None)
     flew = (
@@ -1012,11 +1076,12 @@ def report_progress(
     flyte.report.replace(
         f"<h2>{task_id}</h2>"
         f"<p>{num_envs:,} parallel envs &middot; iteration <b>{it}</b>/{total} "
-        f"&middot; mean reward <b>{rewards[-1]:.2f}</b> (from {rewards[0]:.2f}){now}{air}</p>"
+        f"&middot; mean reward <b>{rewards[-1]:.2f}</b> (from {rewards[0]:.2f}){now}{air}{gap}</p>"
         f"{flew}"
         f"{_snapshots_html(snaps or [])}"
         f"{_curve_svg(rewards, title='mean reward')}"
         f"{_levels_svg(levels)}"
+        f"{_gapflight_svg(gapflight or [])}"
         f"{_airtime_svg(airtime or [])}",
         do_flush=True,
     )
