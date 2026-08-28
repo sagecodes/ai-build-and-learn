@@ -97,6 +97,32 @@ gpu_env = flyte.TaskEnvironment(
     resources=flyte.Resources(cpu="8", memory="48Gi", gpu=1, disk="60Gi"),
 )
 
+# ── Getting the RENDERER a driver ───────────────────────────────────────────────
+#
+# Training needs CUDA. Filming the result needs Vulkan, and on this cluster those are not
+# the same question. The NVIDIA container stack hands a container a SUBSET of the
+# userspace driver chosen by `NVIDIA_DRIVER_CAPABILITIES`, and Flyte's devbox image is
+# built with `compute,utility`. k3s runs inside that container, so every task pod inherits
+# the choice and nothing at the pod level can widen it: not the Isaac image's own
+# `NVIDIA_DRIVER_CAPABILITIES=all`, not `runtimeClassName: nvidia`, not a hostPath mount
+# described by a Flyte pod_template. All three were tried.
+#
+# What that produces is a pod where `nvidia-smi` is happy, 4096 envs train at full speed,
+# and the replay dies with:
+#
+#     [Error] [omni.rtx] vkCreateInstance failed. Vulkan 1.1 is not supported
+#     [Error] [omni.gpu_foundation_factory.plugin] Failed to create any GPU devices
+#
+# followed by several hundred CUDA errors that are all fallout from the renderer never
+# having started. `/etc/vulkan/icd.d/nvidia_icd.json` names `libGLX_nvidia.so.0` and no
+# such file was ever mounted. Training is untouched by any of it, which is what makes it
+# a nasty one to spot: the run succeeds and only the video is missing.
+#
+# The fix lives in two files rather than here: `nvgfx.sh` stages the graphics libraries
+# out of the host driver into the build context, and Dockerfile.train COPYs them to
+# /opt/nvgfx with LD_LIBRARY_PATH already pointing there. Read nvgfx.sh's header for the
+# whole story.
+
 # RL training. Measured on the host: Anymal-C flat at 4096 envs runs ~1.0s/iteration
 # and 1500 iterations (a walking policy) takes 27 minutes. Memory is dominated by the
 # rollout buffer, which scales with num_envs.

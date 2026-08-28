@@ -279,6 +279,82 @@ def _place(env, scene, level: int | None, col: int | None) -> dict:
     return patch
 
 
+def _t(x):
+    """Unwrap Isaac's tensor wrapper if there is one.
+
+    Sensor `.data` fields come back as a wrapper in some backends and a bare torch tensor
+    in others, and the two spellings are mixed even inside Isaac Lab's own source: the
+    locomotion rewards write `contact_sensor.data.last_air_time.torch[...]` while this file
+    reads `robot.data.root_pos_w[:, 0]` directly two hundred lines up. Both work on their
+    own object. Asking for `.torch` only when it exists is the only spelling that works on
+    either.
+    """
+    return x.torch if hasattr(x, "torch") else x
+
+
+def _flight_phases(grounded: list[bool], xy: list, dt: float) -> dict:
+    """Turn a per-step contact trace into the two numbers that describe a jump.
+
+    This is the measurement that answers the actual question. A reward curve going up says
+    a number went up; the terrain-level curve says the curriculum promoted the robot; only
+    this says the robot LEFT THE GROUND, and how far it got while it was off it.
+
+    `grounded[i]` is "some part of the robot was touching something at step i". The
+    contact sensor tracks `{ENV_REGEX_NS}/Robot/.*`, every body and not just the feet
+    (velocity_env_cfg.py:79), so a stumble that lands on the knees reads as grounded and
+    does not get scored as a graceful leap. A flight phase is a maximal run of False.
+
+    Both numbers are deliberately about the LONGEST phase rather than the mean. Means over
+    a whole clip are dominated by the trot, where all four feet are briefly airborne
+    between footfalls for a few hundredths of a second; those show up here as a hundred
+    tiny phases and drag any average down to something that describes walking. The
+    interesting event in a leap clip is the single biggest one.
+
+    `span_m` is straight-line horizontal distance covered between takeoff and touchdown.
+    On a gap patch it is directly comparable with the trench width, which is what makes it
+    the number worth putting in a report: "0.34 s of flight, 0.38 m covered" next to "the
+    trench at row 7 is 0.28 m" is a claim anyone can check.
+    """
+    best_len, best_start = 0, -1
+    run_len, run_start = 0, 0
+    for i, on_ground in enumerate(grounded):
+        if on_ground:
+            run_len = 0
+            continue
+        if run_len == 0:
+            run_start = i
+        run_len += 1
+        if run_len > best_len:
+            best_len, best_start = run_len, run_start
+
+    phases = 0
+    prev = True
+    for on_ground in grounded:
+        if prev and not on_ground:
+            phases += 1
+        prev = on_ground
+
+    span = 0.0
+    if best_len > 0:
+        # Clamped because the last flight of a clip can still be in the air on the final
+        # frame, in which case there is no touchdown sample to measure to.
+        end = min(best_start + best_len, len(xy) - 1)
+        a, b = xy[best_start], xy[end]
+        span = float(((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5)
+
+    return {
+        "longest_s": round(best_len * dt, 3),
+        "longest_span_m": round(span, 3),
+        "phases": phases,
+        # Fraction of the clip spent with nothing touching the ground. A trotting Go2
+        # sits around 0.1-0.2; a policy that has learned to bounce instead of walk shows
+        # up here as a number that is far too high, which is the failure mode the
+        # -0.05 lin_vel_z_l2 whisper in spark_envs.py exists to prevent.
+        "airborne_frac": round(1.0 - (sum(grounded) / max(len(grounded), 1)), 3),
+        "steps": len(grounded),
+    }
+
+
 def _encode(frames, path: Path, fps: int, crf: int = 20, scale: float = 1.0) -> None:
     """Write RGB uint8 frames to H.264. PyAV, because it is what the image already has.
 
@@ -460,6 +536,9 @@ def main() -> None:
         onboard_frames: list = []
         depth_frames: list = []
         scans: list = []
+        # Per-step contact trace, for _flight_phases below. Cheap: two scalars a step.
+        grounded: list[bool] = []
+        track_xy: list = []
         cam2 = onboard if want_onboard else None
 
         patch = _place(env, scene, level, col)
@@ -519,6 +598,29 @@ def main() -> None:
                     hs = scene["height_scanner"]
                     scans.append((hs.data.pos_w[0, 2] - hs.data.ray_hits_w[0, :, 2]).cpu().numpy())
 
+                # Is ANY part of the robot touching anything right now?
+                #
+                # `current_air_time` is per tracked body and resets to 0 the instant that
+                # body makes contact, so the minimum across bodies is 0 if and only if
+                # something is down. Bodies that have not touched since the last reset
+                # just accumulate, which is why this is a min and not a sum: the base
+                # spends the whole clip "airborne" and would swamp any other reduction.
+                # `current_air_time` is None unless the sensor was configured with
+                # track_air_time=True. Every rough locomotion env sets it (the air-time
+                # reward needs it), but record.py also films stock flat tasks, so the
+                # attribute is checked rather than assumed.
+                if "contact_forces" in scene.sensors:
+                    air = _t(scene["contact_forces"].data.current_air_time)
+                    if air is not None:
+                        grounded.append(bool(air[0].min().item() <= 0.0))
+                        track_xy.append(_t(robot.data.root_pos_w)[0, :2].tolist())
+
+        # Carried on the patch dict rather than as a sixth return value: film() is called
+        # from three places and none of them would use a new tuple slot, whereas all three
+        # already forward `patch` straight into their JSON.
+        if grounded:
+            patch["flight"] = _flight_phases(grounded, track_xy, float(env.unwrapped.step_dt))
+
         return chase_frames, onboard_frames, depth_frames, scans, patch
 
     out = Path(args.out)
@@ -571,6 +673,10 @@ def main() -> None:
                 _encode(frames, clip, args.fps, args.crf)
                 result = {"ok": bool(frames), "iteration": it, "clip": str(clip),
                           "frames": len(frames), "row": patch.get("row"),
+                          # The jump measurement for THIS checkpoint. It is what turns the
+                          # snapshot strip from a set of thumbnails into a curve you can
+                          # read: flight time per checkpoint, filmed on a fixed row.
+                          "flight": patch.get("flight"),
                           # Reported because it is the number that decides whether the
                           # live report stays loadable. See _encode.
                           "kb": round(clip.stat().st_size / 1024) if clip.exists() else 0}

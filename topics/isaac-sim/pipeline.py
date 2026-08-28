@@ -138,7 +138,7 @@ async def walk_task(
     t0 = time.monotonic()
     # The terrain-level curve is discarded here on purpose: this task is the episode-1
     # FLAT demo, which has no terrain curriculum, so the list is always empty.
-    rewards, _levels, tail = trainer.train(task_id, num_envs, iterations)
+    rewards, _levels, _air, tail = trainer.train(task_id, num_envs, iterations)
     log.info("trained %s iterations, reward %.2f -> %.2f", len(rewards), rewards[0], rewards[-1])
 
     # Filmed AFTER training, and never allowed to fail the run: half an hour of
@@ -202,7 +202,7 @@ async def parkour_task(
         else None
     )
     try:
-        rewards, levels, tail = trainer.train(task_id, num_envs, iterations, snap=snap)
+        rewards, levels, airtime, tail = trainer.train(task_id, num_envs, iterations, snap=snap)
     finally:
         # Before anything else touches the GPU: the daemon is holding a booted Kit, and
         # the final render is about to want the box to itself.
@@ -229,7 +229,8 @@ async def parkour_task(
     secs = time.monotonic() - t0
     snaps = snap.clips if snap else []
     trainer.report_parkour(task_id, num_envs, iterations, rewards, levels, clips, secs, tail,
-                           snaps=snaps, snap_level=snapshot_level if snap else None)
+                           snaps=snaps, snap_level=snapshot_level if snap else None,
+                           airtime=airtime)
 
     # Get the trained policy OUT of the pod before it evaporates.
     #
@@ -244,6 +245,11 @@ async def parkour_task(
     policy = await trainer.export_policy(task_id)
 
     patch = clips.get("patch") or {}
+    # The jump measurement, taken off the contact sensor during the replay rather than
+    # inferred from the reward. On a `Spark-Leap-*` run this is the result; everything
+    # else in this dict is a training signal that only argues for it. See _flight_phases
+    # in record.py.
+    flight = patch.get("flight") or {}
     return {
         "policy": policy.path if policy else None,
         "task": task_id,
@@ -261,6 +267,13 @@ async def parkour_task(
         "difficulty": patch.get("difficulty"),
         "clips": sorted((clips.get("clips") or {}).keys()),
         "snapshots": len(snaps),
+        # Seconds of unbroken flight, and metres covered during it.
+        "flight_s": flight.get("longest_s"),
+        "flight_span_m": flight.get("longest_span_m"),
+        "airborne_frac": flight.get("airborne_frac"),
+        # Where the air-time reward term ended up. Positive means the policy is taking
+        # flights rather than strides; see _AIR_RE in train.py.
+        "airtime_term_final": round(airtime[-1], 4) if airtime else None,
     }
 
 
@@ -311,11 +324,82 @@ async def parkour(
         flyte run pipeline.py parkour
         flyte run pipeline.py parkour --iterations 5      # is the plumbing alive?
         flyte run pipeline.py parkour --iterations 3000 --snapshot_every 200
-        flyte run pipeline.py parkour --task_id Spark-Stairs-Unitree-Go2-v0
+        flyte run pipeline.py parkour --task_id Spark-Stairs-Go2-v0
 
-    Valid task ids are `Spark-{Parkour,Stairs,Stones}-<Robot>-v0` for the ten robots in
-    spark_envs.BASE_TASKS. CPU-only orchestrator, same as `walk`: it holds its resources
+    Valid task ids are `Spark-{Parkour,Stairs,Stones,Leap}-<Robot>-v0`, where <Robot> is a
+    value from spark_envs.ROBOT_LABELS and NOT the stock task's spelling: it is
+    `Spark-Stairs-Go2-v0`, not `Spark-Stairs-Unitree-Go2-v0`. `leap` also carries a reward
+    profile, so prefer the `leap` entry point below, which sets the defaults that go with
+    it. CPU-only orchestrator, same as `walk`: it holds its resources
     while its child runs, so asking for the GPU here deadlocks its own GPU child.
+    """
+    result = await parkour_task(
+        task_id=task_id, num_envs=num_envs, iterations=iterations,
+        steps=steps, terrain_level=terrain_level, terrain_col=terrain_col, timeline=timeline,
+        snapshot_every=snapshot_every, snapshot_steps=snapshot_steps,
+        snapshot_level=snapshot_level,
+    )
+    log.info("result: %s", result)
+    return result
+
+
+@orch_env.task(report=True)
+async def leap(
+    task_id: str = "Spark-Leap-Go2-v0",
+    num_envs: int = 4096,
+    # Longer than the parkour default, and the reason is the curriculum rather than the
+    # policy. `leap` starts every env on row 1 of 12 (see _leap_profile) instead of row 5
+    # of 10, so it has more rungs to climb and starts further down them. The gait is
+    # usually there by ~1000; everything after that is buying trench width.
+    iterations: int = 4000,
+    steps: int = 600,
+    terrain_level: int = -1,
+    # Column 5 of 20. The leap terrain gives its first 55% of columns to `gaps`, which is
+    # columns 0-10, so this reliably films a trench rather than whichever sub-terrain the
+    # robot happened to spawn on. terrains.FILM_COLS is the same number, and cannot be
+    # imported here: this module is loaded by the orchestrator too, and that image has no
+    # Isaac Lab in it. See the note in config.py.
+    terrain_col: int = 5,
+    timeline: int = 4,
+    snapshot_every: int = 250,
+    snapshot_steps: int = 250,
+    # Row 4 of 12 is a ~0.20 m trench: wide enough that clearing it is unambiguous on
+    # camera, narrow enough that a half-trained policy has a chance. Fixed for every
+    # snapshot so the strip compares policies rather than terrain.
+    snapshot_level: int = 4,
+) -> dict:
+    """Teach the dog to jump, which is a different task from teaching it to walk.
+
+        flyte run pipeline.py leap
+        flyte run pipeline.py leap --iterations 5              # is the plumbing alive?
+        flyte run pipeline.py leap --task_id Spark-Leap-A1-v0
+
+    The `parkour` task above trains velocity tracking on rough ground, and it will never
+    produce a jump no matter how long it runs. The reward set it inherits contains
+    `lin_vel_z_l2` at weight -2.0, a squared penalty on vertical velocity, which prices a
+    trench crossing at about -14.6 against task rewards that cap at 2.25. A three-hour run
+    of it walks to the lip of every gap and stops, and that is the correct answer to the
+    question it was asked.
+
+    This entry point changes the question. Two things move together and neither works
+    alone:
+
+      * `terrains.SPARK_LEAP_CFG`, a gap-dominated course with a finer curriculum and a
+        first rung (a 5 cm crack) that an untrained policy clears by accident;
+      * `spark_envs.REWARD_PROFILES["leap"]`, which drops the vertical-velocity penalty to
+        -0.05, gives the air-time term a threshold just above a walking stride and a weight
+        that is not effectively zero, halves the two smoothness penalties that a leap
+        maximises, and widens the forward command to 2 m/s so there is a run-up.
+
+    Note what is NOT here: nothing rewards jumping directly. Velocity tracking already
+    paid enormously for crossing a gap, because a robot stopped at the edge earns nothing
+    on a 1.5-weighted term for the rest of its twenty-second episode. The profile removes
+    the thing that was extinguishing the attempts.
+
+    The result to read is `flight_s` in the returned dict and the "Did it actually jump?"
+    section of the report: seconds of unbroken flight measured off the contact sensor
+    during the replay. Reward and terrain row both climb whether or not the robot ever
+    leaves the ground; that number does not.
     """
     result = await parkour_task(
         task_id=task_id, num_envs=num_envs, iterations=iterations,

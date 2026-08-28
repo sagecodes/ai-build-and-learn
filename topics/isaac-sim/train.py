@@ -69,6 +69,40 @@ _ITER_RE = re.compile(r"Learning iteration\s+(\d+)/(\d+)")
 # the robot being PROMOTED onto ground it previously fell off.
 _LEVEL_RE = re.compile(r"Curriculum/terrain_levels:\s*([\d.]+)")
 
+# Lines that are pure fallout, not the fault. When Kit's renderer dies it prints three of
+# these per allocation it then fails to free, hundreds in a row, and they all carry the
+# same message: something already went wrong. Keeping them in a bounded tail buffer means
+# the buffer holds nothing but copies of the consequence, and the CAUSE, which is on the
+# handful of lines just before the first one, is pushed out. Filtered out of the tail and
+# counted instead. See _clean_tail.
+_NOISE_RE = re.compile(
+    r"carb\.cudainterop|omni\.rtx\] CUDA error in freeAsync|Failed to free CUDA device memory"
+    r"|IHydraTexture refResource had no GPU foundation"
+)
+
+# The other number that says whether the JUMP worked. Isaac Lab's RewardManager logs every
+# term separately as `Episode_Reward/<name>` (reward_manager.py:120), rsl_rl prints any
+# extras key containing a slash verbatim (rsl_rl/utils/logger.py:176), so the training log
+# already carries one line per reward term every iteration and nobody reads them:
+#
+#     Episode_Reward/feet_air_time: 0.0641
+#
+# On the `leap` profile that term is (air_time - 0.25 s) summed over feet at each touchdown,
+# so it is negative while the policy shuffles, crosses zero when strides lengthen past a
+# walk, and climbs once the robot is actually leaving the ground. Watching it turn positive
+# is watching the jump appear, three hundred iterations before it is big enough to see in a
+# clip. Absolute scale is not meaningful (the manager multiplies every term by step_dt);
+# the sign and the shape are.
+_AIR_RE = re.compile(r"Episode_Reward/feet_air_time:\s*(-?[\d.]+)")
+
+# Every reward and termination term, not just the air-time one. rsl_rl already prints all
+# of them once per iteration and this function already reads every line, so capturing them
+# costs a regex and turns the pod log from "the number went down" into "the number went
+# down because dof_acc_l2 was -1250 on the iteration a quarter of the robots fell into a
+# trench". The first leap run was diagnosed by inference from four scraped numbers; there
+# was no reason for that to be hard.
+_TERM_RE = re.compile(r"(Episode_(?:Reward|Termination)/[\w.]+):\s*(-?[\d.eE+]+)")
+
 
 def _child_env() -> dict[str, str]:
     """Environment for the Isaac child processes, with our own modules importable.
@@ -261,11 +295,19 @@ class Snapshotter:
             self._pending = max(0, self._pending - 1)
             if res.get("ok"):
                 self.clips.append({"iteration": res["iteration"], "clip": res["clip"],
-                                   "frames": res.get("frames", 0)})
-                log.info("snapshot iter %s: %s frames (%.1fs) on row %s -> %s, %s KB",
+                                   "frames": res.get("frames", 0),
+                                   # record.py measures the longest flight phase in every
+                                   # clip it films. Carried through here so the snapshot
+                                   # strip can be captioned with a number instead of
+                                   # leaving "is it jumping yet" to the eye.
+                                   "flight": res.get("flight")})
+                fl = res.get("flight") or {}
+                log.info("snapshot iter %s: %s frames (%.1fs) on row %s -> %s, %s KB"
+                         " | longest flight %.2fs over %.2fm",
                          res["iteration"], res.get("frames"),
                          res.get("frames", 0) / 50, res.get("row"),
-                         Path(res["clip"]).name, res.get("kb"))
+                         Path(res["clip"]).name, res.get("kb"),
+                         fl.get("longest_s", 0.0), fl.get("longest_span_m", 0.0))
             else:
                 log.warning("snapshot iter %s failed: %s", res.get("iteration"), res.get("error"))
         self._dead = True
@@ -327,8 +369,8 @@ class Snapshotter:
 
 def train(
     task_id: str, num_envs: int, iterations: int, snap: "Snapshotter | None" = None
-) -> tuple[list[float], list[float], list[str]]:
-    """Run rsl_rl PPO. Returns (reward curve, terrain-level curve, tail of the log).
+) -> tuple[list[float], list[float], list[float], list[str]]:
+    """Run rsl_rl PPO. Returns (reward, terrain-level, air-time curves, tail of the log).
 
     Our own `Spark-*` tasks are registered through `--external_callback`, which is Isaac
     Lab's supported hook for exactly this (see the header of spark_envs.py). Stock
@@ -336,11 +378,18 @@ def train(
     the command it always was.
 
     The terrain-level curve is empty for flat tasks, which have no curriculum to report.
+    The air-time curve is populated for every task that keeps a `feet_air_time` reward
+    term, which is all of them, but it only means much on `Spark-Leap-*` where the term
+    has been given a weight that is not effectively zero. See _AIR_RE.
     """
     WORKDIR.mkdir(parents=True, exist_ok=True)
     rewards: list[float] = []
     levels: list[float] = []
+    airtime: list[float] = []
     tail: list[str] = []
+    # Term name -> its value as of the most recent iteration. Overwritten rather than
+    # accumulated: this is a snapshot for the periodic log line, not a curve.
+    terms: dict[str, float] = {}
     # `next_snap` starts at 1 on purpose when snapshots are on: the first checkpoint
     # rsl_rl writes is model_0.pt, the UNTRAINED policy, and that is the most useful
     # frame in the whole strip because it is the before picture.
@@ -361,6 +410,10 @@ def train(
                     snap.request(ckpt, _ckpt_iter(ckpt))
         if m := _LEVEL_RE.search(line):
             levels.append(float(m.group(1)))
+        if m := _AIR_RE.search(line):
+            airtime.append(float(m.group(1)))
+        if m := _TERM_RE.search(line):
+            terms[m.group(1)] = float(m.group(2))
         if m := _REWARD_RE.search(line):
             rewards.append(float(m.group(1)))
             # Repaint every 25 points. Flushing every iteration would spend more time
@@ -369,14 +422,22 @@ def train(
             if len(rewards) - state["flushed"] >= 25:
                 state["flushed"] = len(rewards)
                 report_progress(task_id, num_envs, rewards, levels, state["iter"], state["total"],
-                                snap.clips if snap else [])
+                                snap.clips if snap else [], airtime)
                 # Echo to stdout as well. Without this the pod log is ONE line for the
                 # whole run: this function consumes rsl_rl's stdout and would otherwise
                 # swallow it, so `kubectl logs` shows nothing and a 100-minute run is
                 # only observable through the report.
-                log.info("iter %s/%s | reward %.2f | terrain row %s",
+                log.info("iter %s/%s | reward %.2f | terrain row %s | air-time term %s",
                          state["iter"], state["total"], rewards[-1],
-                         f"{levels[-1]:.2f}" if levels else "n/a")
+                         f"{levels[-1]:.2f}" if levels else "n/a",
+                         f"{airtime[-1]:+.4f}" if airtime else "n/a")
+                # The breakdown, sorted by magnitude so whatever is dominating the return
+                # is first. Ten terms is enough to see a penalty run away and short enough
+                # to stay one line per repaint rather than a wall.
+                if terms:
+                    top = sorted(terms.items(), key=lambda kv: -abs(kv[1]))[:10]
+                    log.info("        %s", "  ".join(
+                        f"{k.split('/')[-1]}={v:+.4f}" for k, v in top))
 
     argv = [sys.executable, str(RSL_RL / "train.py"), f"--task={task_id}", "--headless",
             "--num_envs", str(num_envs), "--max_iterations", str(iterations)]
@@ -386,7 +447,7 @@ def train(
     rc = _run_streaming(argv, on_line)
     if rc != 0:
         raise RuntimeError(f"training exited {rc}. log tail:\n" + "\n".join(tail))
-    return rewards, levels, tail
+    return rewards, levels, airtime, tail
 
 
 def record(task_id: str, video_length: int = 300) -> Path | None:
@@ -443,9 +504,22 @@ def record_clips(
     out = WORKDIR / "clips" / play_id
     tail: list[str] = []
 
+    # Two buffers, and the second one is the useful one.
+    #
+    # `tail` is the last 60 lines verbatim. `head` is the FIRST 60 lines that are not pure
+    # fault-fallout, which is where the actual cause lives: by the time a Kit render fault
+    # has finished printing, the line that explains it is a thousand lines up. A run that
+    # dies gets both, and a run that succeeds is never asked for either.
+    noise = {"n": 0}
+    head: list[str] = []
+
     def on_line(line: str) -> None:
         tail.append(line)
-        del tail[:-25]
+        del tail[:-60]
+        if _NOISE_RE.search(line):
+            noise["n"] += 1
+        elif len(head) < 60:
+            head.append(line)
 
     argv = [sys.executable, str(HERE / "record.py"), "--task", play_id,
             "--logs", str(WORKDIR / "logs" / "rsl_rl"), "--steps", str(steps),
@@ -460,7 +534,15 @@ def record_clips(
     rc = _run_streaming(argv, on_line, timeout=timeout)
     summary_path = out / "summary.json"
     if rc != 0 or not summary_path.exists():
-        log.warning("record.py exited %s; continuing without clips. tail:\n%s", rc, "\n".join(tail))
+        # rc == 0 with no summary.json is a REAL failure and the most common one here:
+        # Kit's fast shutdown path calls os._exit(), so a renderer that dies still exits
+        # clean. The missing file is the only honest signal.
+        log.warning(
+            "record.py exited %s and wrote no summary; continuing without clips.\n"
+            "-- first %s meaningful lines (%s fault-fallout lines suppressed) --\n%s\n"
+            "-- last %s lines verbatim --\n%s",
+            rc, len(head), noise["n"], "\n".join(head), len(tail), "\n".join(tail),
+        )
         return {}
     summary = json.loads(summary_path.read_text())
     # record.py prints this too, but _run_streaming eats its stdout, so without this the
@@ -512,18 +594,26 @@ async def export_policy(task_id: str) -> File | None:
 
 def _curve_svg(
     rewards: list[float], w: int = 760, h: int = 240,
-    stroke: str = "#5cf", title: str = "", fmt: str = ".2f",
+    stroke: str = "#5cf", title: str = "", fmt: str = ".2f", zero: bool = False,
 ) -> str:
     """A curve as a hand-rolled SVG polyline.
 
     Hand-rolled because the training image has no matplotlib and adding it to a 25 GB
     image for one line chart is a poor trade. An SVG polyline needs no dependency and
     scales in the browser.
+
+    `zero=True` forces y=0 into the drawn range. By default the axis is autoscaled to the
+    data and the dashed zero line therefore only appears when the curve happens to
+    straddle it, which is right for reward (where zero means nothing) and wrong for the
+    air-time term (where the sign is the entire message, and "still below zero" is a
+    result the chart has to be able to show).
     """
     if len(rewards) < 2:
         return "<p><i>not enough points yet</i></p>"
 
     lo, hi = min(rewards), max(rewards)
+    if zero:
+        lo, hi = min(lo, 0.0), max(hi, 0.0)
     span = (hi - lo) or 1.0
     pad = 34
     pts = " ".join(
@@ -531,17 +621,23 @@ def _curve_svg(
         f"{h - pad - (r - lo) / span * (h - 2 * pad):.1f}"
         for i, r in enumerate(rewards)
     )
-    zero = ""
-    if lo < 0 < hi:
+    # `lo <= 0 <= hi`, not `lo < 0 < hi`: with zero=True the axis has just been widened to
+    # touch zero, so an all-negative curve has hi == 0 exactly and the strict form would
+    # drop the one line the chart was widened to show.
+    zero_line = ""
+    if lo <= 0 <= hi:
         y = h - pad - (0 - lo) / span * (h - 2 * pad)
-        zero = f"<line x1='{pad}' y1='{y:.1f}' x2='{w - pad}' y2='{y:.1f}' stroke='#888' stroke-dasharray='4 4'/>"
+        zero_line = (
+            f"<line x1='{pad}' y1='{y:.1f}' x2='{w - pad}' y2='{y:.1f}' "
+            f"stroke='#888' stroke-dasharray='4 4'/>"
+        )
     label = (
         f"<text x='{w - pad}' y='16' fill='{stroke}' font-size='12' text-anchor='end'>{title}</text>"
         if title else ""
     )
     return (
         f"<svg viewBox='0 0 {w} {h}' style='width:100%;max-width:{w}px;background:#111'>"
-        f"{zero}"
+        f"{zero_line}"
         f"<polyline points='{pts}' fill='none' stroke='{stroke}' stroke-width='2'/>"
         f"<text x='{pad}' y='16' fill='#aaa' font-size='12'>max {hi:{fmt}}</text>"
         f"<text x='{pad}' y='{h - 10}' fill='#aaa' font-size='12'>min {lo:{fmt}}</text>"
@@ -710,8 +806,107 @@ def _levels_svg(levels: list[float]) -> str:
         f"{_curve_svg(levels, stroke='#fc6', title='mean terrain row', fmt='.2f')}"
         f"<p style='color:#888;font-size:12px'>mean row <b>{levels[0]:.2f}</b> &rarr; "
         f"<b>{levels[-1]:.2f}</b>. Rows are difficulty: row 0 is the gentle end of every "
-        f"sub-terrain, the last row is the full 0.23 m step / 0.6 m gap. Envs are promoted "
-        f"when they walk far enough and demoted when they do not.</p>"
+        f"sub-terrain, the last row is the hardest the config asks for. Envs are promoted "
+        f"when they walk further than half a patch and demoted when they do not "
+        f"(curriculums.py:49). This never reaches the top row even on a solved course: an "
+        f"env that clears the last one is sent to a RANDOM row rather than kept there "
+        f"(terrain_importer.py:325), so the mean settles below the maximum by design.</p>"
+    )
+
+
+def _airtime_svg(airtime: list[float]) -> str:
+    """The air-time reward term over training. On `leap`, this is the jump appearing.
+
+    Deliberately drawn separately from mean reward rather than folded into it. Total
+    reward on this task is dominated by velocity tracking, which climbs steadily whether
+    or not the robot ever leaves the ground, so a jump is invisible in it. This one term
+    is not: it is negative while the policy shuffles, and it crosses zero at the moment
+    strides get longer than the 0.25 s threshold the leap profile sets.
+
+    The zero line is drawn because the sign is the whole point of the chart.
+    """
+    if len(airtime) < 2:
+        return ""
+    crossed = next((i for i, v in enumerate(airtime) if v > 0), None)
+    when = (
+        f" Crossed zero at point <b>{crossed}</b> of {len(airtime)}."
+        if crossed is not None else
+        " Never crossed zero: the policy is still taking walking strides, not flights."
+    )
+    return (
+        f"<h3>Time off the ground, as a reward term</h3>"
+        f"{_curve_svg(airtime, stroke='#6cf', title='Episode_Reward/feet_air_time', fmt='+.4f', zero=True)}"
+        f"<p style='color:#888;font-size:12px'>"
+        f"<code>Episode_Reward/feet_air_time</code>, one point per logged iteration: "
+        f"(air time &minus; 0.25 s) summed over the feet at each touchdown. Below zero is "
+        f"a walk, above zero is a flight phase.{when} The absolute scale is arbitrary "
+        f"(every reward term is scaled by <code>step_dt</code>); the sign is not.</p>"
+    )
+
+
+def _flight_html(flight: dict, snaps: list[dict] | None = None) -> str:
+    """The measurement, as opposed to the reward. Did it leave the ground, and how far.
+
+    Everything else in this report is a training signal: reward went up, the curriculum
+    promoted, a term turned positive. Those are all arguments that a jump probably
+    happened. This is the observation itself, taken off the contact sensor during the
+    replay: the longest interval in the clip where NO body of the robot was touching
+    anything, and the straight-line distance covered during it.
+
+    It is also the number that can embarrass the run, which is why it is here. A policy
+    that learned to shuffle to the lip and stop reads 0.00 s no matter how good the reward
+    curve looks.
+    """
+    if not flight:
+        return ""
+    longest = flight.get("longest_s", 0.0)
+    span = flight.get("longest_span_m", 0.0)
+    verdict = (
+        "That is a flight phase, not a stride: all four feet left the ground together."
+        if longest >= 0.20 else
+        "Short enough to be an ordinary trot rather than a jump. A trotting quadruped is "
+        "briefly airborne between footfalls; a leap is not."
+    )
+
+    # The same measurement across the mid-training snapshots, if there are any. Filmed on
+    # a fixed row with a fixed camera, so the numbers are comparable down the column and
+    # the reader can see the flight time grow rather than take the final one on trust.
+    history = ""
+    rows = [
+        (s["iteration"], s["flight"])
+        for s in sorted(snaps or [], key=lambda s: s["iteration"])
+        if s.get("flight")
+    ]
+    if len(rows) > 1:
+        cells = "".join(
+            f"<tr><td style='padding:4px 14px'>{it}</td>"
+            f"<td style='padding:4px 14px'>{f.get('longest_s', 0):.2f} s</td>"
+            f"<td style='padding:4px 14px'>{f.get('longest_span_m', 0):.2f} m</td>"
+            f"<td style='padding:4px 14px'>{f.get('phases', 0)}</td></tr>"
+            for it, f in rows
+        )
+        history = (
+            f"<p style='color:#888;font-size:12px;margin-top:18px'>The same measurement on "
+            f"every mid-training clip, all filmed on the same row:</p>"
+            f"<table style='border-collapse:collapse;font-size:13px'>"
+            f"<tr style='color:#888'><th style='padding:4px 14px;text-align:left'>iteration</th>"
+            f"<th style='padding:4px 14px;text-align:left'>longest flight</th>"
+            f"<th style='padding:4px 14px;text-align:left'>distance covered</th>"
+            f"<th style='padding:4px 14px;text-align:left'>flight phases</th></tr>"
+            f"{cells}</table>"
+        )
+
+    return (
+        f"<h3>Did it actually jump?</h3>"
+        f"<p style='font-size:15px'>Longest unbroken flight in the clip: "
+        f"<b>{longest:.2f} s</b>, covering <b>{span:.2f} m</b> of ground. "
+        f"{flight.get('phases', 0)} flight phases over "
+        f"{flight.get('steps', 0) / 50:.1f} s of robot time; "
+        f"<b>{flight.get('airborne_frac', 0) * 100:.0f}%</b> of the clip airborne.</p>"
+        f"<p style='color:#888;font-size:12px'>{verdict} Measured off the contact sensor, "
+        f"which tracks every body on the robot and not just the feet, so a landing on the "
+        f"knees counts as touching down. See <code>_flight_phases</code> in record.py.</p>"
+        f"{history}"
     )
 
 
@@ -726,6 +921,7 @@ def report_parkour(
     task_id: str, num_envs: int, iterations: int, rewards: list[float],
     levels: list[float], clips: dict, secs: float, tail: list[str],
     snaps: list[dict] | None = None, snap_level: int | None = None,
+    airtime: list[float] | None = None,
 ) -> None:
     """Final report for a run on our own terrain: curve, clips, and the sensor view."""
     patch = clips.get("patch") or {}
@@ -763,9 +959,22 @@ def report_parkour(
         f"<p>{num_envs:,} parallel envs &middot; {iterations} iterations &middot; {secs / 60:.1f} min</p>"
         f"<p>mean reward <b>{rewards[0]:.2f}</b> &rarr; <b>{rewards[-1]:.2f}</b> "
         f"&middot; ~<b>{rate:,.0f}</b> env-steps/sec</p>"
+        # ── Order matters, and it is footage first ─────────────────────────────
+        #
+        # The charts used to lead. They are the wrong thing to open with: a Flyte report
+        # opens scrolled to the top and repaints in place while the run is live, so
+        # whatever is in the first screen is the only thing most people ever see. Two
+        # SVG curves in that slot means the answer to "did it work" is below the fold,
+        # every time, on every repaint.
+        #
+        # So: the clip, then the one measurement that says whether what is in the clip
+        # was a jump, then the training signals that argue for it. Curves are evidence.
+        # The video is the result.
+        f"<h3>The trained policy</h3>{where}{footage}"
+        f"{_flight_html(patch.get('flight') or {}, snaps)}"
         f"{_curve_svg(rewards, title='mean reward')}"
         f"{_levels_svg(levels)}"
-        f"<h3>The trained policy</h3>{where}{footage}"
+        f"{_airtime_svg(airtime or [])}"
         f"{_timeline_html(clips.get('timeline') or [])}"
         f"{_snapshots_html(snaps or [], snap_level, max_clips=6, title='Filmed while it trained')}"
         f"<h3>What the policy actually sees</h3>"
@@ -781,17 +990,34 @@ def report_parkour(
 
 def report_progress(
     task_id: str, num_envs: int, rewards: list[float], levels: list[float], it: int, total: int,
-    snaps: list[dict] | None = None,
+    snaps: list[dict] | None = None, airtime: list[float] | None = None,
 ) -> None:
     """Live repaint while training. Watching the terrain row climb is the good bit."""
     now = f" &middot; mean terrain row <b>{levels[-1]:.2f}</b>" if levels else ""
+    # The live headline for a leap run. Reward and terrain row both move for reasons that
+    # have nothing to do with jumping, so the sign of this term is the one number on the
+    # page that says whether the thing being trained for is happening yet.
+    air = f" &middot; air-time term <b>{airtime[-1]:+.4f}</b>" if airtime else ""
+    latest = next((s["flight"] for s in sorted(snaps or [], key=lambda s: -s["iteration"])
+                   if s.get("flight")), None)
+    flew = (
+        f"<p>Longest flight in the newest clip: <b>{latest['longest_s']:.2f} s</b> "
+        f"over <b>{latest['longest_span_m']:.2f} m</b>.</p>"
+        if latest else ""
+    )
+    # Same rule as report_final below: the newest clip goes above the curves. This one
+    # repaints every 25 logged iterations for hours, and the whole reason the snapshot
+    # daemon exists is so there is something to look at while it does. Putting the charts
+    # first would bury it under two SVGs on every single repaint.
     flyte.report.replace(
         f"<h2>{task_id}</h2>"
         f"<p>{num_envs:,} parallel envs &middot; iteration <b>{it}</b>/{total} "
-        f"&middot; mean reward <b>{rewards[-1]:.2f}</b> (from {rewards[0]:.2f}){now}</p>"
+        f"&middot; mean reward <b>{rewards[-1]:.2f}</b> (from {rewards[0]:.2f}){now}{air}</p>"
+        f"{flew}"
         f"{_snapshots_html(snaps or [])}"
         f"{_curve_svg(rewards, title='mean reward')}"
-        f"{_levels_svg(levels)}",
+        f"{_levels_svg(levels)}"
+        f"{_airtime_svg(airtime or [])}",
         do_flush=True,
     )
 
@@ -824,8 +1050,9 @@ def report_final(
         f"<p>{num_envs:,} parallel envs &middot; {iterations} iterations &middot; {secs / 60:.1f} min</p>"
         f"<p>mean reward <b>{rewards[0]:.2f}</b> &rarr; <b>{rewards[-1]:.2f}</b> "
         f"&middot; ~<b>{rate:,.0f}</b> env-steps/sec</p>"
-        f"{_curve_svg(rewards)}"
+        # Footage above the curve, for the reason spelled out in report_parkour.
         f"<h3>The trained policy</h3>{video}"
+        f"{_curve_svg(rewards, title='mean reward')}"
         f"<h3>log tail</h3><pre style='font-size:11px'>{chr(10).join(tail[-20:])}</pre>",
         do_flush=True,
     )

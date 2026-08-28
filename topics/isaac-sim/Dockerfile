@@ -83,3 +83,20 @@ CMD ["python3"]
 # Back to the image's own uid. WORKDIR /isaac-sim and Kit's site-packages are both
 # writable by it, so Flyte can extract its code bundle and Kit can write caches.
 USER isaac-sim
+
+# ── The graphics half of the NVIDIA driver ──────────────────────────────────────
+#
+# Appended at the very END of the file on purpose: ENV is a zero-byte metadata layer,
+# but it still invalidates everything below it, and below this point in Dockerfile.train
+# there is ~25 GB of torch and Isaac Lab. Putting it last keeps the cache.
+#
+# /opt/nvgfx is where nvgfx.sh stages libGLX_nvidia and the rest of the `graphics`
+# capability, and where train_env's pod_template bind-mounts them. Read the header of
+# nvgfx.sh for why they are not simply injected like libcuda is; the one-line version is
+# that the Flyte devbox container runs with NVIDIA_DRIVER_CAPABILITIES=compute,utility
+# and k3s lives inside it, so no pod can widen that.
+#
+# It goes at the FRONT of the path so the ICD resolves `libGLX_nvidia.so.0` here, and it
+# is harmless when the directory does not exist: the loader skips missing entries, so an
+# image run without the mount behaves exactly as it did before.
+ENV LD_LIBRARY_PATH=/opt/nvgfx:${LD_LIBRARY_PATH}
