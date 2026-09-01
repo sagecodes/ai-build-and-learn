@@ -55,11 +55,12 @@ def _find_physics(env):
 
 
 def record(logdir: Path, steps: int = 500, size: tuple[int, int] = (480, 480)):
-    """Run the trained policy for `steps` and return (frames, score).
+    """Run the trained policy for `steps` and return (frames, score, metres).
 
-    Returns ([], 0.0) rather than raising if anything about rendering fails: a run
+    Returns ([], 0.0, 0.0) rather than raising if anything about rendering fails: a run
     that trained successfully must not be failed by the camera.
     """
+    import arena  # noqa: F401  registers the custom domain before make_env resolves it
     import elements
     import embodied
     import ruamel.yaml as yaml
@@ -82,21 +83,34 @@ def record(logdir: Path, steps: int = 500, size: tuple[int, int] = (480, 480)):
     physics = _find_physics(driver.envs[0])
     if physics is None:
         log.warning("could not reach dm_control physics; no video")
-        return [], 0.0
+        return [], 0.0, 0.0
 
     frames: list = []
     score = [0.0]
+    # Where the torso started and how far ahead of that it ever got. Reported next to
+    # the return for the same reason arena.py logs it during training: a score is a
+    # claim, metres travelled is a fact. `xpos` is read straight from the physics, not
+    # from the agent, so a policy cannot influence it except by actually moving.
+    start = [None]
+    far = [0.0]
 
     def on_step(tran, _worker):
         score[0] += float(tran["reward"])
+        x = float(physics.named.data.xpos["torso", "x"])
+        if start[0] is None or tran["is_first"]:
+            start[0] = x
+        far[0] = max(far[0], x - start[0])
         if len(frames) < steps:
             frames.append(physics.render(*size, camera_id=0))
 
     driver.on_step(on_step)
     driver.reset(agent.init_policy)
     driver(lambda *a: agent.policy(*a, mode="eval"), steps=steps)
-    log.info("recorded %s frames, episode return %.1f", len(frames), score[0])
-    return frames, score[0]
+    log.info(
+        "recorded %s frames, episode return %.1f, travelled %.2f m",
+        len(frames), score[0], far[0],
+    )
+    return frames, score[0], far[0]
 
 
 def encode(frames: list, fps: int = 30) -> bytes:

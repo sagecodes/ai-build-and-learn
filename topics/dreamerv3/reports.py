@@ -1,9 +1,20 @@
-"""HTML for the Flyte report: run summary, the learning curve, and world-model losses.
+"""HTML for the Flyte report: the dream, the reality, and the curves underneath.
 
 Same palette and helpers as topics/rl-mujoco/reports.py and topics/isaac-sim/reports.py,
 so a viewer moving between the demos is not re-learning the colours. Charts are
-hand-rolled SVG rather than matplotlib: the image is already large, and one polyline
+hand-rolled SVG rather than matplotlib: the image is already large, and a polyline
 needs no dependency.
+
+── The order of the page is the argument it is making ──────────────────────────
+The dream goes first, above the numbers. A world model is a claim about prediction,
+and the strongest available evidence for it is the prediction itself sitting next to
+what actually happened. A reward curve is a much weaker claim that happens to be
+easier to plot, which is why almost every RL report leads with one.
+
+Second is the real rollout, and it is there to be distrusted on purpose. Score climbing
+does not prove the walker is walking, so the report shows the body moving in the world
+and, next to it, metres actually travelled, which arena.py logs from the physics where
+the policy cannot reach it.
 """
 
 from __future__ import annotations
@@ -14,6 +25,7 @@ _TEXT = "#ccc"
 _ACCENT = "#00b894"
 _HILITE = "#fdcb6e"
 _MUTED = "#888"
+_WARN = "#e17055"
 
 _TITLE = "DreamerV3 - learning a world model of MuJoCo"
 
@@ -23,7 +35,7 @@ def _table(rows: list[tuple[str, str]]) -> str:
     for i, (k, v) in enumerate(rows):
         border = "border-bottom:1px solid #333;" if i < len(rows) - 1 else ""
         body += (
-            f'<tr><td style="padding:6px;{border}">{k}</td>'
+            f'<tr><td style="padding:6px;{border}white-space:nowrap;">{k}</td>'
             f'<td style="padding:6px;{border}color:{_ACCENT};">{v}</td></tr>'
         )
     return f'<table style="border-collapse:collapse;width:100%;">{body}</table>'
@@ -41,16 +53,23 @@ def _heading(text: str) -> str:
     return f'<h3 style="color:{_HILITE};font-family:monospace;">{text}</h3>'
 
 
+def _note(text: str) -> str:
+    return (
+        f'<p style="color:{_MUTED};font-family:monospace;font-size:12px;'
+        f'line-height:1.6;max-width:820px;">{text}</p>'
+    )
+
+
 def curve(
     points: list[tuple[float, float]],
     label: str,
     colour: str = _ACCENT,
     w: int = 760,
-    h: int = 240,
+    h: int = 220,
 ) -> str:
-    """(x, y) as an SVG polyline. x is environment steps, y whatever is being plotted."""
+    """(x, y) as an SVG polyline. x is environment steps, y whatever is plotted."""
     if len(points) < 2:
-        return f'<p style="color:{_MUTED};font-family:monospace;">{label}: not enough points yet</p>'
+        return _note(f"{label}: not enough points yet")
 
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
@@ -71,11 +90,139 @@ def curve(
         f'<polyline points="{pts}" fill="none" stroke="{colour}" stroke-width="2"/>'
         f'<text x="{pad}" y="16" fill="{_HILITE}" font-size="12">{label}</text>'
         f'<text x="{pad}" y="{h - 12}" fill="{_MUTED}" font-size="11">'
-        f'{y0:.3g} to {y1:.3g}</text>'
+        f"{y0:.3g} to {y1:.3g}</text>"
         f'<text x="{w - pad}" y="{h - 12}" fill="{_MUTED}" font-size="11" '
         f'text-anchor="end">{x1:,.0f} steps</text>'
         f"</svg></div>"
     )
+
+
+def _video(mp4: bytes, caption: str, max_width: int = 820) -> str:
+    import base64
+
+    b64 = base64.b64encode(mp4).decode()
+    cap = _note(caption) if caption else ""
+    return (
+        f'<div style="background:{_BG};padding:16px;border-radius:8px;">'
+        f'<video src="data:video/mp4;base64,{b64}" controls autoplay loop muted '
+        f'playsinline style="max-width:{max_width}px;width:100%;border:2px solid #333;'
+        f'border-radius:4px;display:block;image-rendering:pixelated;">'
+        f"</video>{cap}</div>"
+    )
+
+
+def _filmstrip(stills: list[tuple[int, bytes]], height: int = 190) -> str:
+    """Stills across training, oldest left. This is where progress becomes visible.
+
+    `image-rendering:pixelated` matters: these are 64 px frames blown up, and letting
+    the browser smooth them would paint in detail the model never predicted.
+    """
+    import base64
+
+    if len(stills) < 2:
+        return ""
+    cells = ""
+    for step, data in stills:
+        b64 = base64.b64encode(data).decode()
+        cells += (
+            f'<div style="flex:0 0 auto;text-align:center;">'
+            f'<img src="data:image/png;base64,{b64}" style="height:{height}px;'
+            f'border:1px solid #333;border-radius:3px;display:block;'
+            f'image-rendering:pixelated;"/>'
+            f'<span style="color:{_MUTED};font-size:10px;font-family:monospace;">'
+            f"{step / 1000:.0f}k</span></div>"
+        )
+    return (
+        f'<div style="background:{_BG};padding:12px 16px;border-radius:8px;'
+        f'overflow-x:auto;"><div style="display:flex;gap:6px;align-items:flex-end;">'
+        f"{cells}</div></div>"
+    )
+
+
+_DREAM_LEGEND = (
+    "Six sequences side by side. Top row is what really happened, middle row is the "
+    "world model's reconstruction, bottom row is the difference. The border is "
+    "<b style='color:#0f0'>green</b> while the model is still being shown the real "
+    "frames, and turns <b style='color:#f33'>red</b> the moment the images are taken "
+    "away and it has to predict the rest from actions alone. Everything after the red "
+    "line is imagination. Early in training the imagined half dissolves within a few "
+    "frames; a working world model keeps the walker, the posts and the ball where "
+    "physics would have put them."
+)
+
+_ROLLOUT_LEGEND = (
+    "The policy in the real environment, at the 64x64 resolution the agent actually "
+    "sees, taken from the training loop's own episode recording. The camera tracks the "
+    "walker, so the walker itself barely moves in frame and the posts streaming past "
+    "are the evidence of real forward travel. A policy that has learned to score "
+    "without going anywhere looks completely still against that background."
+)
+
+
+def _dream_block(film) -> str:
+    got = film.latest.get("dream")
+    strip = _filmstrip(film.thinned("dream"))
+    if not got:
+        return _heading("The dream") + _note(
+            "No open-loop prediction yet. Dreamer writes one every "
+            "<code>run.report_every</code> seconds once the replay buffer has enough "
+            "data to sample a batch. If this never fills, the run is on "
+            "<code>dmc_proprio</code>: the agent has no image observation, so the "
+            "decoder has no image to reconstruct and there is nothing to dream."
+        )
+    body = _heading("The dream: what the model thinks happens next")
+    body += _note(_DREAM_LEGEND)
+    body += _video(got["mp4"], f"step {got['step']:,} &middot; {got['probe']}")
+    if strip:
+        body += "<br/>" + _note(
+            "The last imagined frame of the first sequence, one per report, oldest on "
+            "the left. This strip is the world model learning."
+        ) + _filmstrip(film.thinned("dream"))
+    return body
+
+
+def _rollout_block(film) -> str:
+    got = film.latest.get("rollout")
+    if not got:
+        return ""
+    body = _heading("The reality: the policy in the environment")
+    body += _note(_ROLLOUT_LEGEND)
+    body += _video(got["mp4"], f"step {got['step']:,} &middot; {got['probe']}", 420)
+    strip = film.thinned("rollout")
+    if len(strip) >= 2:
+        body += "<br/>" + _filmstrip(strip, height=150)
+    return body
+
+
+def _honesty_block(data: dict) -> str:
+    """Score and metres travelled, side by side, and what it means if they disagree."""
+    score, dist = data["score"], data["distance"]
+    body = _heading("Is it actually walking?")
+    body += _note(
+        "The left curve is what the agent is paid. The right is how far the torso got "
+        "from where the episode started, in metres, read from the physics and logged "
+        "under a <code>log/</code> key so it never enters the observation and the "
+        "policy has no way to influence it except by moving. The walker reward pays "
+        "for a mix of standing upright and moving at 1 m/s, so a policy that learns "
+        "the standing half and skips the moving half can sit near a return of 300 "
+        "forever. Score up and distance flat is that failure, and it is visible here "
+        "long before it is visible in the video."
+    )
+    body += curve(score, "episode return", _ACCENT)
+    body += "<br/>" + curve(dist, "metres travelled (max per episode)", _HILITE)
+    if score and dist:
+        s, d = score[-1][1], dist[-1][1]
+        verdict = (
+            f"latest episode: return {s:.0f}, travelled {d:.1f} m."
+            + (
+                f" Return is climbing but the walker is not travelling; check the "
+                f"rollout video above."
+                if s > 250 and d < 1.5
+                else ""
+            )
+        )
+        body += _note(verdict)
+    return body
 
 
 def _losses_block(losses: dict[str, list[tuple[float, float]]]) -> str:
@@ -83,74 +230,117 @@ def _losses_block(losses: dict[str, list[tuple[float, float]]]) -> str:
 
     Named so the report explains itself: `dyn` and `rep` are the two sides of the KL
     between what the model predicted the next latent would be and what the encoder
-    actually saw, `rew` and `con` are the reward and continuation heads, and
-    `policy`/`value` are the actor and critic trained inside imagination.
+    actually saw, `image` is the decoder reconstructing pixels, `rew` and `con` are the
+    reward and continuation heads, and `policy`/`value` are the actor and critic
+    trained entirely inside imagination.
     """
     meaning = {
-        "dyn": "dynamics KL: prediction vs encoder",
-        "rep": "representation KL: encoder vs prediction",
+        "dyn": "dynamics KL: the predictor moving toward the encoder",
+        "rep": "representation KL: the encoder moving toward something predictable",
+        "image": "decoder: reconstructing 64x64 pixels from the latent",
         "rew": "reward head",
         "con": "continuation head",
-        "policy": "actor, trained in imagination",
-        "value": "critic, trained in imagination",
+        "policy": "actor, trained on imagined rollouts only",
+        "value": "critic, trained on imagined rollouts only",
+        "repval": "critic regularised toward the replayed returns",
     }
+    order = ["image", "dyn", "rep", "rew", "con", "policy", "value", "repval"]
+    keys = [k for k in order if k in losses] + [k for k in losses if k not in order]
     blocks = ""
-    for key, pts in losses.items():
+    for key in keys:
+        pts = losses[key]
         if len(pts) < 2:
             continue
         blocks += curve(pts, f"loss/{key} ({meaning.get(key, '')})", _HILITE) + "<br/>"
-    return blocks or f'<p style="color:{_MUTED};">no loss points logged yet</p>'
+    return blocks or _note("no loss points logged yet")
 
 
-def progress_html(task: str, step: int, total: int, score: list, losses: dict) -> str:
-    pct = (100.0 * step / total) if total else 0.0
+def _summary_rows(task, config, size, data, extra) -> list[tuple[str, str]]:
+    fps = data["fps"]
     rows = [
         ("Task", task),
-        ("Progress", f"{step:,} / {total:,} env steps ({pct:.0f}%)"),
-        ("Episodes scored", f"{len(score)}"),
-        ("Latest score", f"{score[-1][1]:.1f}" if score else "no episode finished yet"),
+        ("Agent", f"DreamerV3, {config} {size}"),
+        (
+            "Observation",
+            "64x64 pixels" if "vision" in config else "proprioceptive state vector",
+        ),
     ]
+    rows += extra
+    if fps:
+        rows.append(
+            ("Throughput", ", ".join(f"{k} {v:,.0f}" for k, v in sorted(fps.items())))
+        )
+    if data["ram"]:
+        rows.append(("Replay buffer", f"{data['ram'][-1][1]:.1f} GB"))
+    return rows
+
+
+def progress_html(task, config, size, step, total, data, film, secs) -> str:
+    pct = (100.0 * step / total) if total else 0.0
+    eta = ""
+    if step and secs > 60:
+        remain = (total - step) * (secs / step)
+        eta = f", about {remain / 3600:.1f} h left"
+    score = data["score"]
+    rows = _summary_rows(task, config, size, data, [
+        ("Progress", f"{step:,} / {total:,} env steps ({pct:.0f}%){eta}"),
+        ("Elapsed", f"{secs / 60:.0f} min"),
+        ("Episodes scored", f"{len(score)}"),
+        ("Latest return", f"{score[-1][1]:.1f}" if score else "no episode finished yet"),
+        (
+            "Furthest travelled",
+            f"{max((y for _, y in data['distance']), default=0.0):.1f} m"
+            if data["distance"] else "n/a",
+        ),
+    ])
     return (
         f"<h2>{_TITLE}</h2>"
         + _panel("Training", _table(rows))
         + "<br/>"
-        + _heading("Episode return")
-        + curve(score, "episode score")
+        + _dream_block(film)
+        + "<br/>"
+        + _rollout_block(film)
+        + "<br/>"
+        + _honesty_block(data)
+        + "<br/>"
+        + _heading("World model")
+        + _panel("Losses", _losses_block(data["losses"]))
     )
 
 
 def final_html(
-    task: str,
-    steps: int,
-    secs: float,
-    score: list,
-    losses: dict,
-    params: str,
-    tail: list[str],
-    video: str = "",
-    clip_probe: str = "",
+    task, config, size, steps, secs, data, film, params, tail,
+    video: str = "", clip_probe: str = "",
 ) -> str:
+    score = data["score"]
     best = max((y for _, y in score), default=0.0)
-    rows = [
-        ("Task", task),
+    far = max((y for _, y in data["distance"]), default=0.0)
+    rows = _summary_rows(task, config, size, data, [
         ("Environment", "DeepMind Control Suite (dm_control on MuJoCo)"),
-        ("Agent", "DreamerV3, model-based: policy trained inside imagined rollouts"),
         ("Env steps", f"{steps:,}"),
-        ("Wall clock", f"{secs / 60:.1f} min"),
+        ("Wall clock", f"{secs / 3600:.2f} h"),
         ("Agent size", params or "n/a"),
         ("Episodes scored", f"{len(score)}"),
-        ("Score, first", f"{score[0][1]:.1f}" if score else "n/a"),
-        ("Score, final", f"{score[-1][1]:.1f}" if score else "n/a"),
-        ("Score, best", f"{best:.1f}" if score else "n/a"),
-    ]
-    logs = "\n".join(tail[-25:]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    replay = ""
+        ("Return, first", f"{score[0][1]:.1f}" if score else "n/a"),
+        ("Return, final", f"{score[-1][1]:.1f}" if score else "n/a"),
+        ("Return, best", f"{best:.1f}" if score else "n/a"),
+        ("Furthest travelled", f"{far:.1f} m" if data["distance"] else "n/a"),
+    ])
+    logs = (
+        "\n".join(tail[-30:])
+        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    replay_block = ""
     if video:
-        replay = (
-            _heading("The trained policy")
+        replay_block = (
+            _heading("The trained policy, re-rendered")
+            + _note(
+                "The same policy as the rollout above, filmed again at 480x480 so the "
+                "arena is legible. The agent still acts on the 64x64 observation it "
+                "trained on; only the camera resolution changed, so this is a "
+                "recording of the policy rather than a different run."
+            )
             + video
-            + (f'<p style="color:{_MUTED};font-family:monospace;font-size:12px;">'
-               f"{clip_probe}</p>" if clip_probe else "")
             + "<br/>"
         )
 
@@ -158,16 +348,20 @@ def final_html(
         f"<h2>{_TITLE}</h2>"
         + _panel("Run summary", _table(rows))
         + "<br/>"
-        + replay
-        + _heading("Episode return")
-        + curve(score, "episode score")
+        + _dream_block(film)
+        + "<br/>"
+        + replay_block
+        + _rollout_block(film)
+        + "<br/>"
+        + _honesty_block(data)
         + "<br/>"
         + _heading("World model")
-        + _panel("Losses", _losses_block(losses))
+        + _panel("Losses", _losses_block(data["losses"]))
         + "<br/>"
         + _panel(
             "Logs",
-            f'<details><summary style="cursor:pointer;color:{_MUTED};">training tail</summary>'
+            f'<details><summary style="cursor:pointer;color:{_MUTED};">training tail'
+            f"</summary>"
             f'<pre style="font-size:11px;color:{_TEXT};background:{_PANEL};padding:12px;'
             f'border-radius:4px;overflow-x:auto;">{logs}</pre></details>',
         )
