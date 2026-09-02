@@ -320,6 +320,7 @@ smoke_test.py  a shim over ↓     config.py         Flyte images and task envir
                                  record.py         replay a policy through the RTX renderer
                                  terrains.py       terrain generator configs
                                  spark_envs.py     register our tasks + reward profiles
+                                 test_vault_rewards.py  check the gap rewards, no Kit needed
                                  nvgfx.sh          stage the NVIDIA graphics driver (section 9)
 ```
 
@@ -333,7 +334,7 @@ The two things worth knowing before opening any of it:
 
 ## 7. The demo
 
-Four entry points, in the order they were built. All of them run against the `physical-ai` Flyte project and all of them put their results in a live Flyte report.
+Five entry points, in the order they were built. All of them run against the `physical-ai` Flyte project and all of them put their results in a live Flyte report.
 
 ```bash
 # 1. Does the GPU reach a pod at all?
@@ -346,12 +347,23 @@ flyte run pipeline.py walk
 flyte run pipeline.py parkour
 flyte run pipeline.py parkour --task_id Spark-Stairs-Go2-v0
 
-# 4. The jump.
+# 4. The jump, with a blind reward set that has been relaxed to allow one.
 flyte run pipeline.py leap
 flyte run pipeline.py leap --iterations 5     # is the plumbing alive?
+
+# 5. The same ground, with a reward that reads the height scanner. Section 8.
+flyte run pipeline.py vault
 ```
 
-Task ids are `Spark-{Parkour,Stairs,Stones,Leap}-<Robot>-v0` over the ten robots in `spark_envs.BASE_TASKS`. Note the robot spelling is the display name, so `Spark-Stairs-Go2-v0`, not `Spark-Stairs-Unitree-Go2-v0`.
+Task ids are `Spark-{Parkour,Stairs,Stones,Leap,Vault}-<Robot>-v0` over the ten robots in `spark_envs.BASE_TASKS`. Note the robot spelling is the display name, so `Spark-Stairs-Go2-v0`, not `Spark-Stairs-Unitree-Go2-v0`.
+
+`leap` and `vault` share a terrain generator object on purpose, so the only difference between those two runs is the reward set and a result is attributable to it. The first three keep NVIDIA's rewards untouched, so among *them* the terrain is the only variable. Those are two different comparisons and it is worth keeping them straight.
+
+The two `vault` reward terms are pure functions of a height-scan tensor, so they can be checked in about two seconds without a GPU:
+
+```bash
+source env.sh && "$ISAACSIM_PYTHON_EXE" test_vault_rewards.py
+```
 
 Each training task does two things in **one pod**, deliberately: train with rsl_rl, then replay the trained policy through the RTX renderer to an mp4 that is base64'd into the report. Splitting them would mean shipping a checkpoint through blob storage and queueing for the same single GPU twice.
 
@@ -506,6 +518,57 @@ Getting past it needs a different *kind* of objective, not different weights on 
 
 Both are a new task family rather than a profile on this one, which is exactly why `REWARD_PROFILES` is keyed by terrain and cheap to add to.
 
+There is also a third option that is neither, and it is the one this repo tried next. It is below.
+
+### The third option: let the reward see what the policy already sees
+
+The two fixes above are both new task families. There is a cheaper one hiding in plain sight, and finding it means re-reading the autopsy with one question in mind: *did the robot know the gap was there?*
+
+It did. `Isaac-Velocity-Rough-*` mounts a height scanner on the base (`velocity_env_cfg.py:112`) and feeds it straight into the policy observation:
+
+```python
+height_scanner = RayCasterCfg(
+    prim_path="{ENV_REGEX_NS}/Robot/base",
+    offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+    ray_alignment="yaw",
+    pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.6, 1.0]),
+    mesh_prim_paths=["/World/ground"],
+)
+```
+
+187 rays on a 1.6 m x 1.0 m grid, yaw-aligned to the base, cast down onto the terrain mesh. `mdp.height_scan` turns that into `base_z - hit_z - 0.5`, so our 1.0 m trench reads about **+0.9 against -0.1 on flat ground**: nine times the ±0.1 observation noise and well inside the ±1.0 clip. A trench is already 187 numbers in the input vector, 0.8 m before the base reaches it.
+
+**So the dog was never blind. Every reward term was.** `lin_vel_z_l2`, `feet_air_time`, `dof_acc_l2`, `action_rate_l2` and the two tracking terms are all proprioceptive; not one can tell the lip of a trench from the middle of the platform. `leap` paid for hang time everywhere and velocity everywhere, and then measured 0.08 s of flight at iteration 0 and 0.08 s at iteration 4750.
+
+That reframes the wall at the end of the autopsy. The problem was never that velocity tracking cannot pay for a jump: it pays enormously, but only *after* one succeeds. The problem is that it cannot pay for an **attempt**, so every failure scored identically and there was nothing for PPO to climb. Relaxing `lin_vel_z_l2` from -2.0 to -0.05 made an attempt affordable. It did not make one worth making.
+
+`Spark-Vault-*` is `leap` plus two reward terms that read the same scanner (`spark_envs.py`):
+
+| term | pays for | why it is shaped that way |
+| --- | --- | --- |
+| `gap_takeoff`, weight 1.0 | upward velocity **×** trench in the forward window **×** forward speed | Dense, and it fires several steps before the robot commits. The forward-speed gate is not optional: without it, bouncing on the spot at the lip farms the term forever, and pogoing is a real attractor once `lin_vel_z_l2` is down at -0.05. |
+| `gap_flight`, weight 2.0 | forward speed **×** all feet airborne **×** trench underneath | The payoff, and the term that gives a *failed* crossing a gradient. A robot that launches and drops in is airborne over a hole for the ~0.3 s of its fall and banks some of it; one that gets further banks more. |
+
+Together they create the ordering `leap` could not express:
+
+```
+walked to the lip  <  jumped and fell in  <  jumped and nearly made it  <  crossed
+```
+
+Under `leap` the middle two were indistinguishable from the first.
+
+Three details worth stealing:
+
+- **Depth is measured against `env.scene.env_origins[:, 2]`**, the patch the env is currently assigned to, for the same reason `fell_into_hole` uses it: our patches sit at twelve different heights, so a world-frame z means nothing, and the rays under the base are no use because the robot is airborne for exactly the part of the manoeuvre that matters.
+- **`gap_takeoff` reads world-frame vertical velocity, not base-frame.** Isaac Lab's own `lin_vel_z_l2` uses `root_lin_vel_b[:, 2]`, which is fine for a penalty and exploitable as a reward: the base z-axis points out of the robot's back, so a robot running at 2 m/s with a 30° nose-up rear reads +1.0 m/s of "vertical" velocity with every foot still on the ground. Pay for that and you buy a dog that pops a wheelie at every trench.
+- **The gap signal is a fraction of the window, not a maximum.** A max-depth version saturates the instant any ray finds the trench, 0.7 m out, then sits flat for the whole approach and pays a takeoff from too far away exactly as well as from the lip. The fraction peaks when the gap fills the window, which *is* the takeoff moment.
+
+**On privilege, because this is the part that is easy to oversell on a stream.** The new terms read `ray_hits_w` raw: no noise, no clip. That is legitimate, because a reward function is simulator-side scaffolding that never ships with the policy. The observation is untouched, so the policy still sees exactly the noisy, clipped scan `leap` saw and a `vault` run stays a fair comparison rather than a different task.
+
+But the scanner itself is not a sensor you could bolt to a real Go2. It casts rays from 20 m above the robot, through its own body, onto the ground mesh, with no occlusion, no field of view and no range limit. It is a simulator query wearing a sensor's clothes. This is the **teacher** half of the standard two-stage sim-to-real recipe (Lee et al. 2020, Miki et al. 2022, Extreme Parkour); the student half is the distillation run in [section 14](#take-the-cheat-sensor-away), and it is not built. A `vault` clip is evidence that the behaviour is learnable, not that the robot could do it outdoors.
+
+The number to read is `Episode_Reward/gap_flight`, charted in the report next to the air-time term. It is **structurally pinned at zero** until the robot is airborne over a trench while moving forward, because there is no other way to earn it: not a long stride, not a bounce on flat ground, not a wheelie. So the chart has no interesting shape, only an interesting moment. The iteration it lifts off zero is the iteration the jump was invented, and if it is still flat at the end of the run, the run failed and it failed unambiguously.
+
 ### Measuring it, rather than believing the curve
 
 Reward going up is an argument that a jump probably happened. This is the observation:
@@ -591,11 +654,12 @@ If you are presenting this, roughly this order:
 
 1. **`checks.py`** (5 min). The smallest complete thing: boot Kit, drop a cube, check gravity is real and PhysX is on the GPU. Establishes the `SimulationApp`-first rule and the CPU-fallback trap.
 2. **`terrains.py`** (10 min). Where the demo becomes visual. Read `SPARK_PARKOUR_CFG` against NVIDIA's six-sub-terrain default, then the rows-are-difficulty / columns-are-variety explanation, then the fact that column assignment is deterministic by dict order.
-3. **`spark_envs.py`** (15 min, the centrepiece). `--external_callback` as the no-fork extension point, then the derivation of 80 tasks, then `REWARD_PROFILES` and the `lin_vel_z_l2 = -2.0` autopsy. This is the part people remember.
-4. **`pipeline.py`** (10 min). Four entry points and the one-pod train-and-film shape. The child-process reasoning lives in its header.
-5. **`train.py`** (10 min). Scraping rsl_rl's stdout into live charts, and `Snapshotter`: filming a policy while it trains, from a daemon that boots Kit once.
-6. **`record.py`** (10 min). Camera sensors instead of the viewport, the height-scanner recording, and `_flight_phases` as the measurement that can prove the demo wrong.
-7. **`nvgfx.sh`** (5 min, optional but a good war story). Vulkan, driver capabilities, and why a hundred CUDA errors were all a red herring.
+3. **`spark_envs.py`** (15 min, the centrepiece). `--external_callback` as the no-fork extension point, then the derivation of 100 tasks, then `REWARD_PROFILES` and the `lin_vel_z_l2 = -2.0` autopsy. This is the part people remember.
+4. **`_vault_profile`, still in `spark_envs.py`** (10 min, the payoff). The reveal is one sentence: the robot could always see the gap, and every reward term was blind to it. Then `gap_takeoff` and `gap_flight`, and why each factor in them is load-bearing. `test_vault_rewards.py` runs in two seconds and makes a good live demo of "here is the pogo exploit, here is the term that closes it".
+5. **`pipeline.py`** (10 min). Five entry points and the one-pod train-and-film shape. The child-process reasoning lives in its header.
+6. **`train.py`** (10 min). Scraping rsl_rl's stdout into live charts, and `Snapshotter`: filming a policy while it trains, from a daemon that boots Kit once.
+7. **`record.py`** (10 min). Camera sensors instead of the viewport, the height-scanner recording, and `_flight_phases` as the measurement that can prove the demo wrong.
+8. **`nvgfx.sh`** (5 min, optional but a good war story). Vulkan, driver capabilities, and why a hundred CUDA errors were all a red herring.
 
 ---
 
@@ -946,7 +1010,9 @@ Cost: one 3-hour run against a baseline that already has published numbers. It m
 
 ### The real fix: ask for the jump
 
-The honest conclusion of section 8 is that the objective is wrong, not the weights. Two shapes, and the second is the one to build:
+Section 8's third option, `Spark-Vault-*`, keeps the velocity objective and gives the reward the height scanner, which buys a gradient for an attempt without a new task family. Both shapes below go further and replace the objective outright. They are still worth building, and the `vault` result is what says how much they are needed.
+
+Two shapes, and the second is the one to build:
 
 **Hierarchical**, the navigation env's shape. Freeze the converged leap policy, load it with `PreTrainedPolicyActionCfg`, and train a 5 Hz policy whose action is the velocity command. Cheap to train and directly reuses a checkpoint this repo already produced. It inherits the ceiling, though: the low level still cannot jump, so the high level learns to route around trenches rather than over them. Worth building as a demo, not as an answer.
 

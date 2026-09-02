@@ -48,7 +48,7 @@ DREAMER_ROOT = "/opt/dreamerv3"
 # NVIDIA_DRIVER_CAPABILITIES=compute,utility). That is the bug that made every Isaac
 # Sim replay come back as 300 black frames; see topics/isaac-sim/README.md. Proprio
 # training needs none of it, but a pixel-space Dreamer run will.
-_GL_APT = (
+GL_APT = (
     "libegl1", "libegl-mesa0", "libgl1", "libgl1-mesa-dri",
     "libgles2", "libglx-mesa0", "libosmesa6",
 )
@@ -64,7 +64,9 @@ SPEC = (
     # DeepMind Control Suite, which runs on MuJoCo. Same engine as topics/rl-mujoco.
     "dm_control", "mujoco",
     # PyAV for the replay mp4: aarch64 wheels exist, imageio-ffmpeg's do not reliably.
-    "av", "imageio", "numpy",
+    # scope encodes its video columns with av too, and its image columns with pillow,
+    # which is what scopevid.py reads back out to put the dream in the report.
+    "av", "imageio", "pillow", "numpy",
     "flyte==2.2.1",
     # 0.11 breaks flyte 2.2.1 runs ('Headers' not callable).
     "connectrpc==0.10.*",
@@ -72,7 +74,7 @@ SPEC = (
 
 image = (
     flyte.Image.from_debian_base(name="dreamerv3", registry=REGISTRY, platform=PLATFORM)
-    .with_apt_packages("git", "ffmpeg", *_GL_APT)
+    .with_apt_packages("git", "ffmpeg", *GL_APT)
     .with_pip_packages(*SPEC)
     # The patch has to exist inside the build context before it can be applied.
     .with_source_file(
@@ -106,13 +108,19 @@ image = (
 # orchestrator deadlocks its own GPU child on "Insufficient nvidia.com/gpu". The same
 # trap as the videogen, mujoco and Isaac Sim demos.
 #
-# Dreamer is famously light on GPU memory: the whole agent is 640,867 parameters at
-# the size1m preset, and the replay buffer lives in host RAM. The memory ask here is
-# for the replay buffer, not the model.
+# Dreamer is famously light on GPU memory: the whole agent is 10.5M parameters at the
+# size12m preset used for pixels, and the replay buffer lives in host RAM. The memory
+# ask here is for the replay buffer, not the model.
+#
+# A pixel run stores 64x64x3 frames instead of a state vector, so the buffer is roughly
+# 12 KB per transition against 100 bytes. `replay.size` defaults to 5e6, far more than
+# a 500k-step run needs, and Dreamer only allocates what it fills: measured at 1.7 GB
+# after 12k steps, so ~70 GB at 500k. `--replay.size` is capped in pipeline.py instead
+# of provisioning for a buffer the run will never fill.
 gpu_env = flyte.TaskEnvironment(
     name="dreamer",
     image=image,
-    resources=flyte.Resources(cpu="8", memory="48Gi", gpu=1, disk="50Gi"),
+    resources=flyte.Resources(cpu="12", memory="80Gi", gpu=1, disk="80Gi"),
 )
 
 orch_env = flyte.TaskEnvironment(
