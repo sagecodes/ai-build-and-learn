@@ -539,10 +539,68 @@ different reward, and look directly at**. That last one is the red-bordered drea
 this whole repo is built around, and there is no equivalent artifact anywhere in a PPO
 run.
 
-One honest caveat on the table above: the throughput figures are both measured here,
-but "50x fewer steps" comes from this run's curve and the published DreamerV3 numbers,
-not from running PPO on `walker_walk` from pixels on this box. Making that comparison
-real rather than cited is a cheap follow-up run and has not been done yet.
+### The same budget, measured
+
+`baseline.py` runs PPO at DreamerV3's exact step budget so this stops being a citation.
+Both rows measured on this box:
+
+| at 500,000 environment steps | observation | best return | wall clock |
+|---|---|---|---|
+| PPO (stable-baselines3, MlpPolicy) | state, 24 numbers | **223** | 43 min |
+| DreamerV3 (`dmc_vision size12m`) | 64x64 pixels | **987** | 6.98 h |
+
+Note which way the handicap runs. PPO got the **easier** observation, a clean state
+vector, while Dreamer had to learn from pixels, and Dreamer still finished 4.4x higher.
+Walker's return is capped at 1,000, so 987 is a solved task and 223 is a walker that
+has learned to stand up and not much else. Meanwhile PPO burned through those steps in
+43 minutes against Dreamer's seven hours, which is the same tradeoff as before: far
+fewer steps, far more compute per step.
+
+Two caveats, because this comparison is easy to overclaim:
+
+**These are stable-baselines3 defaults, not a tuned PPO.** dm_control's action scaling
+and reward magnitudes are not what those defaults were chosen for, and a PPO tuned for
+this task would do better than 223. The number to read here is the order of magnitude,
+not the decimal.
+
+**PPO's step count is entangled with its parallelism**, and this one used 8
+environments. That is not a footnote, it is worth its own measurement, which is what
+`braxppo.py` does on the MJX stack from the [rl-mujoco](../rl-mujoco) event.
+
+### How much of the gap is parallelism
+
+Brax PPO on `WalkerWalk`, state observations, same task and budget at three environment
+counts, asking how many environment steps each needs to reach a return of 900. All
+three measured on this box:
+
+| parallel envs | steps per update | best return | steps to reach 900 | wall clock |
+|---|---|---|---|---|
+| 64 | 61,440 | 941.0 | **7,372,800** | 35.5 min |
+| 512 | 491,520 | 960.0 | 19,660,800 | 14.6 min |
+| 2,048 (Playground's default) | 983,040 | 969.7 | 29,491,200 | 22.9 min |
+
+**The curves do not collapse**, so parallelism was not a rounding error in the
+comparison. Between 64 and 2,048 environments the same algorithm on the same task needs
+four times as many environment steps to reach the same score. Read as gradient updates
+instead, the ordering reverses: 120, 40 and 30. The low-parallelism run does four times
+the optimisation work on a quarter of the data, which is the tradeoff in one line.
+
+That means the honest headline is the **smallest**-parallelism row. DreamerV3 reached
+987 in 500,000 steps, so against the most sample-efficient PPO here the ratio is about
+**15x**, and against Playground's own 2,048-environment default it would be about 59x.
+Quoting the second number without saying how many environments produced it is exactly
+the overclaim this file exists to prevent.
+
+Two things keep this honest in the other direction. PPO does **solve** the task, at
+941 to 970, so this is a sample-efficiency story and not a capability one. And it gets
+there in about thirteen minutes of wall clock against Dreamer's seven hours: Dreamer
+wins on samples by roughly 15x and loses on wall clock by roughly 32x.
+
+One caveat on two of the three rows. Brax overshoots its step budget through epoch
+rounding, so the 2,048-environment run actually ran about 29.5M steps against a 20M
+request and crossed 900 on its final evaluation. Its number is a lower bound rather
+than a measured threshold, and 19.7M is marginal for the same reason. Only the 64-row
+crossed comfortably inside its budget, which is the other reason it is the row to quote.
 
 ## Why MuJoCo, and why next to rl-mujoco
 
@@ -592,6 +650,52 @@ In a Flyte pod, against the `world-models` project:
 `launch.py` rather than upstream's `dreamerv3/main.py` because the `arena` domain has
 to be registered inside the process that loads the environments, and upstream's entry
 point has no hook for that. It adds no flags of its own.
+
+## Status: it dreams, and it walks
+
+Verified on this box (DGX Spark, GB10, aarch64, driver 580.126.09, CUDA 13.0), Flyte
+run `rdmmb2c4p5g9rnsdgxkf` in the `world-models` project, 2026-08-31.
+
+```
+task             dmc_arena_walk, dmc_vision size12m, 64x64 pixels
+agent            10,494,158 parameters
+run              500,000 env steps in 418.9 min (6.98 h), 496 episodes
+throughput       19.9 env steps/s, ~5 gradient steps/s (the gradient step is the limit)
+
+episode return   42.2  ->  934.8 final, 987.3 best
+metres travelled  1.9  ->   53.2 best
+world model      image 628.6 -> 24.9 | rew 5.43 -> 0.57 | con 0.26 -> 0.02
+actor / critic   ent/action 7.87 -> 1.07 | value 3.75 -> 1.24
+
+dream clips      139, one every ~3 min, all non-black
+final replay     600 frames at 480x480, luminance mean 71.9, 0 black
+```
+
+Read the two headline numbers together. Walker's per-step reward is capped at 1.0 and
+the episode is 1,000 steps, so 987 is within a couple of percent of the arithmetic
+ceiling and comfortably at the published DreamerV3 asymptote for this task. And 53 m in
+a 25 second episode is about 2.1 m/s, which is worth a second look: `move_reward`
+saturates at 1 m/s, so **there was no reward whatsoever for going faster than half that
+speed**. It did anyway, presumably because a committed gait is easier to keep upright
+than a careful one.
+
+Three things worth knowing about the shape of the curve:
+
+**The world model learns long before the policy does.** `image` fell from 628 to 52 in
+the first 4% of the run, while the return was still 85 and the walker was flailing on
+the floor. That gap is the argument for model-based RL in one line: every frame teaches
+the model something, whether or not the agent did anything good.
+
+**`dyn` and `rep` go UP, and that is not a regression.** They ended at 11.3 having
+started at 10.8, while every other loss fell. The KL is measured against a moving
+target: as the policy improves it visits faster and more novel states, so the world
+genuinely becomes harder to predict even as the model gets better at predicting it.
+
+**Return climbing early is standing up, not walking.** The reward is
+`stand_reward * (5 * move_reward + 1) / 6`, and the standing term multiplies, so moving
+pays nothing until the walker is upright. At 4% the return had doubled to 85 while
+distance sat at 2.8 m. The distance curve is what separates those two stories, and it
+is the reason it is in the report.
 
 ## Things that cost time, so you do not pay twice
 
@@ -643,6 +747,75 @@ not be broadcast together with shapes (7,) (2,)`. Index rows first, then columns
 reshapes a view to assign into it, which numpy 2.5 deprecates. Eleven balls times
 several episodes a minute is a wall of tracebacks in the log tail the report shows.
 Write the raw `qpos[adr:adr+7]` slice instead.
+
+**torch segfaults on import in an aarch64 pod, and the guard cannot catch it.**
+Only relevant to `baseline.py`, which is the one thing here that uses torch. Building
+a plain Adam optimizer calls `torch.utils._triton.has_triton_package()`, which does
+`import triton`, and triton's aarch64 native extension crashes on import:
+
+```
+Fatal Python error: Segmentation fault
+  torch/utils/_triton.py:39   has_triton_package
+  triton/__init__.py:8 -> runtime/autotuner.py -> knobs.py:15   <- SIGSEGV
+```
+
+`has_triton_package` wraps that import in `except ImportError`, which is useless,
+because a segfault is not an exception. The pod exits 139 three seconds in with no
+Python traceback at all. `sys.modules["triton"] = None` before importing torch turns
+the crash into the ImportError torch already knows how to handle, and costs nothing,
+since stable-baselines3 never calls `torch.compile`.
+
+Two things made this findable, and neither was guessing. `faulthandler.enable()`, which
+converts a silent native crash into a stack; and filtering dm_control's numpy 2.5
+DeprecationWarning, which otherwise repeats so often that the last forty lines of
+`kubectl logs` contain nothing else. Arm both before debugging anything native.
+
+**A CPU task still has to fit next to the GPU task.** This box has 20 cores and a
+Dreamer training pod requests 12 of them. A companion CPU task asking for 6 sits in
+`Pending` with `0/1 nodes are available: 1 Insufficient cpu` for as long as the seven
+hour run lasts, which quietly defeats the point of making it CPU-only. `kubectl
+describe node` under "Allocated resources" is the check; `baseline.py` asks for 3.
+
+**A run's code is snapshotted at submit, not at commit.** `flyte run` bundles the
+source tree as it is the moment you press enter, so editing a file five minutes after
+launching a seven hour job means the code that produced the result is neither what is
+on disk nor what is in git. That is recoverable only if you committed it, and the pod's
+logs age out, so the numbers survive and the thing that produced them does not. This
+run has one such artifact: a flagship reporting 11,347,664 parameters where current
+code builds 10,494,158 agents on the identical task, config and size, with no way left
+to explain the difference. Commit before you launch anything long, or accept that the
+result is a measurement you cannot repeat.
+
+**Nothing in the logdir survives the pod.** Dreamer writes everything, checkpoints
+included, under `/tmp/dreamer/<task>`, and Flyte takes that with it when the task
+exits. Two seven hour runs finished here before anyone noticed that the only thing left
+behind was the HTML report: the trained agents were gone, which makes every follow-up
+demo a retrain. `_persist` in pipeline.py now uploads `config.yaml`, `ckpt`,
+`metrics.jsonl` and `scope` as a `Dir` output. It stages a subset rather than uploading
+the logdir because the replay buffer is about 30 GB at `_REPLAY_SIZE` and none of it is
+needed to load an agent.
+
+**`run.save_every` defaults to 900 seconds, which makes short runs silently agent-less.**
+Any run under fifteen minutes finishes having written no checkpoint at all, so a
+persistence step uploads a directory with no agent in it and the run still reports
+success. Nothing raises. This is the third silent-absence bug in this demo, after the
+two `log/` failures above, and the lesson repeats: check that the artifact exists
+rather than assuming the code that writes it ran. It is a `save_every` parameter now.
+
+**Playground now defaults MuJoCo to the warp backend, which is not installed.** Only
+relevant to `braxppo.py`. `mujoco_playground` 0.2.0 returns `impl: warp` from
+`get_default_config`, which sends `mjx.put_model` down a path that reads
+`mujoco_warp.types.GraphMode.WARP`. There is no aarch64 wheel for mujoco-warp, so
+mujoco-mjx 3.12 falls back to a stub where `GraphMode` is plain `int` and the pod dies
+five seconds in with
+
+```
+AttributeError: type object 'int' has no attribute 'WARP'
+```
+
+which names neither warp nor the missing package. `config_overrides={"impl": "jax"}`
+fixes it. Worth knowing that `topics/rl-mujoco` pins the same unpinned `mujoco`,
+`mujoco-mjx` and `playground`, so it will hit this the next time its image rebuilds.
 
 **Do not name a Flyte task parameter `task`.** It collides with the runner's own
 argument and the run dies before it starts, with `_Runner.run() got multiple values for

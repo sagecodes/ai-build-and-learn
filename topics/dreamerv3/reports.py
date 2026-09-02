@@ -30,7 +30,7 @@ _WARN = "#e17055"
 _TITLE = "DreamerV3 - learning a world model of MuJoCo"
 
 
-def _table(rows: list[tuple[str, str]]) -> str:
+def table(rows: list[tuple[str, str]]) -> str:
     body = ""
     for i, (k, v) in enumerate(rows):
         border = "border-bottom:1px solid #333;" if i < len(rows) - 1 else ""
@@ -41,7 +41,7 @@ def _table(rows: list[tuple[str, str]]) -> str:
     return f'<table style="border-collapse:collapse;width:100%;">{body}</table>'
 
 
-def _panel(title: str, inner: str) -> str:
+def panel(title: str, inner: str) -> str:
     return (
         f'<div style="font-family:monospace;background:{_BG};color:{_TEXT};'
         f'padding:20px;border-radius:8px;">'
@@ -49,11 +49,11 @@ def _panel(title: str, inner: str) -> str:
     )
 
 
-def _heading(text: str) -> str:
+def heading(text: str) -> str:
     return f'<h3 style="color:{_HILITE};font-family:monospace;">{text}</h3>'
 
 
-def _note(text: str) -> str:
+def note(text: str) -> str:
     return (
         f'<p style="color:{_MUTED};font-family:monospace;font-size:12px;'
         f'line-height:1.6;max-width:820px;">{text}</p>'
@@ -69,7 +69,7 @@ def curve(
 ) -> str:
     """(x, y) as an SVG polyline. x is environment steps, y whatever is plotted."""
     if len(points) < 2:
-        return _note(f"{label}: not enough points yet")
+        return note(f"{label}: not enough points yet")
 
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
@@ -97,11 +97,11 @@ def curve(
     )
 
 
-def _video(mp4: bytes, caption: str, max_width: int = 820) -> str:
+def video_html(mp4: bytes, caption: str, max_width: int = 820) -> str:
     import base64
 
     b64 = base64.b64encode(mp4).decode()
-    cap = _note(caption) if caption else ""
+    cap = note(caption) if caption else ""
     return (
         f'<div style="background:{_BG};padding:16px;border-radius:8px;">'
         f'<video src="data:video/mp4;base64,{b64}" controls autoplay loop muted '
@@ -111,7 +111,7 @@ def _video(mp4: bytes, caption: str, max_width: int = 820) -> str:
     )
 
 
-def _filmstrip(stills: list[tuple[int, bytes]], height: int = 190) -> str:
+def filmstrip(stills: list[tuple[int, bytes]], height: int = 190) -> str:
     """Stills across training, oldest left. This is where progress becomes visible.
 
     `image-rendering:pixelated` matters: these are 64 px frames blown up, and letting
@@ -161,23 +161,23 @@ _ROLLOUT_LEGEND = (
 
 def _dream_block(film) -> str:
     got = film.latest.get("dream")
-    strip = _filmstrip(film.thinned("dream"))
+    strip = filmstrip(film.thinned("dream"))
     if not got:
-        return _heading("The dream") + _note(
+        return heading("The dream") + note(
             "No open-loop prediction yet. Dreamer writes one every "
             "<code>run.report_every</code> seconds once the replay buffer has enough "
             "data to sample a batch. If this never fills, the run is on "
             "<code>dmc_proprio</code>: the agent has no image observation, so the "
             "decoder has no image to reconstruct and there is nothing to dream."
         )
-    body = _heading("The dream: what the model thinks happens next")
-    body += _note(_DREAM_LEGEND)
-    body += _video(got["mp4"], f"step {got['step']:,} &middot; {got['probe']}")
+    body = heading("The dream: what the model thinks happens next")
+    body += note(_DREAM_LEGEND)
+    body += video_html(got["mp4"], f"step {got['step']:,} &middot; {got['probe']}")
     if strip:
-        body += "<br/>" + _note(
+        body += "<br/>" + note(
             "The last imagined frame of the first sequence, one per report, oldest on "
             "the left. This strip is the world model learning."
-        ) + _filmstrip(film.thinned("dream"))
+        ) + filmstrip(film.thinned("dream"))
     return body
 
 
@@ -185,20 +185,20 @@ def _rollout_block(film) -> str:
     got = film.latest.get("rollout")
     if not got:
         return ""
-    body = _heading("The reality: the policy in the environment")
-    body += _note(_ROLLOUT_LEGEND)
-    body += _video(got["mp4"], f"step {got['step']:,} &middot; {got['probe']}", 420)
+    body = heading("The reality: the policy in the environment")
+    body += note(_ROLLOUT_LEGEND)
+    body += video_html(got["mp4"], f"step {got['step']:,} &middot; {got['probe']}", 420)
     strip = film.thinned("rollout")
     if len(strip) >= 2:
-        body += "<br/>" + _filmstrip(strip, height=150)
+        body += "<br/>" + filmstrip(strip, height=150)
     return body
 
 
 def _honesty_block(data: dict) -> str:
     """Score and metres travelled, side by side, and what it means if they disagree."""
     score, dist = data["score"], data["distance"]
-    body = _heading("Is it actually walking?")
-    body += _note(
+    body = heading("Is it actually walking?")
+    body += note(
         "The left curve is what the agent is paid. The right is how far the torso got "
         "from where the episode started, in metres, read from the physics and logged "
         "under a <code>log/</code> key so it never enters the observation and the "
@@ -221,7 +221,7 @@ def _honesty_block(data: dict) -> str:
                 else ""
             )
         )
-        body += _note(verdict)
+        body += note(verdict)
     return body
 
 
@@ -252,7 +252,7 @@ def _losses_block(losses: dict[str, list[tuple[float, float]]]) -> str:
         if len(pts) < 2:
             continue
         blocks += curve(pts, f"loss/{key} ({meaning.get(key, '')})", _HILITE) + "<br/>"
-    return blocks or _note("no loss points logged yet")
+    return blocks or note("no loss points logged yet")
 
 
 def _summary_rows(task, config, size, data, extra) -> list[tuple[str, str]]:
@@ -295,7 +295,7 @@ def progress_html(task, config, size, step, total, data, film, secs) -> str:
     ])
     return (
         f"<h2>{_TITLE}</h2>"
-        + _panel("Training", _table(rows))
+        + panel("Training", table(rows))
         + "<br/>"
         + _dream_block(film)
         + "<br/>"
@@ -303,8 +303,8 @@ def progress_html(task, config, size, step, total, data, film, secs) -> str:
         + "<br/>"
         + _honesty_block(data)
         + "<br/>"
-        + _heading("World model")
-        + _panel("Losses", _losses_block(data["losses"]))
+        + heading("World model")
+        + panel("Losses", _losses_block(data["losses"]))
     )
 
 
@@ -333,8 +333,8 @@ def final_html(
     replay_block = ""
     if video:
         replay_block = (
-            _heading("The trained policy, re-rendered")
-            + _note(
+            heading("The trained policy, re-rendered")
+            + note(
                 "The same policy as the rollout above, filmed again at 480x480 so the "
                 "arena is legible. The agent still acts on the 64x64 observation it "
                 "trained on; only the camera resolution changed, so this is a "
@@ -346,7 +346,7 @@ def final_html(
 
     return (
         f"<h2>{_TITLE}</h2>"
-        + _panel("Run summary", _table(rows))
+        + panel("Run summary", table(rows))
         + "<br/>"
         + _dream_block(film)
         + "<br/>"
@@ -355,10 +355,10 @@ def final_html(
         + "<br/>"
         + _honesty_block(data)
         + "<br/>"
-        + _heading("World model")
-        + _panel("Losses", _losses_block(data["losses"]))
+        + heading("World model")
+        + panel("Losses", _losses_block(data["losses"]))
         + "<br/>"
-        + _panel(
+        + panel(
             "Logs",
             f'<details><summary style="cursor:pointer;color:{_MUTED};">training tail'
             f"</summary>"

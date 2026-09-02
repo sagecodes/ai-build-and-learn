@@ -48,7 +48,7 @@ DREAMER_ROOT = "/opt/dreamerv3"
 # NVIDIA_DRIVER_CAPABILITIES=compute,utility). That is the bug that made every Isaac
 # Sim replay come back as 300 black frames; see topics/isaac-sim/README.md. Proprio
 # training needs none of it, but a pixel-space Dreamer run will.
-_GL_APT = (
+GL_APT = (
     "libegl1", "libegl-mesa0", "libgl1", "libgl1-mesa-dri",
     "libgles2", "libglx-mesa0", "libosmesa6",
 )
@@ -74,7 +74,7 @@ SPEC = (
 
 image = (
     flyte.Image.from_debian_base(name="dreamerv3", registry=REGISTRY, platform=PLATFORM)
-    .with_apt_packages("git", "ffmpeg", *_GL_APT)
+    .with_apt_packages("git", "ffmpeg", *GL_APT)
     .with_pip_packages(*SPEC)
     # The patch has to exist inside the build context before it can be applied.
     .with_source_file(

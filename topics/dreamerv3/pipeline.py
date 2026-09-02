@@ -56,12 +56,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import flyte
+import flyte.io
 import flyte.report
 
 # Top level so Flyte bundles these into the pod. `arena` and `launch` are not called
@@ -91,6 +94,53 @@ _DEFAULT_STEPS = 500_000
 # A pixel transition costs ~151 KB in the replay buffer (measured), so upstream's 5e6
 # default would want 750 GB. This keeps the most recent 200k transitions, ~30 GB.
 _REPLAY_SIZE = 200_000
+
+# What has to outlive the pod for a trained agent to be reusable. `config.yaml` and
+# `ckpt` are the hard requirement, and they are exactly what replay.py already loads:
+# it rebuilds the agent from the config, then points `elements.Checkpoint` at the
+# DIRECTORY and lets it resolve which checkpoint to read. `metrics.jsonl` and `scope`
+# ride along because they are small and they are the run's evidence; regenerating them
+# costs another seven hours.
+#
+# Everything else is deliberately left behind, above all the replay buffer. A pixel
+# transition is ~151 KB, so `_REPLAY_SIZE` on disk is about 30 GB, and none of it is
+# needed to load a trained agent. That is the whole reason this stages a subset instead
+# of uploading the logdir.
+_KEEP = ("config.yaml", "ckpt", "metrics.jsonl", "scope")
+
+
+async def _persist(logdir: Path) -> flyte.io.Dir | None:
+    """Copy the reusable part of the logdir somewhere durable and upload it.
+
+    Without this a seven hour run leaves nothing behind but its report: Dreamer writes
+    into `/tmp/dreamer/<task>` and the pod takes that with it when it exits, so the
+    agent that earned the numbers is gone and every later demo has to retrain it.
+
+    Never raises. Training is the expensive part, and a blob store hiccup must not
+    throw away a finished run. Same rule the replay video follows.
+    """
+    # Not cleaned up on purpose. `Dir.from_local` can return a lazily-uploaded handle
+    # whose upload happens after this returns, so deleting the staging directory here
+    # would be deleting the thing being uploaded. The pod is about to be destroyed
+    # anyway, and the staged copy is only the checkpoint, not the 30 GB buffer.
+    staged = Path(tempfile.mkdtemp(prefix="dreamer-model-"))
+    try:
+        for name in _KEEP:
+            src = logdir / name
+            if not src.exists():
+                log.warning("not persisting %s: not in the logdir", name)
+                continue
+            if src.is_dir():
+                shutil.copytree(src, staged / name)
+            else:
+                shutil.copy2(src, staged / name)
+        size = sum(f.stat().st_size for f in staged.rglob("*") if f.is_file())
+        log.info("persisting %.0f MB: %s", size / 1e6,
+                 ", ".join(sorted(p.name for p in staged.iterdir())))
+        return await flyte.io.Dir.from_local(str(staged))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not persist the model, run is still good: %s", exc)
+        return None
 
 
 def _read_metrics(path: Path) -> dict:
@@ -190,8 +240,13 @@ async def train(
     steps: int = _DEFAULT_STEPS,
     envs: int = 4,
     replay_steps: int = 600,
-) -> dict:
+    save_every: int = 900,
+) -> tuple[dict, flyte.io.Dir | None]:
     """Train DreamerV3 on a DMC task and report what the world model learned.
+
+    Returns the run summary and the trained agent. The second half is what makes a run
+    reusable: `config.yaml` plus `ckpt`, which is everything replay.py needs to load
+    the policy again without retraining it.
 
     Defaults are the flagship: the custom `arena` domain (see arena.py) learned from
     pixels, at the 12M parameter preset.
@@ -206,6 +261,11 @@ async def train(
                step 16,000. Training is the bottleneck here, not the simulator, so
                fewer environments costs no throughput and gives the live report a
                score and a rollout video four times sooner.
+      save_every  seconds between checkpoint writes, upstream's `run.save_every`.
+               Worth passing explicitly because the default is 900, so any run
+               shorter than fifteen minutes finishes having written no checkpoint at
+               all, and `_persist` then uploads a directory with no agent in it. That
+               failure is silent: the run succeeds and the Dir exists.
     """
     here = Path(__file__).parent.resolve()
     logdir = Path("/tmp/dreamer") / task_id
@@ -224,6 +284,7 @@ async def train(
         # is the one that governs how often a new dream clip appears.
         "--run.log_every", "60",
         "--run.report_every", "180",
+        "--run.save_every", str(save_every),
         "--replay.size", str(_REPLAY_SIZE),
         # jax preallocates 75% of device memory at startup, and on a GB10 device memory
         # IS system memory: measured at 90 GB reserved on the host for a 10M parameter
@@ -320,6 +381,7 @@ async def train(
     best = max((y for _, y in score), default=0.0)
     far = max((y for _, y in data["distance"]), default=0.0)
     log.info("trained %s for %s steps, best score %.1f", task_id, steps, best)
+    model = await _persist(logdir)
     return {
         "task": task_id,
         "config": f"{config} {size}",
@@ -334,7 +396,7 @@ async def train(
         "dream_clips": film.latest.get("dream", {}).get("count", 0),
         "loss_keys": sorted(data["losses"]),
         "clip": clip_probe,
-    }
+    }, model
 
 
 @orch_env.task(report=True)
@@ -345,14 +407,16 @@ async def dream(
     steps: int = _DEFAULT_STEPS,
     envs: int = 4,
     replay_steps: int = 600,
-) -> dict:
+    save_every: int = 900,
+) -> tuple[dict, flyte.io.Dir | None]:
     """Entry point. CPU-only orchestrator so it cannot deadlock its own GPU child."""
-    result = await train(
+    result, model = await train(
         task_id=task_id, config=config, size=size, steps=steps,
-        envs=envs, replay_steps=replay_steps,
+        envs=envs, replay_steps=replay_steps, save_every=save_every,
     )
     log.info("result: %s", result)
-    return result
+    log.info("model: %s", model.path if model else "not persisted")
+    return result, model
 
 
 if __name__ == "__main__":
