@@ -178,6 +178,58 @@ Two halves, trained together, doing different jobs. The world model learns what 
 world does. The actor and critic learn what to do about it, without ever touching the
 world.
 
+### What we wrote, and what it worked out
+
+Worth drawing this line before anything else, because every piece below sits on one
+side of it.
+
+**We wrote the goal, by hand, in full.** `ArenaWalker` inherits `get_reward` from
+dm_control's `PlanarWalker` and never overrides it, so the objective is the stock
+walker reward: three quantities read straight out of the physics engine, hand-picked
+and hand-weighted.
+
+```python
+standing    = tolerance(torso_height,        bounds=(1.2, inf))   # be tall
+upright     = (1 + torso_upright) / 2                             # point upwards
+move_reward = tolerance(horizontal_velocity, bounds=(1.0, inf))   # travel at 1 m/s
+
+reward = stand_reward * (5 * move_reward + 1) / 6
+```
+
+That is the complete specification of "walking". Note what it does not mention: legs,
+feet, stepping, gait, balance, the posts, the balls. Note too that it reads `physics`
+rather than the image, so it is computed from privileged simulator state the agent is
+never shown. Even the shaping is a human decision: `stand_reward` *multiplies*, which
+encodes the curriculum "you cannot walk before you can stand".
+
+Everything else is the model's problem.
+
+| we defined | the agent worked out |
+|---|---|
+| the reward function, over simulator state | what reward *looks like*, from 64x64 pixels |
+| a body with 6 torques | what a torque does to a limb |
+| the world, as an XML file | the world's dynamics, well enough to run it forward |
+| that upright and moving pays | a gait that is upright and moving |
+| 15 steps of imagination per latent | which action sequences are worth imagining |
+
+The third row is what the demo is built around. Nothing tells the model that balls
+exist or that balls roll; having to redraw the frame is the only reason it ever finds
+out.
+
+Two consequences of that split, both of which catch people out:
+
+**The agent never sees the reward function.** It receives one scalar per step and has
+to learn to predict that scalar from pixels. The actor then maximises *the learned
+prediction*, never the real reward, because inside an imagined rollout there is no
+MuJoCo left to ask. An agent with a bad `rew` curve is chasing a hallucinated goal.
+
+**The world model does not know the goal at all.** It is reward-agnostic, and left to
+itself would model a walker flailing on the floor with great accuracy and be perfectly
+satisfied. That is precisely what makes the `back` task interesting: flip one sign in
+`horizontal_velocity` and the world model is still exactly right while the actor is
+not merely useless but maximally wrong. `transfer.py` freezes the first and retrains
+the second to find out how much of the original cost was which.
+
 ### What the agent actually sees
 
 Before any of the mechanism, the input. The flagship run is
