@@ -75,8 +75,32 @@ def record(logdir: Path, steps: int = 500, size: tuple[int, int] = (480, 480)):
     # holds timestamped checkpoints plus a 22-byte `latest` pointer file; picking the
     # last entry by name grabs that pointer and dies on `assert exists(path)`, because
     # it is a file describing a checkpoint rather than one.
+    class _ModulesOnly:
+        """Restore module parameters and skip the optimiser state.
+
+        A checkpoint written by transfer.py was saved by an agent whose optimiser
+        covers only the trainable modules, so its `opt/state/...` entries are a strict
+        subset of what a normally-constructed agent expects. `agent.load` without a
+        regex runs `chex.assert_trees_all_equal_shapes` over everything and dies on
+        that difference, with a several-thousand-line tree diff for a message.
+
+        Nothing here needs the optimiser: this only ever runs the policy. So load the
+        parameters and leave the moments behind, which works for both kinds of run.
+        """
+
+        def __init__(self, agent):
+            self.agent = agent
+
+        def load(self, data):
+            self.agent.load(data, regex=r"^(?!opt/)")
+
+        def save(self):
+            # elements.Checkpoint requires both halves of the interface even when only
+            # one is used. Nothing here ever writes a checkpoint.
+            return self.agent.save()
+
     cp = elements.Checkpoint(logdir / "ckpt")
-    cp.agent = agent
+    cp.agent = _ModulesOnly(agent)
     cp.load(keys=["agent"])
 
     driver = embodied.Driver([bind(dv3main.make_env, config, 0)], parallel=False)
@@ -93,13 +117,19 @@ def record(logdir: Path, steps: int = 500, size: tuple[int, int] = (480, 480)):
     # from the agent, so a policy cannot influence it except by actually moving.
     start = [None]
     far = [0.0]
+    # `back` is rewarded for travelling along -x, so measure progress in whichever
+    # direction the task asked for. Taken from the task name rather than from the
+    # environment because this reads the same config the agent was trained with, and
+    # a run whose video reported 0.0 m for a policy that walked the length of the
+    # track would be blamed on the camera rather than on the sign.
+    direction = -1.0 if str(config.task).endswith("_back") else 1.0
 
     def on_step(tran, _worker):
         score[0] += float(tran["reward"])
         x = float(physics.named.data.xpos["torso", "x"])
         if start[0] is None or tran["is_first"]:
             start[0] = x
-        far[0] = max(far[0], x - start[0])
+        far[0] = max(far[0], direction * (x - start[0]))
         if len(frames) < steps:
             frames.append(physics.render(*size, camera_id=0))
 

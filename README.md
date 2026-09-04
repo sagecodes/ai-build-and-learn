@@ -2,9 +2,9 @@
 
 Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new topic and learn by building together.
 
-> **Up next: Open-Source Text-to-Speech: Natural Voices & Voice Cloning** (2026-07-31)
-> Turn text into speech with open-source TTS: natural voices, voice cloning, and multilingual output.
-> [RSVP](https://luma.com/oxhti59k) | [Join the Slack](https://slack.flyte.org/)
+> **Up next: World Models with DreamerV3** (2026-09-04)
+> An intro to world models: DreamerV3 learns a compact model of its environment and trains a policy inside imagined rollouts. Lightweight and RL-connected.
+> [RSVP](https://luma.com/dc8ln5hh) | [Join the Slack](https://slack.flyte.org/)
 
 ## Upcoming:
 
@@ -16,46 +16,6 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
-<tr><td>
-      <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Open-Source Text-to-Speech: Natural Voices &amp; Voice Cloning</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-07-31</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/text-to-speech">code</a> • <a href="https://luma.com/oxhti59k">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Turn text into speech with open-source TTS: natural voices, voice cloning, and multilingual output.
-</div></td></tr>
-<tr><td>
-      <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Open-Source Music Generation: Text-to-Music &amp; Lyrics-to-Song</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-08-14</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/music-generation">code</a> • <a href="https://luma.com/2emw9rxu">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Generate music and audio with open-source models: text-to-music and full lyrics-to-song with vocals.
-</div></td></tr>
-<tr><td>
-      <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Reinforcement Learning in MuJoCo</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-08-21</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/rl-mujoco">code</a> • <a href="https://luma.com/ryu3qgtm">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Train reinforcement learning agents to control simulated robots in MuJoCo, the open-source physics engine used as a standard RL benchmark.
-</div></td></tr>
-<tr><td>
-      <div style="padding: 8px 0;">
-        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Reinforcement Learning in NVIDIA Isaac Sim: Physical AI &amp; Sim-to-Real</strong></div>
-        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-08-28</div>
-        <div style="font-size: 13px; color: #666;">
-          <a href="topics/isaac-sim">code</a> • <a href="https://luma.com/8nf6v63n">register</a>
-        </div>
-      </div>
-    </td><td><div style="padding: 8px 0; line-height: 1.5;">Step up from MuJoCo to NVIDIA Isaac Sim: GPU-accelerated, photorealistic robot simulation for physical AI and sim-to-real transfer.
-</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>World Models with DreamerV3</strong></div>
@@ -99,6 +59,46 @@ Welcome to AI Build & Learn, a weekly AI engineering stream where we pick a new 
 </tr>
 </thead>
 <tbody>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Reinforcement Learning in NVIDIA Isaac Sim: Physical AI &amp; Sim-to-Real</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-08-28</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/isaac-sim">code</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Step up from MuJoCo to NVIDIA Isaac Sim: GPU-accelerated, photorealistic robot simulation for physical AI and sim-to-real transfer.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Reinforcement Learning in MuJoCo</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-08-21</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/rl-mujoco">code</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Train reinforcement learning agents to control simulated robots in MuJoCo, the open-source physics engine used as a standard RL benchmark.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Open-Source Music Generation: Text-to-Music &amp; Lyrics-to-Song</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-08-14</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/music-generation">code</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Generate music and audio with open-source models: text-to-music and full lyrics-to-song with vocals.
+</div></td></tr>
+<tr><td>
+      <div style="padding: 8px 0;">
+        <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Open-Source Text-to-Speech: Natural Voices &amp; Voice Cloning</strong></div>
+        <div style="color: #666; font-size: 13px; margin-bottom: 4px;">2026-07-31</div>
+        <div style="font-size: 13px; color: #666;">
+          <a href="topics/text-to-speech">code</a>
+        </div>
+      </div>
+    </td><td><div style="padding: 8px 0; line-height: 1.5;">Turn text into speech with open-source TTS: natural voices, voice cloning, and multilingual output.
+</div></td></tr>
 <tr><td>
       <div style="padding: 8px 0;">
         <div style="font-size: 16px; line-height: 1.3; margin-bottom: 6px;"><strong>Open-Source Video Generation: Diffusion &amp; Transformer Models</strong></div>

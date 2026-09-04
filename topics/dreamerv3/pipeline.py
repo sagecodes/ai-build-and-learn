@@ -72,9 +72,11 @@ import flyte.report
 # launch.py, but neither file would reach the pod if nothing imported it.
 import arena  # noqa: F401
 import launch  # noqa: F401
+import openloop
 import replay
 import reports
 import scopevid
+import transfer
 from config import DREAMER_ROOT, gpu_env, orch_env
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
@@ -109,7 +111,47 @@ _REPLAY_SIZE = 200_000
 _KEEP = ("config.yaml", "ckpt", "metrics.jsonl", "scope")
 
 
-async def _persist(logdir: Path) -> flyte.io.Dir | None:
+def _latest_ckpt(ckptdir: Path) -> Path:
+    """The checkpoint `elements.Checkpoint` would pick, resolved by hand and repaired.
+
+    The directory holds timestamped checkpoints plus a 22-byte `latest` file naming
+    one of them. Sorting the entries and taking the last grabs that pointer file, not
+    a checkpoint, which is the same trap replay.py documents.
+
+    The repair: elements decides a checkpoint exists by looking for a ZERO-BYTE `done`
+    marker beside the pickles (`elements/checkpoint.py`: `exists()` is
+    `(path / 'done').exists()`), and every loader asserts on it before reading
+    anything. A checkpoint that has been through a blob store can arrive without that
+    marker while every byte-carrying file survives, and the resulting failure is an
+    AssertionError whose entire message is a path that looks perfectly correct. So if
+    the payload is here and only the marker is missing, put it back and say so.
+    """
+    pointer = ckptdir / "latest"
+    target = None
+    if pointer.exists():
+        named = ckptdir / pointer.read_text().strip()
+        if named.is_dir():
+            target = named
+    if target is None:
+        stamps = sorted(p for p in ckptdir.iterdir() if p.is_dir())
+        if not stamps:
+            raise FileNotFoundError(f"no checkpoint in {ckptdir}")
+        target = stamps[-1]
+
+    contents = sorted(p.name for p in target.iterdir())
+    log.info("checkpoint %s contains %s", target.name, contents)
+    if "done" not in contents:
+        if not (target / "agent.pkl").exists():
+            raise FileNotFoundError(
+                f"{target} has neither a done marker nor an agent.pkl: {contents}")
+        log.warning(
+            "restoring the zero-byte 'done' marker in %s: the payload survived the "
+            "round trip and the marker did not", target)
+        (target / "done").write_bytes(b"")
+    return target
+
+
+async def _persist(logdir: Path) -> tuple[flyte.io.Dir | None, str]:
     """Copy the reusable part of the logdir somewhere durable and upload it.
 
     Without this a seven hour run leaves nothing behind but its report: Dreamer writes
@@ -118,6 +160,12 @@ async def _persist(logdir: Path) -> flyte.io.Dir | None:
 
     Never raises. Training is the expensive part, and a blob store hiccup must not
     throw away a finished run. Same rule the replay video follows.
+
+    Returns the Dir and a one-line status that goes into the run summary. The status
+    is not decoration. The 2026-08-31 flagship run predates this function, and the way
+    that was discovered was by decoding its outputs and finding a bare summary dict
+    with no blob in it, months later, when the model was wanted. A run that failed to
+    save its agent should say so in its own output, at the time, in words.
     """
     # Not cleaned up on purpose. `Dir.from_local` can return a lazily-uploaded handle
     # whose upload happens after this returns, so deleting the staging directory here
@@ -135,12 +183,21 @@ async def _persist(logdir: Path) -> flyte.io.Dir | None:
             else:
                 shutil.copy2(src, staged / name)
         size = sum(f.stat().st_size for f in staged.rglob("*") if f.is_file())
-        log.info("persisting %.0f MB: %s", size / 1e6,
-                 ", ".join(sorted(p.name for p in staged.iterdir())))
-        return await flyte.io.Dir.from_local(str(staged))
+        names = sorted(p.name for p in staged.iterdir())
+        log.info("persisting %.0f MB: %s", size / 1e6, ", ".join(names))
+        # `ckpt` is the only member that makes the upload worth anything. It goes
+        # missing whenever the run was shorter than `save_every`, and the resulting
+        # Dir looks perfectly healthy: it exists, it has a URI, it has a config. The
+        # emptiness is only discovered by trying to load an agent out of it.
+        if "ckpt" not in names:
+            log.error("NO CHECKPOINT to persist: staged %s. The run was probably "
+                      "shorter than --save_every, so Dreamer never wrote one.", names)
+            return None, f"no ckpt persisted (staged {', '.join(names) or 'nothing'})"
+        model = await flyte.io.Dir.from_local(str(staged))
+        return model, f"{size / 1e6:.0f} MB: {', '.join(names)}"
     except Exception as exc:  # noqa: BLE001
         log.warning("could not persist the model, run is still good: %s", exc)
-        return None
+        return None, f"persist failed: {exc}"
 
 
 def _read_metrics(path: Path) -> dict:
@@ -241,6 +298,9 @@ async def train(
     envs: int = 4,
     replay_steps: int = 600,
     save_every: int = 900,
+    entry: str = "launch.py",
+    model: flyte.io.Dir | None = None,
+    frozen_regex: str = "",
 ) -> tuple[dict, flyte.io.Dir | None]:
     """Train DreamerV3 on a DMC task and report what the world model learned.
 
@@ -273,7 +333,7 @@ async def train(
     metrics = logdir / "metrics.jsonl"
 
     argv = [
-        sys.executable, str(here / "launch.py"),
+        sys.executable, str(here / entry),
         "--configs", config, size,
         "--task", task_id,
         "--logdir", str(logdir),
@@ -291,6 +351,16 @@ async def train(
         # model. In a pod with a cgroup limit that is an instant kill.
         "--jax.prealloc", "False",
     ]
+    if model is not None:
+        # Start from a previously trained agent instead of from noise. Which of its
+        # parameters actually get restored is `frozen_regex`, and with entry
+        # transfer.py the same set is also excluded from the optimiser, so "restored"
+        # and "frozen" are the same list by construction. See transfer.py.
+        src = Path(await model.download())
+        argv += [
+            "--run.from_checkpoint", str(_latest_ckpt(src / "ckpt")),
+            "--run.from_checkpoint_regex", frozen_regex,
+        ]
     log.info("launching: %s", " ".join(argv))
 
     t0 = time.monotonic()
@@ -316,7 +386,12 @@ async def train(
         # the whole run, so the only way to see whether a seven hour job is alive is
         # to open the report. Dreamer's terminal output is one banner block per log
         # flush, so this is a handful of lines a minute, not a firehose.
-        if line.startswith(("---", "Start", "Logdir", "Error", "Traceback")) or (
+        # `frozen:`/`trained:` are transfer.py announcing which modules the optimiser
+        # covers, which is the one line that says the freeze took effect. Without it
+        # the only confirmation is train/opt/param_count buried in metrics.jsonl.
+        if line.startswith(
+            ("---", "Start", "Logdir", "Error", "Traceback", "frozen:", "trained:")
+        ) or (
             " / " in line and "score" in line
         ):
             print(line, flush=True)
@@ -381,7 +456,8 @@ async def train(
     best = max((y for _, y in score), default=0.0)
     far = max((y for _, y in data["distance"]), default=0.0)
     log.info("trained %s for %s steps, best score %.1f", task_id, steps, best)
-    model = await _persist(logdir)
+    model, persisted = await _persist(logdir)
+    log.info("persisted: %s", persisted)
     return {
         "task": task_id,
         "config": f"{config} {size}",
@@ -396,6 +472,9 @@ async def train(
         "dream_clips": film.latest.get("dream", {}).get("count", 0),
         "loss_keys": sorted(data["losses"]),
         "clip": clip_probe,
+        # Surfaced in the run's own output so "did this run leave a usable agent
+        # behind" is answerable without decoding a protobuf.
+        "persisted": persisted,
     }, model
 
 
@@ -417,6 +496,105 @@ async def dream(
     log.info("result: %s", result)
     log.info("model: %s", model.path if model else "not persisted")
     return result, model
+
+
+@gpu_env.task(report=True)
+async def probe(
+    model: flyte.io.Dir,
+    batch: int = 16,
+    context: int = 16,
+    horizon: int = 32,
+) -> dict:
+    """Measure how far a trained world model can imagine, and whether it obeys actions.
+
+    Needs no training and no environment steps beyond the short rollout it collects
+    for context, so this is minutes against the hours every other task here costs.
+    `batch` is larger than the default: every number is a mean over the batch and the
+    variance between batches is visible at 4.
+    """
+    src = Path(await model.download())
+    # Called for its repair side effect before anything tries to load: openloop.run
+    # lets `elements.Checkpoint` resolve `latest` itself, and that resolution asserts
+    # on the zero-byte marker this restores. See _latest_ckpt.
+    _latest_ckpt(src / "ckpt")
+    mets = openloop.run(src, batch=batch, context=context, horizon=horizon)
+    summary = openloop._summarise(mets, context)
+    log.info("dream analysis:\n%s", summary)
+
+    out = Path(tempfile.mkdtemp(prefix="dream-"))
+    videos = openloop.save_videos(mets, out)
+    video_html = ""
+    if videos:
+        mp4 = videos[0].read_bytes()
+        video_html = replay.video_html(
+            mp4, f"{len(mp4) / 1024:.0f} KB &middot; {replay.probe(mp4)}")
+
+    # Curves are (x, y) with x the imagination step, which is what the report plots
+    # against. Everything arrives from jax as an array, so index order IS step order.
+    fidelity = {}
+    for key, value in mets.items():
+        arr = [float(v) for v in list(value)] if getattr(value, "ndim", 0) == 1 else None
+        if arr is None:
+            continue
+        pts = [(i + 1, v) for i, v in enumerate(arr)]
+        if key.startswith("fidelity/mae/"):
+            fidelity[f"mae/{key.split('/')[-1]}"] = pts
+        elif key.startswith("fidelity/frozen_mae/"):
+            fidelity[f"frozen/{key.split('/')[-1]}"] = pts
+        elif key == "fidelity/reward_mae":
+            fidelity["reward"] = pts
+    # The floor is a scalar; drawn as a flat line so it reads as a threshold.
+    for key, value in mets.items():
+        if key.startswith("fidelity/floor/") and fidelity:
+            n = max(len(v) for v in fidelity.values())
+            fidelity[f"floor/{key.split('/')[-1]}"] = [
+                (i + 1, float(value)) for i in range(n)]
+
+    flyte.report.replace(
+        reports.probe_html(model.path or "model", summary, fidelity, video_html),
+        do_flush=True,
+    )
+    spread = {k.split("/")[1]: float(v) for k, v in mets.items()
+              if k.startswith("dream/") and k.endswith("/reward")}
+    return {
+        "summary": summary,
+        "horizon": horizon,
+        "context": context,
+        "batch": batch,
+        "action_response": round(max(spread.values()) - min(spread.values()), 4)
+        if spread else 0.0,
+    }
+
+
+@orch_env.task(report=True)
+async def retask(
+    model: flyte.io.Dir,
+    task_id: str = "dmc_arena_walk",
+    steps: int = 200_000,
+    config: str = "dmc_vision",
+    size: str = "size12m",
+    envs: int = 4,
+    replay_steps: int = 600,
+    save_every: int = 900,
+) -> tuple[dict, flyte.io.Dir | None]:
+    """Relearn a task with the world model frozen. The transfer half of the demo.
+
+    `model` is the Dir a previous `dream` run persisted. Its encoder, dynamics,
+    decoder and continuation head are restored and frozen; the actor, critic and
+    reward head start from scratch. See transfer.py for why that split.
+
+    The number this run exists to produce is steps-to-a-given-return, read against the
+    from-scratch curve for the same task. `steps` therefore defaults well below the
+    500k a from-scratch run needs: if the transfer is worth anything it will not need
+    them, and if it needs more than this the result is already negative.
+    """
+    result, out = await train(
+        task_id=task_id, config=config, size=size, steps=steps, envs=envs,
+        replay_steps=replay_steps, save_every=save_every,
+        entry="transfer.py", model=model, frozen_regex=transfer.FROZEN_REGEX,
+    )
+    log.info("transfer result: %s", result)
+    return result, out
 
 
 if __name__ == "__main__":

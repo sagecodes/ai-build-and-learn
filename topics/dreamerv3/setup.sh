@@ -27,15 +27,17 @@ fi
 git -C "$DREAMER_ROOT" fetch --depth=1 origin "$DREAMER_COMMIT" 2>/dev/null || git -C "$DREAMER_ROOT" fetch origin
 git -C "$DREAMER_ROOT" checkout -q "$DREAMER_COMMIT"
 
-echo "==> patch: jax.jit keyword-only arguments"
-# checkout above resets the tree, so the patch always applies to a clean checkout.
+# checkout above resets the tree, so patches always apply to a clean checkout.
 # --check first so a future upstream bump fails loudly instead of half-applying.
-if git -C "$DREAMER_ROOT" apply --check "$HERE/patches/0001-jax-jit-keyword-only.patch" 2>/dev/null; then
-  git -C "$DREAMER_ROOT" apply "$HERE/patches/0001-jax-jit-keyword-only.patch"
-  echo "    applied"
-else
-  echo "    already applied, or upstream moved: verify before trusting this tree"
-fi
+for patch in "$HERE"/patches/*.patch; do
+  echo "==> patch: $(basename "$patch")"
+  if git -C "$DREAMER_ROOT" apply --check "$patch" 2>/dev/null; then
+    git -C "$DREAMER_ROOT" apply "$patch"
+    echo "    applied"
+  else
+    echo "    already applied, or upstream moved: verify before trusting this tree"
+  fi
+done
 
 echo "==> verify"
 PYTHONPATH="$DREAMER_ROOT" "$HERE/.venv/bin/python" - <<'PY'
