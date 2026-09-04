@@ -76,11 +76,8 @@ image = (
     flyte.Image.from_debian_base(name="dreamerv3", registry=REGISTRY, platform=PLATFORM)
     .with_apt_packages("git", "ffmpeg", *GL_APT)
     .with_pip_packages(*SPEC)
-    # The patch has to exist inside the build context before it can be applied.
-    .with_source_file(
-        Path(__file__).parent / "patches" / "0001-jax-jit-keyword-only.patch",
-        "/opt/dv3.patch",
-    )
+    # The patches have to exist inside the build context before they can be applied.
+    .with_source_folder(Path(__file__).parent / "patches", "/opt/patches")
     # Clone at the pinned commit and patch it in the image, so no task pod ever clones
     # at runtime and every pod runs byte-identical agent code. `git apply --check`
     # first: if a future commit bump breaks the patch, the BUILD fails loudly instead
@@ -88,8 +85,10 @@ image = (
     .with_commands([
         f"git clone {DREAMER_REPO} {DREAMER_ROOT}",
         f"git -C {DREAMER_ROOT} checkout {DREAMER_COMMIT}",
-        f"git -C {DREAMER_ROOT} apply --check /opt/dv3.patch",
-        f"git -C {DREAMER_ROOT} apply /opt/dv3.patch",
+        # One `git apply` per file, --check first, so a future upstream bump names
+        # the patch that broke instead of failing as an opaque block.
+        f"for p in /opt/patches/*.patch; do git -C {DREAMER_ROOT} apply --check $p && "
+        f"git -C {DREAMER_ROOT} apply $p; done",
     ])
     # PYTHONPATH: dreamerv3 is a source checkout, not a pip install, so the tasks find
     # it the same way the host setup does.

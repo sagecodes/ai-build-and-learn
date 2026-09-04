@@ -250,6 +250,11 @@ class ArenaWalker(walker.PlanarWalker):
     rests on.
     """
 
+    # Which way along the track this task pays to travel. Only `back` flips it. It
+    # exists so that "metres travelled" means the same thing for every task in the
+    # domain: progress in the direction the reward asked for, not progress along +x.
+    _direction = 1
+
     def initialize_episode(self, physics):
         # Stock randomisation first: it walks every joint in the model, so it must run
         # before the ball positions are set or it would clobber them. It leaves the
@@ -283,16 +288,65 @@ class ArenaWalker(walker.PlanarWalker):
         `log/x_position` is the honesty check. Episode return can climb through
         postures that score well without travelling, and the max of this over an
         episode says in metres whether the walker actually went anywhere.
+
+        It is signed by `_direction`, so for `back` a walker correctly reversing down
+        the track logs a positive number. Without that the report aggregates it as
+        `epstats/log/x_position/max` and a perfect backwards run would show ~0 metres
+        travelled, which reads exactly like a policy that never left the spot.
         """
         obs = super().get_observation(physics)
-        obs["log/x_position"] = np.float64(physics.torso_x())
+        obs["log/x_position"] = np.float64(self._direction * physics.torso_x())
         obs["log/ball_distance"] = np.float64(physics.nearest_ball_distance())
         return obs
 
 
-def _make(move_speed, time_limit, random, environment_kwargs):
+class _ReversedPhysics:
+    """`ArenaPhysics` with the sign of forward travel flipped, and nothing else.
+
+    Delegates every attribute to the real physics except `horizontal_velocity`. That
+    is what lets `BackwardWalker.get_reward` call dm_control's own implementation
+    rather than restating it: the standing term, the tolerance margins, the linear
+    sigmoid and the `(5 * move + 1) / 6` blend are literally the stock code, and the
+    entire difference between `walk` and `back` is one minus sign.
+
+    Reimplementing `get_reward` instead would work and would be shorter, but it would
+    quietly fork the reward. The stock reward is the reason `walk` can be compared to
+    published `walker_walk` numbers, and the transfer experiment needs `back` to be
+    the same task with the goal reversed rather than a different task that happens to
+    involve walking.
+    """
+
+    def __init__(self, physics):
+        self._physics = physics
+
+    def __getattr__(self, name):
+        # Only reached for attributes this class does not define, so
+        # `horizontal_velocity` below wins and everything else passes through.
+        return getattr(self._physics, name)
+
+    def horizontal_velocity(self):
+        return -self._physics.horizontal_velocity()
+
+
+class BackwardWalker(ArenaWalker):
+    """Same body, same world, same reward function, opposite direction.
+
+    The point of this task is the world model transfer: the physics of walking is
+    byte-for-byte what `walk` already learned, so a world model trained on `walk`
+    should predict `back` almost perfectly while the policy trained alongside it is
+    exactly wrong. That isolates what a world model actually buys you. Changing the
+    dynamics as well as the goal would confound the two.
+    """
+
+    _direction = -1
+
+    def get_reward(self, physics):
+        return super().get_reward(_ReversedPhysics(physics))
+
+
+def _make(move_speed, time_limit, random, environment_kwargs, task_cls=ArenaWalker):
     physics = ArenaPhysics.from_xml_string(*get_model_and_assets())
-    task = ArenaWalker(move_speed=move_speed, random=random)
+    task = task_cls(move_speed=move_speed, random=random)
     return control.Environment(
         physics, task, time_limit=time_limit,
         control_timestep=_CONTROL_TIMESTEP, **(environment_kwargs or {}),
@@ -303,6 +357,14 @@ def _make(move_speed, time_limit, random, environment_kwargs):
 def walk(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None):
     """Walk at 1 m/s down a track with posts and kickable balls."""
     return _make(_WALK_SPEED, time_limit, random, environment_kwargs)
+
+
+@SUITE.add("benchmarking")
+def back(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None):
+    """Walk at 1 m/s the OTHER way. Stock reward with the velocity sign flipped."""
+    return _make(
+        _WALK_SPEED, time_limit, random, environment_kwargs, task_cls=BackwardWalker,
+    )
 
 
 @SUITE.add("benchmarking")

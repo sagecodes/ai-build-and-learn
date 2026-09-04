@@ -178,6 +178,55 @@ Two halves, trained together, doing different jobs. The world model learns what 
 world does. The actor and critic learn what to do about it, without ever touching the
 world.
 
+### What the agent actually sees
+
+Before any of the mechanism, the input. The flagship run is
+`--configs dmc_vision size12m --task dmc_arena_walk`, and `dmc_vision` sets
+`env.dmc.proprio: False`. Together with `pixels_only` in launch.py, the observation
+dict handed to the agent on every step is exactly this:
+
+```
+  image            (64, 64, 3) uint8     the camera, tracking the walker
+  reward           scalar
+  is_first / is_last / is_terminal       episode flags
+```
+
+Then upstream narrows it once more. From `dreamerv3/agent.py`:
+
+```python
+exclude = ('is_first', 'is_last', 'is_terminal', 'reward')
+enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
+```
+
+**The encoder's only input is the image.** Reward is not perceived, it is predicted: it
+enters the graph solely as the target of the reward head's loss. The 9 velocities and
+14 orientations that `ArenaPhysics` goes to such lengths to preserve do not exist on
+this path at all, and neither do `log/x_position` or `log/ball_distance`, which
+embodied strips one layer above the agent. Out the other side come 6 continuous joint
+torques. That is the whole interface.
+
+So nothing in the training signal names a leg, a ball or a post. The only pressure on
+the encoder is *compress this frame well enough to redraw it and predict its reward*,
+and everything the model ends up knowing about the world fell out of that one demand.
+It has to spend latent capacity on the balls because reconstruction is scored on them,
+which is why they are in the domain at all: see
+[The arena](#the-arena-a-world-with-things-in-it).
+
+One consequence is worth stating before the diagrams rather than after:
+
+```
+   pixels ──► encoder ──► z(t) ──┐
+                                 ├──► ACTOR ──► torques
+                         h(t) ──►┘
+
+   the policy is a function of the latent, never of the image
+```
+
+The actor maps `(h, z)` to actions and has never been shown a pixel. Pixels reach it
+only through the encoder that builds `z`, and its gradient never flows back through a
+real frame; it flows through 15 steps of *imagined* latent dynamics. DreamerV3 is
+model-free RL on a compact learned state, run inside a simulator it wrote itself.
+
 ### Half one: the world model, an RSSM
 
 The world model is a **Recurrent State-Space Model**. It never works in pixels. It

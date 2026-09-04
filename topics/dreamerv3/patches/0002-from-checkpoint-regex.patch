@@ -1,0 +1,12 @@
+diff --git a/dreamerv3/configs.yaml b/dreamerv3/configs.yaml
+index 786b67e..ce97039 100644
+--- a/dreamerv3/configs.yaml
++++ b/dreamerv3/configs.yaml
+@@ -57,6 +57,7 @@ defaults:
+     eval_eps: 1
+     report_batches: 1
+     from_checkpoint: ''
++    from_checkpoint_regex: ''
+     episode_timeout: 180
+     actor_addr: 'localhost:{auto}'
+     replay_addr: 'localhost:{auto}'

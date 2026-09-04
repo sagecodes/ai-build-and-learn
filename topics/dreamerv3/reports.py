@@ -97,6 +97,62 @@ def curve(
     )
 
 
+def curves(
+    series: list[tuple[str, list[tuple[float, float]], str]],
+    label: str,
+    xlabel: str = "",
+    w: int = 760,
+    h: int = 240,
+) -> str:
+    """Several polylines on ONE pair of axes, with a legend.
+
+    `curve` above plots a single series against its own min and max, which is right
+    for a training curve read alone. The fidelity plot is a comparison: imagination
+    error only means something beside the decoder floor it can never go below and the
+    frozen-frame baseline it is trying to beat. Three separately-scaled plots would
+    make the one comparison the reader needs impossible, so these share an axis.
+    """
+    drawn = [(n, pts, c) for n, pts, c in series if len(pts) >= 2]
+    if not drawn:
+        return note(f"{label}: not enough points yet")
+
+    allx = [x for _, pts, _ in drawn for x, _ in pts]
+    ally = [y for _, pts, _ in drawn for _, y in pts]
+    x0, x1 = min(allx), max(allx)
+    # Anchor at zero: these are error magnitudes, and a floating baseline would make a
+    # small absolute difference look like a large one.
+    y0, y1 = 0.0, max(ally)
+    xspan = (x1 - x0) or 1.0
+    yspan = (y1 - y0) or 1.0
+    pad = 40
+
+    body = []
+    for i, (name, pts, colour) in enumerate(drawn):
+        poly = " ".join(
+            f"{pad + (x - x0) / xspan * (w - 2 * pad):.1f},"
+            f"{h - pad - (y - y0) / yspan * (h - 2 * pad):.1f}"
+            for x, y in pts
+        )
+        body.append(
+            f'<polyline points="{poly}" fill="none" stroke="{colour}" stroke-width="2"/>'
+        )
+        body.append(
+            f'<text x="{pad + 10 + i * 150}" y="{h - 14}" fill="{colour}" '
+            f'font-size="11">{name}</text>'
+        )
+    return (
+        f'<div style="background:{_BG};padding:12px 16px;border-radius:8px;">'
+        f'<svg viewBox="0 0 {w} {h}" style="width:100%;max-width:{w}px;background:{_PANEL};'
+        f'border-radius:4px;" font-family="monospace">'
+        + "".join(body)
+        + f'<text x="{pad}" y="16" fill="{_HILITE}" font-size="12">{label}</text>'
+        f'<text x="{pad}" y="30" fill="{_MUTED}" font-size="11">0 to {y1:.3g}</text>'
+        f'<text x="{w - pad}" y="16" fill="{_MUTED}" font-size="11" '
+        f'text-anchor="end">{xlabel}</text>'
+        f"</svg></div>"
+    )
+
+
 def video_html(mp4: bytes, caption: str, max_width: int = 820) -> str:
     import base64
 
@@ -366,3 +422,60 @@ def final_html(
             f'border-radius:4px;overflow-x:auto;">{logs}</pre></details>',
         )
     )
+
+
+_FIDELITY_LEGEND = (
+    "How wrong the dream gets, step by step, once the model stops looking. "
+    "<b>imagined</b> is the error of a frame the model predicted blind. "
+    "<b>decoder floor</b> is the error it makes redrawing a frame it can SEE, so it "
+    "is the best any prediction could score and the gap above it is the only part "
+    "caused by getting the dynamics wrong. <b>frozen frame</b> is what you would get "
+    "by assuming nothing moves; it is a real image and carries no drawing error at "
+    "all, which is why beating it is hard and why it is shown rather than quoted alone."
+)
+
+_COUNTERFACTUAL_LEGEND = (
+    "One latent state, several futures. Every row starts from the same moment and the "
+    "same memory, and differs only in the actions handed to the model. A video "
+    "predictor would draw four identical rows. Rows that diverge are the model saying "
+    "what it thinks each action would cause, which is the property that makes it "
+    "usable for planning rather than just for watching."
+)
+
+
+def probe_html(logdir: str, summary: str, fidelity: dict, video: str) -> str:
+    """The dream-analysis report: fidelity curves, then the counterfactual video."""
+    blocks = [heading(_TITLE), heading(f"Dream analysis of {logdir}")]
+
+    series, floor = [], None
+    for key, points in sorted(fidelity.items()):
+        if key.startswith("mae/"):
+            series.append(("imagined", points, _ACCENT))
+        elif key.startswith("frozen/"):
+            series.append(("frozen frame", points, _WARN))
+        elif key.startswith("floor/"):
+            floor = points
+    if floor:
+        series.append(("decoder floor", floor, _MUTED))
+    if series:
+        blocks.append(panel(
+            "Fidelity against imagination horizon",
+            curves(series, "mean absolute pixel error", "imagination step")
+            + note(_FIDELITY_LEGEND),
+        ))
+    if "reward" in fidelity:
+        blocks.append(panel(
+            "Reward prediction",
+            curve(fidelity["reward"], "reward mean absolute error", _HILITE)
+            + note(
+                "The actor never sees a pixel while it trains; it sees this number. "
+                "So reward drift bounds how long an imagined rollout is worth "
+                "optimising against, independently of how the frames look."
+            ),
+        ))
+    if video:
+        blocks.append(panel("Counterfactual dreams", video + note(_COUNTERFACTUAL_LEGEND)))
+    if summary:
+        blocks.append(panel("Measured", f"<pre style='color:{_TEXT};margin:0;"
+                                        f"white-space:pre-wrap;'>{summary}</pre>"))
+    return "".join(blocks)
