@@ -45,6 +45,22 @@ ACTION_FRAME = "assets/example_action_fd_agibotworld_first_frame.png"
 ACTION_CHUNKS = "assets/example_action_fd_agibotworld_action_chunks.json"
 I2V_FRAME = "assets/example_i2v_input.jpg"
 
+# Inverse dynamics ships with ground truth, and that is the whole reason to run it.
+# Two AV clips, 61 frames of 832x480 at 10 fps, each paired with the 60 actions that
+# connect those frames as a [60, 9] float32 array. Forward dynamics can only be judged
+# by eye; this one has a right answer, so the output is a number rather than a vibe.
+INVERSE_CLIP = "assets/example_action_id_av_{i}_input.mp4"
+INVERSE_TRUTH = "assets/example_action_id_av_{i}_output.json"
+INVERSE_DOMAIN = "av"          # 9-D: the widths live in _EMBODIMENT_TO_RAW_ACTION_DIM
+INVERSE_TIER = 480             # matches the clips' native 832x480, so no rescale
+INVERSE_FPS = 10.0
+
+# The action model was trained on structured JSON captions, and the pipeline builds
+# that JSON itself from this sentence. The clips are forward driving footage, and
+# nothing here tells the model what the actions were: it has to read them off the
+# video, which is the point.
+INVERSE_DESCRIPTION = "The ego vehicle drives forward along the road."
+
 
 # Cosmos3-Nano is 16B in BF16: ~30 GiB of weights resident, plus the VAE decode of a
 # multi-second latent, which is the real peak. The failed rollout died asking for a
@@ -337,3 +353,145 @@ def rollout(
         log.info("chunk %s: %s frames in %.1fs", i, len(chunk_frames), secs)
 
     return frames, per_chunk
+
+
+def load_inverse_example(model_path: str, index: int = 0) -> dict:
+    """Read one inverse-dynamics example, clip and answer key both.
+
+    Decodes through `media.decode` rather than `diffusers.utils.load_video`, which
+    the pipeline docstring recommends but which needs imageio-ffmpeg: the one codec
+    this image leaves out on purpose. The frame count is asserted against the answer
+    key below, so a decoder that silently drops a frame fails here and not eight
+    minutes into a GPU task.
+    """
+    import torch
+
+    import media
+
+    clip = os.path.join(model_path, INVERSE_CLIP.format(i=index))
+    frames = media.decode(clip)
+    raw = json.loads(open(os.path.join(model_path, INVERSE_TRUTH.format(i=index))).read())
+    truth = torch.tensor(raw["data"], dtype=torch.float32).reshape(*raw["shape"])
+
+    # The conditioning video spans chunk_size + 1 frames, so 61 frames describe 60
+    # transitions. Asserting it here turns a shape mismatch into one readable line
+    # instead of a tensor error thrown eight minutes into a GPU task.
+    assert truth.shape[0] == len(frames) - 1, (
+        f"{len(frames)} frames should describe {len(frames) - 1} actions, "
+        f"but the answer key has {truth.shape[0]}"
+    )
+    log.info(
+        "inverse example %s: %s frames, truth %s",
+        index, len(frames), tuple(truth.shape),
+    )
+    return {
+        "index": index,
+        "frames": frames,
+        "truth": truth,
+        "domain_name": INVERSE_DOMAIN,
+        "resolution_tier": INVERSE_TIER,
+        "fps": INVERSE_FPS,
+        "description": INVERSE_DESCRIPTION,
+    }
+
+
+def invert(
+    pipe,
+    meta: dict,
+    *,
+    steps: int = 35,
+    guidance: float = 6.0,
+    seed: int | None = 0,
+):
+    """Inverse dynamics: hand it the video, get back the actions that produced it.
+
+    The mirror image of `rollout` above, and the thing a forward-only world model
+    cannot do at all. DreamerV3's RSSM maps (state, action) to the next state and has
+    no path in the other direction; Cosmos denoises the action channel the same way it
+    denoises pixels, so running it backwards is a mode flag rather than a new model.
+
+    Every vision latent frame is conditioning here, so the returned video is
+    essentially the input handed back. `result.action` is the output that matters, and
+    the pipeline has already sliced it to the embodiment's true width (9 for `av`)
+    from the padded channel count the transformer works in.
+    """
+    import torch
+    from diffusers import CosmosActionCondition
+
+    frames = meta["frames"]
+    chunk_size = len(frames) - 1
+
+    generator = torch.Generator().manual_seed(seed) if seed is not None else None
+    t0 = time.monotonic()
+    result = pipe(
+        prompt=meta["description"],
+        action=CosmosActionCondition(
+            mode="inverse_dynamics",
+            chunk_size=chunk_size,
+            domain_name=meta["domain_name"],
+            resolution_tier=int(meta["resolution_tier"]),
+            video=frames,
+            view_point="ego_view",
+        ),
+        fps=float(meta["fps"]),
+        num_inference_steps=steps,
+        guidance_scale=guidance,
+        generator=generator,
+        # Same reason as the forward rollout: the action model was trained on
+        # structured captions with no assistant preamble.
+        use_system_prompt=False,
+        enable_safety_check=False,
+    )
+    secs = time.monotonic() - t0
+
+    # The output dataclass types `action` as a list of tensors, and the action modes
+    # populate it with a single [T, D] entry. Accept both so a future shape change
+    # fails loudly at the assert below rather than silently indexing the wrong axis.
+    pred = result.action
+    if isinstance(pred, (list, tuple)):
+        pred = pred[0]
+    pred = pred.detach().float().cpu()
+    log.info("recovered actions %s in %.1fs", tuple(pred.shape), secs)
+    return pred, secs
+
+
+def action_error(truth, pred, moving_frac: float = 0.1) -> dict:
+    """Score recovered actions against the answer key.
+
+    Reported per channel as well as overall, because the mean alone hides the thing
+    worth seeing: the `av` action is a mixed vector (translation next to what looks
+    like a rotation basis sitting near 1.0), so channels are not commensurable and a
+    single MAE silently weights them by their native scale.
+
+    `moving_frac` is the reason there are two headline numbers rather than one. In a
+    given clip most channels barely leave their start value: measured on the bundled
+    examples, one channel spans ~0.41 and the other eight span ~0.02. A range-
+    normalised error on those eight is noise divided by nothing, and it can exceed
+    1.0 (example 1 scores 1.20 on channel 7) without the model having done anything
+    wrong. So `mae_moving` covers only channels whose range is at least this fraction
+    of the widest one, and that is the number worth quoting.
+    """
+    import torch
+
+    n = min(truth.shape[0], pred.shape[0])
+    truth, pred = truth[:n], pred[:n]
+    assert truth.shape == pred.shape, (truth.shape, pred.shape)
+
+    err = (pred - truth).abs()
+    per_dim = err.mean(dim=0)
+    # Range-normalised, so a channel that barely moves cannot look good by standing
+    # still. Guarded because a constant channel has zero range.
+    spread = (truth.max(dim=0).values - truth.min(dim=0).values).clamp(min=1e-6)
+    moving = [d for d in range(truth.shape[-1])
+              if float(spread[d]) >= moving_frac * float(spread.max())]
+    return {
+        "steps": int(n),
+        "mae": float(err.mean()),
+        "mae_moving": float(err[:, moving].mean()),
+        "moving_dims": moving,
+        "mae_per_dim": [float(x) for x in per_dim],
+        "nmae_per_dim": [float(x) for x in (per_dim / spread)],
+        "max_abs_err": float(err.max()),
+        "truth_range": [[float(a), float(b)] for a, b in
+                        zip(truth.min(dim=0).values, truth.max(dim=0).values)],
+    }

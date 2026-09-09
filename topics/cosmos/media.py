@@ -64,8 +64,36 @@ def _to_uint8_frames(video) -> list:
     return [np.ascontiguousarray(f, dtype=np.uint8) for f in arr.astype("uint8")]
 
 
-def encode(video, fps: int = 24, crf: int = 26) -> bytes:
-    """Frames to H.264 mp4 bytes, small enough to base64 into a report."""
+def _to_waveform(sound, channels: int = 2):
+    """Cosmos returns `[audio_ch, N]`; normalise it to float32 in [-1, 1], 2 channels.
+
+    bf16 on the device is what comes back, and numpy has no bfloat16, so the float()
+    is load-bearing rather than defensive. Mono is duplicated rather than left as one
+    channel because the sound tokenizer declares `stereo: true` and a layout mismatch
+    is an encoder error, not a quieter clip.
+    """
+    import numpy as np
+
+    if hasattr(sound, "detach"):
+        sound = sound.detach().float().cpu().numpy()
+    wav = np.asarray(sound, dtype="float32")
+    if wav.ndim == 1:
+        wav = wav[None, :]
+    if wav.shape[0] == 1 and channels == 2:
+        wav = np.repeat(wav, 2, axis=0)
+    # Contiguity matters: AudioFrame.from_ndarray reads the buffer directly, and a
+    # view produced by repeat/transpose gives silence or garbage rather than an error.
+    return np.ascontiguousarray(np.clip(wav[:channels], -1.0, 1.0))
+
+
+def encode(video, fps: int = 24, crf: int = 26, sound=None, sample_rate: int = 48000) -> bytes:
+    """Frames to H.264 mp4 bytes, small enough to base64 into a report.
+
+    `sound` is the optional waveform Cosmos returns alongside the video when
+    `enable_sound=True`. Without it that waveform is generated, costs ~2 GB of sound
+    tokenizer to produce, and is then thrown away: the flag looks like it works and
+    the report plays in silence.
+    """
     frames = _to_uint8_frames(video)
     if not frames:
         return b""
@@ -82,13 +110,64 @@ def encode(video, fps: int = 24, crf: int = 26) -> bytes:
         stream.width, stream.height = w - (w % 2), h - (h % 2)
         stream.pix_fmt = "yuv420p"
         stream.options = {"crf": str(crf), "preset": "veryfast"}
+        astream = None
+        if sound is not None:
+            astream = out.add_stream("aac", rate=sample_rate)
+            astream.layout = "stereo"
+
         for frame in frames:
             cropped = frame[: stream.height, : stream.width]
             for pkt in stream.encode(av.VideoFrame.from_ndarray(cropped, format="rgb24")):
                 out.mux(pkt)
         for pkt in stream.encode():
             out.mux(pkt)
+
+        if astream is not None:
+            # AAC encodes fixed-size blocks (1024 samples), so handing it one frame of
+            # several hundred thousand samples raises rather than chunking for you. A
+            # fifo is the supported way to re-block, and it is the same lesson as the
+            # libsndfile Vorbis segfault in topics/music-generation: audio libraries
+            # want a stream of small writes, not one enormous one.
+            wav = _to_waveform(sound)
+            frame = av.AudioFrame.from_ndarray(wav, format="fltp", layout="stereo")
+            frame.sample_rate = sample_rate
+            fifo = av.audio.fifo.AudioFifo()
+            fifo.write(frame)
+            block = astream.codec_context.frame_size or 1024
+            while True:
+                chunk = fifo.read(block)
+                if chunk is None:
+                    break
+                for pkt in astream.encode(chunk):
+                    out.mux(pkt)
+            tail = fifo.read()          # the final partial block
+            if tail is not None:
+                for pkt in astream.encode(tail):
+                    out.mux(pkt)
+            for pkt in astream.encode():
+                out.mux(pkt)
     return buf.getvalue()
+
+
+def decode(path: str) -> list:
+    """Read an mp4 off disk into the list of PIL frames the pipeline conditions on.
+
+    `diffusers.utils.load_video` is the documented way in and is NOT usable here: it
+    reaches for imageio-ffmpeg, which is the one codec dependency this image leaves
+    out on purpose because its aarch64 wheels are unreliable. av is already the
+    encoder for every clip in the report, so decoding with it keeps one codec in play
+    rather than two, and it is what `encode` round-trips against.
+    """
+    import av
+    from PIL import Image
+
+    frames = []
+    with av.open(path) as container:
+        for frame in container.decode(video=0):
+            frames.append(Image.fromarray(frame.to_ndarray(format="rgb24")))
+    if not frames:
+        raise ValueError(f"decoded no frames from {path}")
+    return frames
 
 
 def probe(mp4: bytes) -> str:
@@ -128,8 +207,13 @@ def probe(mp4: bytes) -> str:
         return f"probe failed: {exc}"
 
 
-def video_html(mp4: bytes, caption: str = "", max_width: int = 560) -> str:
-    """base64 an mp4 into a self-contained <video> tag."""
+def video_html(mp4: bytes, caption: str = "", max_width: int = 560, sound: bool = False) -> str:
+    """base64 an mp4 into a self-contained <video> tag.
+
+    `sound=True` drops `autoplay muted`. Every browser refuses to autoplay audio, so
+    a muted autoplay tag would play a clip with sound in it silently and look exactly
+    like the sound never got muxed. Better to make the viewer press play.
+    """
     if not mp4:
         return '<p style="color:#888;font-family:monospace;">no clip</p>'
     mb = len(mp4) / 2**20
@@ -148,7 +232,8 @@ def video_html(mp4: bytes, caption: str = "", max_width: int = 560) -> str:
     )
     return (
         f'<div style="background:#0f0f23;padding:12px;border-radius:8px;">'
-        f'<video src="data:video/mp4;base64,{b64}" controls autoplay loop muted '
+        f'<video src="data:video/mp4;base64,{b64}" controls loop '
+        f'{"" if sound else "autoplay muted "}'
         f'playsinline style="max-width:{max_width}px;width:100%;border:2px solid #333;'
         f'border-radius:4px;display:block;"></video>{cap}</div>'
     )

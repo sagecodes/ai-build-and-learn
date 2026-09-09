@@ -35,6 +35,8 @@ takes prompts from someone else.
 
 from __future__ import annotations
 
+import os
+
 import flyte
 
 PLATFORM = ("linux/arm64",)
@@ -54,6 +56,22 @@ EDGE = "nvidia/Cosmos3-Edge"    # 4B, no video-to-video transfer and no sound
 
 HF_HOME = "/tmp/hf"
 HF_SECRET = flyte.Secret(key="HF_TOKEN", as_env_var="HF_TOKEN")
+
+# OPT-IN, and off by default. All three Cosmos 3 repos are ungated, so the token buys
+# rate limits rather than access, and declaring a secret the cluster does not hold
+# fails the pod at ADMISSION: the webhook denies it before any container starts, so
+# the run dies in under a second with a message about secret managers and nothing in
+# the logs. That is a bad trade for an optimisation.
+#
+# Turn it back on once `flyte create secret HF_TOKEN` has been run:
+#
+#     COSMOS_HF_SECRET=1 flyte run pipeline.py invert
+#
+# Without it the fetch is unauthenticated and can be throttled, which is survivable
+# here: _ENV_VARS already disables hf_transfer and bounds a stalled read at 60s, so a
+# throttled pull resumes from its .incomplete file rather than hanging the task.
+USE_HF_SECRET = os.environ.get("COSMOS_HF_SECRET", "").lower() in ("1", "true", "yes")
+SECRETS = [HF_SECRET] if USE_HF_SECRET else []
 
 
 COSMOS_SPEC = (
@@ -148,7 +166,7 @@ gpu_env = flyte.TaskEnvironment(
     name="cosmos",
     image=image,
     resources=flyte.Resources(cpu="8", memory="96Gi", gpu=1, disk="120Gi"),
-    secrets=[HF_SECRET],
+    secrets=SECRETS,
     env_vars=_GPU_ENV_VARS,
 )
 
@@ -156,7 +174,7 @@ orch_env = flyte.TaskEnvironment(
     name="cosmos-orch",
     image=image,
     resources=flyte.Resources(cpu="2", memory="4Gi", disk="20Gi"),
-    secrets=[HF_SECRET],
+    secrets=SECRETS,
     env_vars=_ENV_VARS,
     depends_on=[gpu_env],
 )

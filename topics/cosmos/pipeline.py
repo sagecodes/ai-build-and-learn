@@ -2,9 +2,11 @@
 
     flyte run pipeline.py imagine                      # text -> predicted world
     flyte run pipeline.py imagine --scene forklift
+    flyte run pipeline.py imagine --sound           # video AND ambient sound
     flyte run pipeline.py rollout                      # actions -> predicted future
     flyte run pipeline.py compare                      # short vs structured prompt
-    flyte run pipeline.py world_models                 # all three, one run
+    flyte run pipeline.py invert                       # video -> the actions behind it
+    flyte run pipeline.py world_models                 # all of them, one run
 
 Runs to the `world-models` project (.flyte/config.yaml), alongside topics/dreamerv3.
 The pairing is the point of the event: Dreamer LEARNS a world model of one small
@@ -87,17 +89,26 @@ async def imagine(
         steps=steps, guidance=guidance, seed=seed, sound=sound,
     )
 
-    mp4 = media.encode(result.video, fps=24)
+    # result.sound is None unless enable_sound was on. Passing it through is what
+    # makes the --sound flag mean anything: without it the sound tokenizer is loaded,
+    # the waveform is generated, and then discarded into a silent mp4.
+    wav = getattr(result, "sound", None) if sound else None
+    mp4 = media.encode(result.video, fps=24, sound=wav)
     probe = media.probe(mp4)
-    log.info("clip: %s", probe)
+    log.info("clip: %s%s", probe, " (with audio)" if wav is not None else "")
 
     rows += [
         ("Denoise time", f"{secs / 60:.1f} min ({secs / steps:.1f}s/step)"),
         ("Clip", f"{len(mp4) / 1024:.0f} KB"),
+        ("Audio", "48 kHz stereo, muxed into the clip" if wav is not None
+                  else "off (--sound to predict ambient sound)"),
     ]
+    caption = f"{frames} frames at {width}x{height}, seed {seed}"
+    if wav is not None:
+        caption += " - press play, the sound is generated too"
     body = reports.clip_block(
         f"Predicted world: {scene}",
-        media.video_html(mp4, f"{frames} frames at {width}x{height}, seed {seed}"),
+        media.video_html(mp4, caption, sound=wav is not None),
         media.strip(result.video),
         probe,
         prompt,
@@ -106,7 +117,10 @@ async def imagine(
         reports.final_html("Text to world", rows, body, reports.IMAGINE_EXPLAINER),
         do_flush=True,
     )
-    return {"scene": scene, "seconds": round(secs, 1), "probe": probe, "kb": len(mp4) // 1024}
+    return {
+        "scene": scene, "seconds": round(secs, 1), "probe": probe,
+        "kb": len(mp4) // 1024, "audio": wav is not None,
+    }
 
 
 @gpu_env.task(report=True)
@@ -242,6 +256,115 @@ async def compare(
     return {"scene": scene, "seconds": timings}
 
 
+@gpu_env.task(report=True)
+async def invert(
+    repo: str = NANO,
+    example: int = 0,
+    steps: int = 35,
+    guidance: float = 6.0,
+    seed: int = 0,
+) -> dict:
+    """Inverse dynamics: give it the video, ask what actions produced it.
+
+    The one task here whose output is a measurement rather than a clip. NVIDIA ships
+    the answer key inside the checkpoint: two 61-frame driving clips, each paired with
+    the 60 nine-dimensional actions that connect their frames. So this run recovers
+    actions from pixels and scores them against the truth, and the report shows both
+    lines on the same axes.
+
+    Worth saying on the stream: a forward-only world model cannot do this at all.
+    DreamerV3's RSSM is trained as p(next state | state, action) and has no inverse,
+    so it can dream a future but can never watch footage and say what was done. Cosmos
+    denoises the action channel alongside the pixels, so the inverse is a mode flag.
+
+    `example` picks which of the two bundled clips to run (0 or 1).
+    """
+    rows = [("Model", repo), ("Task", "inverse dynamics (video -> actions)")]
+    _paint("Fetching weights", f"{repo} is ~35 GB and lands in this pod's /tmp/hf.", rows)
+
+    path = world.snapshot(repo)
+    meta = world.load_inverse_example(path, index=example)
+    truth = meta["truth"]
+    rows += [
+        ("Clip", f"bundled AV example {example}, {len(meta['frames'])} frames at {meta['fps']:.0f} fps"),
+        ("Embodiment", f"{meta['domain_name']} ({truth.shape[-1]}-D actions)"),
+        ("To recover", f"{truth.shape[0]} action steps"),
+    ]
+
+    guard = world.guard_memory()
+    rows.append(("GPU", guard))
+    _paint("Loading", "Streaming a 16B transformer to the device in BF16.", rows)
+    pipe = world.load(repo)
+
+    _paint("Running it backwards", "Denoising the action channel from the video.", rows)
+    pred, secs = world.invert(pipe, meta, steps=steps, guidance=guidance, seed=seed)
+    score = world.action_error(truth, pred)
+
+    # The clip the model watched, played back in the report. Re-encoded from the
+    # decoded frames rather than shipped through as the original file, so what plays
+    # is provably the same list of frames that was handed to the pipeline.
+    mp4 = media.encode(meta["frames"], fps=int(meta["fps"]))
+    probe = media.probe(mp4)
+
+    # Channels ranked by how much they actually move. A rotation basis pinned near 1.0
+    # is trivially easy to predict and would pad the chart with flat lines.
+    spread = [hi - lo for lo, hi in score["truth_range"]]
+    busiest = sorted(range(len(spread)), key=lambda d: spread[d], reverse=True)[:4]
+    lead = busiest[0]
+
+    # Deliberately NOT reporting the worst channel across all nine. In these clips one
+    # channel carries almost all the motion (~0.41 of range) and the other eight barely
+    # leave their start value (~0.02), so a range-normalised error on those eight is
+    # noise divided by nothing: it reads as catastrophic however good the model is.
+    # The honest headline is the channel that actually moves.
+    rows += [
+        ("Inverse time", f"{secs / 60:.1f} min ({secs / steps:.1f}s/step)"),
+        ("Mean abs error", f"{score['mae_moving']:.4f} over {score['steps']} steps, "
+                           f"{len(score['moving_dims'])} moving channel(s)"),
+        ("Leading channel", f"ch {lead}: {score['nmae_per_dim'][lead] * 100:.1f}% "
+                            f"of its {spread[lead]:.3f} range"),
+        ("Static channels", f"{sum(1 for s in spread if s < spread[lead] / 10)} of "
+                            f"{len(spread)} barely move in this clip"),
+    ]
+
+    body = reports.side_by_side([
+        ("What the model watched", reports.clip_block(
+            "Input clip, no actions supplied",
+            media.video_html(mp4, f"{len(meta['frames'])} frames"),
+            media.strip(meta["frames"], count=8),
+            probe,
+            meta["description"],
+        )),
+        ("What it read off the pixels", reports.action_traces(
+            truth.tolist(), pred.tolist(),
+            labels=[f"channel {i}" for i in range(truth.shape[-1])],
+            dims=busiest,
+            caption=(
+                "The four channels that move most, since a channel that barely "
+                "changes is trivially easy to guess. Solid is truth, dashed is "
+                "recovered."
+            ),
+        )),
+    ])
+    flyte.report.replace(
+        reports.final_html("Video to actions", rows, body, reports.INVERT_EXPLAINER),
+        do_flush=True,
+    )
+    log.info("inverse: mae=%.4f over %s steps", score["mae"], score["steps"])
+    return {
+        "example": example,
+        "embodiment": meta["domain_name"],
+        "steps_recovered": score["steps"],
+        "mae": round(score["mae"], 5),
+        "mae_moving": round(score["mae_moving"], 5),
+        "moving_dims": score["moving_dims"],
+        "lead_channel": lead,
+        "lead_nmae": round(score["nmae_per_dim"][lead], 5),
+        "nmae_per_dim": [round(x, 5) for x in score["nmae_per_dim"]],
+        "seconds": round(secs, 1),
+    }
+
+
 @orch_env.task(report=True)
 async def world_models(scene: str = "box-topple", repo: str = NANO) -> dict:
     """Entry point. CPU-only orchestrator so it cannot deadlock its own GPU children.
@@ -253,7 +376,13 @@ async def world_models(scene: str = "box-topple", repo: str = NANO) -> dict:
     generated = await imagine(scene=scene, repo=repo)
     predicted = await rollout(repo=repo)
     prompted = await compare(scene=scene, repo=repo)
-    result = {"imagine": generated, "rollout": predicted, "compare": prompted}
+    recovered = await invert(repo=repo)
+    result = {
+        "imagine": generated,
+        "rollout": predicted,
+        "compare": prompted,
+        "invert": recovered,
+    }
     log.info("result: %s", result)
     return result
 

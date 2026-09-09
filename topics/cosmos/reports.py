@@ -118,6 +118,68 @@ def side_by_side(cells: list[tuple[str, str]]) -> str:
     return f'<div style="display:flex;gap:16px;flex-wrap:wrap;">{inner}</div>'
 
 
+def action_traces(
+    truth: list[list[float]],
+    pred: list[list[float]],
+    labels: list[str] | None = None,
+    dims: list[int] | None = None,
+    caption: str = "",
+    width: int = 520,
+    height: int = 84,
+) -> str:
+    """Overlay recovered actions on ground truth, one small chart per channel.
+
+    Inline SVG rather than a plotting library. matplotlib is not in the image spec and
+    is not worth adding for two polylines, and an <img> of a chart cannot be zoomed in
+    a Flyte report the way vector text can.
+
+    Each channel gets its own y-scale taken from both series together. Sharing one
+    scale across channels would be the honest thing for commensurable numbers and is
+    the wrong thing here: the `av` action packs translation next to a rotation basis
+    resting near 1.0, so a shared axis flattens every channel that matters.
+    """
+    n = min(len(truth), len(pred))
+    if n < 2:
+        return _note("Not enough steps to plot.")
+    ncols = len(truth[0])
+    dims = list(range(ncols)) if dims is None else [d for d in dims if d < ncols]
+
+    out = ""
+    for d in dims:
+        a = [row[d] for row in truth[:n]]
+        b = [row[d] for row in pred[:n]]
+        lo, hi = min(min(a), min(b)), max(max(a), max(b))
+        span = (hi - lo) or 1.0
+        pad = span * 0.08
+        lo, hi = lo - pad, hi + pad
+        span = hi - lo
+
+        def path(series: list[float]) -> str:
+            step = width / (n - 1)
+            pts = [
+                f"{i * step:.1f},{height - (v - lo) / span * height:.1f}"
+                for i, v in enumerate(series)
+            ]
+            return " ".join(pts)
+
+        name = labels[d] if labels and d < len(labels) else f"channel {d}"
+        out += (
+            f'<div style="margin:0 0 10px;">'
+            f'<div style="color:{_MUTED};font-family:monospace;font-size:11px;'
+            f'margin-bottom:2px;">{name} '
+            f'<span style="color:{_ACCENT};">&#9473; truth</span> '
+            f'<span style="color:{_HILITE};">&#9473; recovered</span></div>'
+            f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" '
+            f'preserveAspectRatio="none" style="background:{_BG};border-radius:4px;">'
+            f'<polyline fill="none" stroke="{_ACCENT}" stroke-width="1.6" '
+            f'points="{path(a)}"/>'
+            f'<polyline fill="none" stroke="{_HILITE}" stroke-width="1.6" '
+            f'stroke-dasharray="4 3" points="{path(b)}"/>'
+            f"</svg></div>"
+        )
+    return out + (_note(caption) if caption else "")
+
+
 def final_html(
     subtitle: str,
     rows: list[tuple[str, str]],
@@ -171,4 +233,18 @@ COMPARE_EXPLAINER = (
     "temporal description of the physical event. NVIDIA's guidance is to upsample the "
     "short form into the long one with an LLM before generation; this is what that "
     "step buys, without a second model in the loop."
+)
+
+
+INVERT_EXPLAINER = (
+    "Forward dynamics asks what happens next. This asks the opposite: here is a "
+    "video, what actions produced it? Cosmos denoises the action channel with the "
+    "same machinery it uses for pixels, so running the model backwards is a mode "
+    "flag rather than a second model. The clip and the answer key both ship inside "
+    "the checkpoint, so the dashed line is the model's guess and the solid line is "
+    "what actually happened, and the gap between them is a number rather than an "
+    "impression. This is also the sharpest contrast with topics/dreamerv3: that "
+    "world model maps (state, action) to the next state and has no path in the "
+    "other direction at all, so a Dreamer agent can dream a future but can never "
+    "watch a video and say what was done in it."
 )
