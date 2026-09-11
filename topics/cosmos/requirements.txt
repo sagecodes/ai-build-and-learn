@@ -15,12 +15,19 @@
 # CosmosActionCondition all landed in 0.39.0. This is a hard floor: on 0.38 the
 # import simply does not exist, and several blog posts telling you to install
 # diffusers from git are stale.
-diffusers>=0.39.0
+#
+# EXACT pins, matching config.py's image spec line for line. They used to be floors
+# here and floors there, which let the venv and the pod image resolve on different days
+# to different software: torch 2.13.0 / transformers 5.14.1 / diffusers 0.39.0 on the
+# host against 2.14.0 / 5.16.1 / 0.40.0 in the pod, measured 2026-09-10. That silently
+# voids smoke_test.py's only claim, which is that a host pass makes the pod the suspect.
+# If you change one of these, change the other and rebuild.
+diffusers==0.40.0
 
 # Cosmos 3's vision tower is Qwen3VLVisionModel and its tokenizer is
 # Qwen2TokenizerFast (see the checkpoint's model_index.json). Qwen3-VL support
 # starts at transformers 5.11.
-transformers>=5.11
+transformers==5.16.1
 accelerate>=1.10
 safetensors
 sentencepiece
@@ -41,3 +48,7 @@ imageio
 # Deliberately NOT installed: cosmos_guardrail. It is a separate model download that
 # pulls a gated Llama Guard checkpoint, and every task here constructs the pipeline
 # with enable_safety_checker=False. See the note in config.py before changing that.
+
+# Only for building the shared-model-cache PodTemplate in config.py (hostPath volume).
+# Not a flyte dependency, so it has to be asked for explicitly.
+kubernetes

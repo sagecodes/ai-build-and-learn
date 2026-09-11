@@ -64,8 +64,36 @@ def _to_uint8_frames(video) -> list:
     return [np.ascontiguousarray(f, dtype=np.uint8) for f in arr.astype("uint8")]
 
 
-def encode(video, fps: int = 24, crf: int = 26) -> bytes:
-    """Frames to H.264 mp4 bytes, small enough to base64 into a report."""
+def _to_waveform(sound, channels: int = 2):
+    """Cosmos returns `[audio_ch, N]`; normalise it to float32 in [-1, 1], 2 channels.
+
+    bf16 on the device is what comes back, and numpy has no bfloat16, so the float()
+    is load-bearing rather than defensive. Mono is duplicated rather than left as one
+    channel because the sound tokenizer declares `stereo: true` and a layout mismatch
+    is an encoder error, not a quieter clip.
+    """
+    import numpy as np
+
+    if hasattr(sound, "detach"):
+        sound = sound.detach().float().cpu().numpy()
+    wav = np.asarray(sound, dtype="float32")
+    if wav.ndim == 1:
+        wav = wav[None, :]
+    if wav.shape[0] == 1 and channels == 2:
+        wav = np.repeat(wav, 2, axis=0)
+    # Contiguity matters: AudioFrame.from_ndarray reads the buffer directly, and a
+    # view produced by repeat/transpose gives silence or garbage rather than an error.
+    return np.ascontiguousarray(np.clip(wav[:channels], -1.0, 1.0))
+
+
+def encode(video, fps: int = 24, crf: int = 26, sound=None, sample_rate: int = 48000) -> bytes:
+    """Frames to H.264 mp4 bytes, small enough to base64 into a report.
+
+    `sound` is the optional waveform Cosmos returns alongside the video when
+    `enable_sound=True`. Without it that waveform is generated, costs ~2 GB of sound
+    tokenizer to produce, and is then thrown away: the flag looks like it works and
+    the report plays in silence.
+    """
     frames = _to_uint8_frames(video)
     if not frames:
         return b""
@@ -82,13 +110,64 @@ def encode(video, fps: int = 24, crf: int = 26) -> bytes:
         stream.width, stream.height = w - (w % 2), h - (h % 2)
         stream.pix_fmt = "yuv420p"
         stream.options = {"crf": str(crf), "preset": "veryfast"}
+        astream = None
+        if sound is not None:
+            astream = out.add_stream("aac", rate=sample_rate)
+            astream.layout = "stereo"
+
         for frame in frames:
             cropped = frame[: stream.height, : stream.width]
             for pkt in stream.encode(av.VideoFrame.from_ndarray(cropped, format="rgb24")):
                 out.mux(pkt)
         for pkt in stream.encode():
             out.mux(pkt)
+
+        if astream is not None:
+            # AAC encodes fixed-size blocks (1024 samples), so handing it one frame of
+            # several hundred thousand samples raises rather than chunking for you. A
+            # fifo is the supported way to re-block, and it is the same lesson as the
+            # libsndfile Vorbis segfault in topics/music-generation: audio libraries
+            # want a stream of small writes, not one enormous one.
+            wav = _to_waveform(sound)
+            frame = av.AudioFrame.from_ndarray(wav, format="fltp", layout="stereo")
+            frame.sample_rate = sample_rate
+            fifo = av.audio.fifo.AudioFifo()
+            fifo.write(frame)
+            block = astream.codec_context.frame_size or 1024
+            while True:
+                chunk = fifo.read(block)
+                if chunk is None:
+                    break
+                for pkt in astream.encode(chunk):
+                    out.mux(pkt)
+            tail = fifo.read()          # the final partial block
+            if tail is not None:
+                for pkt in astream.encode(tail):
+                    out.mux(pkt)
+            for pkt in astream.encode():
+                out.mux(pkt)
     return buf.getvalue()
+
+
+def decode(path: str) -> list:
+    """Read an mp4 off disk into the list of PIL frames the pipeline conditions on.
+
+    `diffusers.utils.load_video` is the documented way in and is NOT usable here: it
+    reaches for imageio-ffmpeg, which is the one codec dependency this image leaves
+    out on purpose because its aarch64 wheels are unreliable. av is already the
+    encoder for every clip in the report, so decoding with it keeps one codec in play
+    rather than two, and it is what `encode` round-trips against.
+    """
+    import av
+    from PIL import Image
+
+    frames = []
+    with av.open(path) as container:
+        for frame in container.decode(video=0):
+            frames.append(Image.fromarray(frame.to_ndarray(format="rgb24")))
+    if not frames:
+        raise ValueError(f"decoded no frames from {path}")
+    return frames
 
 
 def probe(mp4: bytes) -> str:
@@ -128,8 +207,27 @@ def probe(mp4: bytes) -> str:
         return f"probe failed: {exc}"
 
 
-def video_html(mp4: bytes, caption: str = "", max_width: int = 560) -> str:
-    """base64 an mp4 into a self-contained <video> tag."""
+def video_html(
+    mp4: bytes,
+    caption: str = "",
+    max_width: int = 560,
+    sound: bool = False,
+    autoplay: bool = True,
+) -> str:
+    """base64 an mp4 into a self-contained <video> tag.
+
+    `sound=True` drops `autoplay muted`. Every browser refuses to autoplay audio, so
+    a muted autoplay tag would play a clip with sound in it silently and look exactly
+    like the sound never got muxed. Better to make the viewer press play.
+
+    `autoplay=False` is for reports that embed MANY clips, and it is not cosmetic. A
+    page of twenty autoplaying looping videos asks the browser to decode twenty video
+    streams at once forever, which pegs a core and can leave the tab blank -- a report
+    that is completely intact on the object store and completely unreadable in front
+    of you. It also adds `preload="none"` so the decoder is not handed the bytes until
+    someone actually presses play. One or two clips: leave it on. More than about four:
+    turn it off.
+    """
     if not mp4:
         return '<p style="color:#888;font-family:monospace;">no clip</p>'
     mb = len(mp4) / 2**20
@@ -146,9 +244,11 @@ def video_html(mp4: bytes, caption: str = "", max_width: int = 560) -> str:
         if caption
         else ""
     )
+    live = autoplay and not sound
     return (
         f'<div style="background:#0f0f23;padding:12px;border-radius:8px;">'
-        f'<video src="data:video/mp4;base64,{b64}" controls autoplay loop muted '
+        f'<video src="data:video/mp4;base64,{b64}" controls loop '
+        f'{"autoplay muted " if live else "preload=\"none\" "}'
         f'playsinline style="max-width:{max_width}px;width:100%;border:2px solid #333;'
         f'border-radius:4px;display:block;"></video>{cap}</div>'
     )
@@ -208,3 +308,54 @@ def image_html(img, caption: str = "", width: int = 320) -> str:
         f'<img src="data:image/png;base64,{b64}" style="max-width:{width}px;width:100%;'
         f'border:2px solid #333;border-radius:4px;display:block;"/>{cap}</div>'
     )
+
+
+def label_frames(frames: list, text: str) -> list:
+    """Burn a short caption into the top-left of every frame.
+
+    Only used where the frames of several clips get concatenated into one video and
+    the viewer would otherwise have no way to tell which is which. A report caption
+    cannot do this job: it sits outside the <video> element and stays put while the
+    thing it describes scrolls past inside it.
+
+    PIL's default bitmap font, deliberately. Loading a TTF means finding one that is
+    present in the image, and a missing font file would fail the whole encode for a
+    label; the bitmap font ships with pillow and is always there.
+    """
+    from PIL import Image, ImageDraw
+
+    out = []
+    for frame in frames:
+        img = frame.convert("RGB").copy()
+        draw = ImageDraw.Draw(img)
+        # A filled plate behind the text, because white-on-white is the failure mode
+        # in exactly the bright generated scenes this is most useful for.
+        draw.rectangle([0, 0, 8 + 6 * len(text), 16], fill=(0, 0, 0))
+        draw.text((4, 4), text, fill=(255, 255, 255))
+        out.append(img)
+    return out
+
+
+def downscale(frames: list, max_width: int = 480) -> list:
+    """Shrink frames to `max_width` if they are wider, preserving aspect.
+
+    Only the long-horizon run needs this, and it needs it badly. That task re-encodes
+    the ENTIRE rollout so far into the report after every segment, so the embedded
+    clip grows without bound while the 24 MB embed ceiling does not: by segment thirty
+    a full-resolution stitch is over budget and `video_html` degrades to an apologetic
+    paragraph where the video should be. Halving the width cuts the payload roughly
+    fourfold and costs nothing that matters, because the per-segment clips are still
+    shown at full size next to it.
+    """
+    from PIL import Image
+
+    if not frames:
+        return frames
+    w, _ = frames[0].size
+    if w <= max_width:
+        return list(frames)
+    scale = max_width / w
+    return [
+        f.resize((max_width, max(2, int(f.size[1] * scale))), Image.LANCZOS)
+        for f in frames
+    ]
