@@ -182,6 +182,29 @@ COSMOS_SPEC = (
     # do not reliably, the same conclusion the video-generation demo reached.
     "av",
     "imageio",
+    # Canny edge maps for Cosmos Transfer. The headless build on purpose: the default
+    # opencv-python pulls a GUI stack that a pod has no use for and cannot start.
+    "opencv-python-headless",
+    # Cosmos Transfer REQUIRES its guardrail and there is no opting out: unlike
+    # Cosmos3OmniPipeline, which takes enable_safety_checker=False (and whose own NVIDIA
+    # runner exposes --disable-safety-checker), Cosmos2_5_TransferPipeline RAISES if the
+    # checker is None and cites the NVIDIA Open Model License in the message. So it gets
+    # installed rather than stubbed out. It pulls nvidia/Cosmos-1.0-Guardrail (gated) and
+    # google/siglip-so400m-patch14-384 (open, 3.5 GB) at first use.
+    "cosmos_guardrail",
+    # nltk 3.9.1, and this one is load-bearing. cosmos_guardrail asks for nltk>=3.9.1 and
+    # resolves to 3.10.x, which added `nltk.pathsec`: a hardening layer that REFUSES to
+    # open a file through a symlink. The guardrail ships its blocklist tokenizer data
+    # inside its HF snapshot, and a Hugging Face cache is a symlink farm (snapshots point
+    # at blobs), so every guardrail load dies with
+    #   Security Violation [pathsec.open]: refusing to follow a symlink at open time
+    #   OSError: [Errno 40] Too many levels of symbolic links
+    # There is no opt-out: NLTK_ALLOW_PROXIED_URLOPEN governs URLs, not symlinks. 3.9.1
+    # predates pathsec entirely and still satisfies the guardrail's own floor.
+    "nltk==3.9.1",
+    # The simulator that supplies `restyle` its input, and its actions. Plain mujoco,
+    # not mujoco_playground/brax/jax: the scene is a handful of primitives.
+    "mujoco",
     "flyte==2.2.1",
     # 0.11 breaks flyte 2.2.1 runs ('Headers' not callable).
     "connectrpc==0.10.*",
@@ -189,7 +212,11 @@ COSMOS_SPEC = (
 
 image = (
     flyte.Image.from_debian_base(name="cosmos3", registry=REGISTRY, platform=PLATFORM)
-    .with_apt_packages("git", "ffmpeg")
+    # The mesa/EGL set is what lets MuJoCo render headless in a pod, lifted from
+    # topics/rl-mujoco which worked it out the hard way: MUJOCO_GL=egl needs real GL
+    # libraries present, and a pod that has CUDA does NOT automatically have them.
+    .with_apt_packages("git", "ffmpeg", "libegl1", "libegl-mesa0", "libgl1",
+                       "libgl1-mesa-dri", "libgles2", "libglx-mesa0", "libosmesa6")
     # torch on its OWN layer and from the cu130 index, before anything else can
     # resolve a plain-PyPI torch over the top of it.
     .with_pip_packages("torch", "torchvision", index_url=TORCH_INDEX)
@@ -219,6 +246,10 @@ image = (
 #
 # Anti-pattern, same as next door: do NOT torch.compile the transformer. Triton does
 # not emit working SASS for sm_121a yet, so it fails or silently falls back.
+# MuJoCo renders through EGL in the pod. Set here rather than in mjc.py so it is true
+# before anything imports OpenGL, which caches its platform at import time.
+_RENDER_ENV = {"MUJOCO_GL": "egl", "PYOPENGL_PLATFORM": "egl"}
+
 _SPARK_ENV = {
     "CUDA_CACHE_MAXSIZE": "4294967296",
     "PYTORCH_ALLOC_CONF": "expandable_segments:True",
@@ -237,7 +268,7 @@ _ENV_VARS = {
     "HF_HUB_DOWNLOAD_TIMEOUT": "60",
 }
 
-_GPU_ENV_VARS = {**_ENV_VARS, **_SPARK_ENV}
+_GPU_ENV_VARS = {**_ENV_VARS, **_SPARK_ENV, **_RENDER_ENV}
 
 
 # ── Environments ────────────────────────────────────────────────────────────────

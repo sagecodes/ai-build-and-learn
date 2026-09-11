@@ -627,3 +627,48 @@ TRAIN_EXPLAINER = (
     "whose channels barely move in a given window, and averaging over all ten makes a "
     "useless policy look respectable."
 )
+
+
+ACCESS_EXPLAINER = (
+    "A credentials check, not a compute one. Several Cosmos repos are gated behind a "
+    "licence click, and whether this box can reach them is genuinely hard to answer from "
+    "a laptop: the token lives as a Flyte secret on the devbox rather than in anyone's "
+    "shell, so an anonymous probe from the host returns GatedRepoError whether or not the "
+    "licence was ever accepted. Those two states look identical and mean opposite things. "
+    "This runs inside a pod with the secret mounted and probes a real weight file, "
+    "because the Hub serves metadata for gated repos to anyone and only fetching "
+    "something real proves the gate is open. The ungated control row is there so a "
+    "network problem cannot be mistaken for a licence problem."
+)
+
+
+RESTYLE_EXPLAINER = (
+    "A different Cosmos model with a different job. Everything else here uses Cosmos "
+    "Predict, which GENERATES a world; this uses Cosmos Transfer, which RESTYLES one you "
+    "already have, preserving geometry and motion while pushing the rendering toward "
+    "realism. That is the sim2real pipeline: a simulator produces physically correct but "
+    "synthetic-looking output, Transfer makes it photorealistic, and a policy trains on "
+    "the result. It avoids every problem the Predict path hits, because the simulator "
+    "supplies the actions (no label tax), you never leave the simulator's robot (no "
+    "embodiment mismatch), and the geometry arrives as a control signal rather than "
+    "being inferred from an out-of-distribution frame. The input is deliberately the clip "
+    "Predict could not handle. Judge the output on whether the T-block is still a T-block "
+    "in the same place, not on whether it looks impressive: preserved geometry is what "
+    "makes the simulator's actions valid labels for the restyled video."
+)
+
+
+WATCH_EXPLAINER = (
+    "A video agent rather than a world model: standing questions asked of every window of "
+    "a long recording, with timestamps. This is the use case that has nothing to do with "
+    "controlling a robot, and the one NVIDIA pitches for factories, warehouses, traffic "
+    "cameras and smart spaces. No generation happens at all; only the understanding "
+    "expert is loaded, which makes it by far the cheapest task here. The questions are "
+    "yes/no because three separate tasks in this repo independently found that this model "
+    "saturates on numeric scales and holds up on categorical answers, and because an "
+    "alerting system wants a decision rather than a score. Two limits worth holding on to: "
+    "the model sees one window at a time with no memory across windows, so it cannot tell "
+    "you whether this is the same person as before, and a yes/no carries no confidence, so "
+    "a false positive looks exactly like a true one. The frames behind every alert are "
+    "shown for that reason."
+)

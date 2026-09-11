@@ -76,7 +76,7 @@ can only work in embodiments the checkpoint already knows, and
 [which those are is not what the table says](#every-experiment-what-it-found-and-what-it-is-for)
 , `embodiments` verifies `droid_lerobot` works and `pusht` does not.
 
-### 5. Synthetic data generation for robotics: **half covered, half gated**
+### 5. Synthetic data generation for robotics: **half covered, half in progress**
 
 Simulate scenes, then convert structured outputs (depth, segmentation, LiDAR, bounding
 boxes) into photorealistic video while preserving geometry, so you can vary lighting,
@@ -87,7 +87,8 @@ The **Predict** half is built: `dream` generates, `judge` critiques, `invert` la
 and `detail` shows that cost is
 [a distribution gap, not lost detail](#why-the-tax-exists-not-blur-a-distribution-gap).
 
-The **Transfer** half needs `nvidia/Cosmos-Transfer2.5-2B`, which is gated.
+The **Transfer** half is `restyle`, using `nvidia/Cosmos-Transfer2.5-2B`. That repo is
+gated and this box's token now reaches it, verified by the `access` task.
 
 ### 6. Vision and video AI agents: **not built**
 
@@ -99,7 +100,7 @@ Nothing here does this yet, and it is the cheapest gap to close: the understandi
 surface already answers questions about arbitrary video in 1.3 to 4.1 seconds. It needs
 a task, not a capability.
 
-### 7. Sim-to-real and scenario variation: **gated**
+### 7. Sim-to-real and scenario variation: **unblocked, in progress**
 
 The subtle, practical one. You may already have a physically correct Isaac Sim
 environment that looks synthetic. Cosmos preserves the motion and geometry while pushing
@@ -115,8 +116,33 @@ repo hit: Isaac supplies the actions, so there is **no label tax at all**; you n
 leave Isaac's robot, so **no embodiment mismatch**; and Transfer restyles rather than
 generates, so **no off-distribution conditioning frame**.
 
-Blocked on accepting the licence for `nvidia/Cosmos-Transfer2.5-2B` (and
-`nvidia/Cosmos-Reason2-*`, both verified gated against this box's token).
+`restyle` is the first step of this: it hands Cosmos Transfer a synthetic clip and its
+edge map and asks for a photorealistic rendering of the same geometry.
+
+**Checking what you can actually reach is its own task.** Several Cosmos repos are gated,
+and the answer is genuinely hard to get from a laptop: the token lives as a Flyte secret
+on the devbox, not in anyone's shell, so an anonymous probe returns `GatedRepoError`
+whether or not the licence was ever accepted. Those two states look identical and mean
+opposite things, so `access` runs inside a pod with the secret mounted, probes a real
+weight file rather than a README (the Hub serves metadata for gated repos to anyone), and
+includes an ungated control row so a network problem cannot be mistaken for a licence
+problem:
+
+```bash
+COSMOS_HF_SECRET=1 ./.venv/bin/flyte run pipeline.py access
+```
+
+Swept 2026-09-11: 14 of 15 roadmap repos open. `nvidia/Cosmos-Reason2-8B` is the only
+one still gated, which is a per-size licence oddity since the 32B is open.
+
+**The Transfer guardrail is not optional, and that is a licence term.** Every Predict task
+here passes `enable_safety_checker=False`, which is sanctioned: the flag exists and
+NVIDIA's own runner exposes `--disable-safety-checker`. `Cosmos2_5_TransferPipeline` has
+no such flag, constructs a checker unconditionally, and **raises** if one is absent with
+a message citing the NVIDIA Open Model License. So `cosmos_guardrail` is installed rather
+than stubbed out, and `restyle` runs WITH a content guardrail even though nothing else
+here does. It pulls `nvidia/Cosmos-1.0-Guardrail` (gated) and
+`google/siglip-so400m-patch14-384` (open, 3.5 GB) on first use.
 
 ### Why `pusht` failing matters for all of this
 
@@ -1013,6 +1039,86 @@ All four are CPU-only pods on purpose. A GPU-holding orchestrator deadlocks its 
 child on "Insufficient nvidia.com/gpu", and a shell loop on the host gets killed for
 memory long before an overnight run finishes.
 
+## The runs behind these numbers
+
+Every figure quoted in this README came from a specific run on this cluster, and here is
+which one. Useful on a stream: open the run, open the report, and the video and the
+numbers are right there rather than being retyped from a slide.
+
+```
+http://localhost:30080/v2/domain/development/project/world-models/runs/<run-id>
+```
+
+These IDs are local to this devbox and only visible to whoever is driving it. All of them
+were confirmed `SUCCEEDED` against the Flyte API, and every report was additionally
+checked by decoding its bytes: counting `<video>` tags, base64-decoding each one and
+asserting bytes 4:8 are `ftyp`. A green run and a report containing playable video are
+different claims.
+
+| task | run id | what it did, and what it is for |
+| --- | --- | --- |
+| `plan` | `rtnmdk25bw445k8mnjcr` | Decomposed a goal into subtasks, then generated a clip for each step it wrote. Task decomposition for hierarchical control, and a way to auto-generate scenario prompts for a data run instead of writing them by hand. |
+| `judge` | `rzhv5q2jmm2btffnxn6f` | Rolled a world forward 21 segments, then watched its own output and scored every one. An automatic QA gate on synthetic data that replaces human review, and it catches semantic drift that no pixel metric reports. |
+| `blind` | `rct2f4pd4qtcpnhqs7w9` | Generated four counterfactual rollouts, then judged them unlabelled and shuffled. An eval harness where the grader must not see the condition, which is how you audit whether conditioning works without leaking the answer to the judge. |
+| `cycle` | `rsw5ntmrnrkkvbd6c9k2` | Pushed real actions to video and back to actions, scored against the originals. The go/no-go number for a synthetic data programme: it gives you the label noise floor before you spend GPU-months generating data. |
+| `detail` | `rk8gg8g5mxsg2b6xlz82` | Blurred the real clip down to the dreamed clip's sharpness and re-read it with the same model. Decides where the money goes: lost detail means waiting for a better generator, a distribution gap means fine-tuning the labeller instead. |
+| `dream` | `r8md2g6ps4qjcr5qt4mr` | Generated six driving behaviours the source clip never showed, critiqued them, labelled the survivors. The data engine itself, and the rejection rate is your generation yield. |
+| `choose` | `rh97n69m8pk2lcsfkv6f` | Imagined four futures from one frame and scored them against two opposite goals. Action selection without a trained value function, which is the thing Dreamer spends millions of environment steps learning. |
+| `odyssey` | `r67dbwckjzbr9d9x6dz4` | Ran a closed-loop agent inside its own dream for 40 steps, narrating itself live. Long-horizon policy evaluation with no hardware and no risk; the action-magnitude series separates "the policy gave up" from "the renderer froze". |
+| `robust` | `rpt29r8wcjptk92kxrg4` | Re-ran the four counterfactuals at three seeds and compared the ordering. The check to run before stating a result publicly: cheap insurance against publishing a property of seed 0. |
+| `embodiments` | `rzn9v9gdqz8bhhw9ppmk` | Fed real in-domain footage to two embodiments and asked whether the scene survived. Tells you which robots the checkpoint actually knows rather than merely accepts, which decides what simulator you could ever bridge to. |
+| `train` | `rmg7m2n7hnpn8jv6gl7n` | Trained two identical policies, one on real footage and one on dreams, and tested both on held-out real frames. Stage 6 of the data engine, and the run where a trivial baseline proved neither had learned anything. |
+| `access` | `r74d2wtswvjdnvbwf64d` | Probed a real weight file in each gated repo from inside a pod with the secret mounted. The token is a cluster secret, not a shell variable, so this is the only way to tell "licence not accepted" from "no credentials here". |
+| `restyle` | `rwz8lrjzn5z5xrt9dlk4` | Handed Cosmos Transfer a 2D PushT clip plus its edge map and asked for a photorealistic rendering of the same geometry. Transfer did its job exactly and the result is still wrong, which is the clearest argument in this repo for why sim2real input has to be 3D. |
+
+### What `restyle` showed: Transfer worked, and the input was still wrong
+
+The output is genuinely photorealistic (wood grain, lab shelving, overhead fluorescents,
+shallow depth of field) and it **upscaled 256x256 to 720x704** on the way. Trace the
+outline against the Canny map and it matches precisely: the geometry was preserved,
+exactly as advertised.
+
+And the result is still nonsense. Given a top-down 2D schematic, Transfer rendered a
+**vertical wooden sculpture standing on a post**, with the blue pusher circle as a small
+metal ball resting against it and the green target overlay absorbed into the woodwork.
+
+That is not a failure of the model, it is a failure of the input, and the distinction is
+the whole lesson. **A Canny edge map of a 2D game is a silhouette with no depth**, and
+"preserve the geometry" only means something if there is geometry to preserve. Handed an
+ambiguous outline, Transfer resolved the ambiguity the only way it could: by inventing a
+plausible three-dimensional object with the right profile.
+
+Two things follow, and both change what to build next:
+
+- **The source has to be a 3D render**, which is why `restyle --source mujoco` is the
+  default and PushT is kept only as this contrast. Isaac Sim and Omniverse produce scenes
+  that are physically correct and look synthetic; that is the gap Transfer closes.
+- **Edges are the weakest control signal available.** They throw away exactly the
+  information the model then has to invent. A real sim hands over **depth or
+  segmentation** buffers, which is why those controlnet branches exist, and `--control
+  depth` on a 3D source is the combination worth running rather than edges on anything.
+
+Cost note: 1336s for 29 frames, about 46 s/frame, almost certainly
+`enable_model_cpu_offload` swapping the 7B Qwen2.5-VL text encoder in and out. Transfer is
+much smaller than Cosmos3-Nano and the pod has 96 GiB, so the offload is probably
+unnecessary and is the first thing to try removing.
+
+### The runs that were wrong, which are the better story
+
+Worth keeping, because a suite that only shows its successes teaches the wrong lesson
+about how any of this actually went.
+
+| run id | what it was | why it is here |
+| --- | --- | --- |
+| `rlkrnp7xdbnfdt7z62rd` | `train`, single frames | produced a tidy "dreams cost 1.10x" between two policies that were **both worse than predicting a constant**. The control was missing, so nothing in the output said so. This is why `bc.mean_baseline` is now computed inside the task and charted as the first bar. |
+| `rvjvhpm6rph6rjgkqqgk` | `judge`, 5 segments | scores 8,8,8,8,8,7 and overlap 0.86 to 1.0: a rollout that has not drifted yet, so the instrument came back untested rather than validated. The default is 20 continuations because of this run. |
+| `rpd6xcmsqbc45qd7jjqw` | `blind`, first attempt | died on `cuDevicePrimaryCtxRetain` seconds after an image rebuild filled the page cache. Not a code bug; see the page-cache note below. |
+| `rrznxlbtgjnb42xkwgxq` | `restyle`, first attempt | `cosmos_guardrail is not installed`. Transfer **requires** a guardrail and raises without one, citing the NVIDIA Open Model License. |
+| `rz74lmc5btd2k8c2ktht` | `restyle`, second attempt | `Too many levels of symbolic links`: nltk 3.10's `pathsec` refuses to open files through symlinks, and a Hugging Face cache is a symlink farm. |
+
+Four of those five were environment or methodology failures rather than model failures,
+which is roughly the ratio the rest of this README reflects.
+
 ## Run it
 
 ```bash
@@ -1221,6 +1327,53 @@ continuous predicted video) with a 9.2 MB stitched clip embedded in the report. 
 -75% overall. The shape of the decline is the finding and is written up above.
 
 **`invert`, `rollout`, `compare`** predate this round and are unchanged.
+
+### `train`: an honest negative, and the control that caught it
+
+Stage 6, and the result is that **neither policy learned anything.** Worth writing down
+in full because the first version of this task nearly shipped a number that looked like a
+finding.
+
+Run 1, single frames as input:
+
+| | MAE on held-out real |
+| --- | --- |
+| policy trained on real footage | 0.2385 |
+| policy trained on dreams | 0.2613 |
+
+A tidy 1.10x, which reads as "dreams cost 10%". Then the control:
+
+| | |
+| --- | --- |
+| **predict the training mean, ignoring the images entirely** | **0.1516** |
+
+**Both policies were worse than a constant.** The 1.10x was the ratio between two
+failures. Without the trivial baseline sitting next to them there was nothing in the
+output to say so, and the number would have gone straight into this README.
+
+The cause was not only data scale. DROID's `action` is a **velocity command**, and
+velocity is not observable in a single static frame, so the task as posed was ill-posed
+and predicting the mean was the correct strategy. Run 2 switched the input to consecutive
+**frame pairs** (6 channels), which is why inverse dynamics is given a video rather than
+a photograph:
+
+| | MAE on held-out real |
+| --- | --- |
+| predict the training mean | 0.1516 |
+| policy trained on real footage | 0.2511 |
+| policy trained on dreams | 0.2220 |
+
+Still both worse than the constant, and the dream policy now nominally "beats" the real
+one, which is noise between two models that have not learned. 360 frame pairs and a
+350k-parameter conv net trained from scratch is simply not enough for visuomotor control,
+and the fix is a pretrained vision encoder and orders of magnitude more data rather than
+another architecture tweak.
+
+`bc.mean_baseline` is now computed inside the task, charted as the first bar, and printed
+as a verdict line that reads **"Policies that beat the trivial baseline: NONE"**. That
+line is the most valuable thing this task produces. A ratio between two models is
+meaningless until at least one of them has beaten doing nothing, and that is very easy to
+forget when the ratio looks plausible.
 
 ### The understanding surface, and what it is honestly worth
 

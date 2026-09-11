@@ -79,6 +79,7 @@ import flyte.report
 # while everything works on the host.
 import bc
 import media
+import mjc
 import prompts
 import reports
 import world
@@ -3590,6 +3591,554 @@ async def train(
         "dream": {k: v for k, v in finals.get("dream", {}).items() if k != "per_dim"},
         "dream_cost_ratio": round(ratio, 3) if ratio else None,
         "dreaming_seconds": round(gen_secs, 1),
+    }
+
+
+@orch_env.task(report=True)
+async def access(repo: str = "") -> dict:
+    """Can this cluster's HF_TOKEN actually reach the gated Cosmos repos?
+
+    CPU-only and seconds long, because the question is about credentials rather than
+    compute. It exists because the answer is genuinely hard to get from a laptop: the
+    token lives as a Flyte secret on the devbox and not in anyone's shell, so an
+    anonymous check from the host returns GatedRepoError whether or not the licence has
+    been accepted. Those two states look identical and mean opposite things.
+
+    Run it with the secret mounted, which is opt-in for the reason config.py explains
+    (declaring a secret the cluster does not hold fails the pod at ADMISSION):
+
+        COSMOS_HF_SECRET=1 flyte run pipeline.py access
+
+    Probes a real weight file rather than the README, because HF serves repo metadata
+    and even some files on a gated repo to anyone; only fetching something real tells
+    you the gate is open.
+    """
+    import os
+
+    from huggingface_hub import get_hf_file_metadata, hf_hub_url
+
+    token = os.environ.get("HF_TOKEN")
+    # The whole roadmap, so one run answers "what else should I accept?" definitively.
+    # A real file per repo, never the README: the Hub serves metadata and some files on
+    # gated repos to anyone, so only fetching something substantial proves the gate.
+    targets = [
+        # --- in use, or the next thing to build ---
+        ("nvidia/Cosmos3-Nano", "config.json", "IN USE, ungated: the control row"),
+        ("nvidia/Cosmos-Transfer2.5-2B",
+         "general/edge/61f5694b-0ad5-4ecd-8ad7-c8545627d125_ema_bf16.pt",
+         "IN USE by `restyle`: sim2real, the Isaac bridge"),
+        ("nvidia/Cosmos-1.0-Guardrail", "config.json",
+         "REQUIRED by Transfer; its pipeline raises without a guardrail"),
+        ("google/siglip-so400m-patch14-384", "config.json",
+         "the guardrail's vision encoder, open, 3.5 GB"),
+        # --- reasoning ---
+        ("nvidia/Cosmos-Reason2-2B", "config.json", "dedicated reasoner, 4.9 GB"),
+        ("nvidia/Cosmos-Reason2-8B", "config.json", "dedicated reasoner, 17.5 GB"),
+        ("nvidia/Cosmos-Reason2-32B", "config.json", "dedicated reasoner, 64 GB"),
+        # --- embodiment / policy, the closed-loop roadmap ---
+        ("nvidia/Cosmos3-Edge", "config.json", "4B: the size-vs-quality axis, never run"),
+        ("nvidia/Cosmos3-Edge-Policy-DROID", "config.json", "a real VLA policy, 9.2 GB"),
+        ("nvidia/Cosmos3-Nano-Policy-DROID", "config.json", "a real VLA policy, 32.9 GB"),
+        # --- the Predict line Transfer is designed to pair with ---
+        ("nvidia/Cosmos-Predict2.5-2B", "README.md", "Predict 2.5, pairs with Transfer"),
+        ("nvidia/Cosmos-Predict2.5-14B", "README.md", "Predict 2.5, larger"),
+        # --- measurement and extras ---
+        ("nvidia/Cosmos-Embed1-448p", "config.json",
+         "video embeddings: a better drift metric than pixel diff"),
+        ("nvidia/GEN3C-Cosmos-7B", "README.md", "camera-controlled 3D-consistent generation"),
+        ("nvidia/Cosmos-H-Dreams", "README.md", "real-time streaming world model (surgical)"),
+    ]
+    if repo:
+        targets = [(repo, "config.json", "requested")]
+
+    results, rows = {}, [("Token present in pod", "yes" if token else "NO")]
+    for name, path, why in targets:
+        try:
+            meta = get_hf_file_metadata(hf_hub_url(name, path), token=token)
+            results[name] = {"open": True, "bytes": meta.size}
+            rows.append((name, f"OPEN ({(meta.size or 0) / 1e6:.1f} MB) - {why}"))
+        except Exception as exc:  # noqa: BLE001
+            results[name] = {"open": False, "error": type(exc).__name__}
+            rows.append((name, f"{type(exc).__name__} - {why}"))
+        log.info("access %s: %s", name, results[name])
+
+    gated = [n for n, v in results.items() if not v["open"]]
+    control = results.get("nvidia/Cosmos3-Nano", {}).get("open")
+    body = reports.note(
+        "The last row is the control: `Cosmos3-Nano` is ungated, so if it fails the "
+        "problem is the token or the network rather than any licence."
+        if control is not False else
+        "<b>The ungated control FAILED.</b> This is not a licence problem; the pod "
+        "cannot reach the Hub at all."
+    )
+    flyte.report.replace(
+        reports.final_html("Gated repo access", rows, body, reports.ACCESS_EXPLAINER),
+        do_flush=True,
+    )
+    if gated:
+        body += reports._heading("Still to accept")
+        body += reports.note(
+            "Open each page and accept the licence, then re-run this task:<br>"
+            + "<br>".join(f'&nbsp;&nbsp;https://huggingface.co/{n}' for n in gated)
+        )
+        flyte.report.replace(
+            reports.final_html("Gated repo access", rows, body, reports.ACCESS_EXPLAINER),
+            do_flush=True,
+        )
+    return {"token_in_pod": bool(token), "open": [n for n, v in results.items() if v["open"]],
+            "still_gated": gated, "results": results, "control_ungated_ok": control}
+
+
+# Cosmos Transfer 2.5. A different model from everything above, and a different job:
+# Predict GENERATES a world, Transfer RESTYLES one you already have, preserving the
+# geometry and motion while pushing the rendering toward realism.
+#
+# Loaded off revision branches of one repo rather than separate repos, which is easy to
+# get wrong: the weights at the repo root are raw .pt checkpoints, and only the
+# `diffusers/...` branches carry a loadable layout.
+TRANSFER_REPO = "nvidia/Cosmos-Transfer2.5-2B"
+TRANSFER_BRANCH = "diffusers/general"
+CONTROL_BRANCHES = {
+    "edge": "diffusers/controlnet/general/edge",
+    "depth": "diffusers/controlnet/general/depth",
+    "seg": "diffusers/controlnet/general/seg",
+    "blur": "diffusers/controlnet/general/blur",
+}
+
+# Two sources, and which one is the DEFAULT matters more than it looks.
+#
+# `mujoco` is the real use case: a three-dimensional, physically correct scene that looks
+# synthetic, which is exactly what Isaac Sim and Omniverse produce and exactly what the
+# sim2real pipeline has to convert. The simulator also commands the actions, which is why
+# this path has no label tax at all.
+#
+# `pusht` was the original default and it was the wrong choice, kept only as a contrast.
+# It is the clip `embodiments` proved Cosmos PREDICT cannot handle, which made a tidy
+# story, but it is a flat 2D diagram: a white field with coloured polygons and no
+# photorealistic counterpart for Transfer to move it toward. Transfer restyles a render;
+# it is not a renderer for a schematic.
+RESTYLE_SOURCES = {
+    "mujoco": {
+        "kind": "sim",
+        "size": (640, 384),
+        "fps": 10,
+        "prompt": (
+            "A red robotic end effector pushes a blue plastic block across a white "
+            "laboratory bench toward a marked target. Photorealistic, shot on a "
+            "high-end camera, soft overhead studio lighting, realistic material "
+            "textures, subtle shadows and shallow depth of field."
+        ),
+        "note": "A 3D simulator render: physically correct, and it looks synthetic. "
+                "This is the shape of input Transfer exists for.",
+    },
+    # The fidelity control. Everything above asks what Transfer does to a SYNTHETIC scene;
+    # this asks what it does to one that is already real. If a real lab comes back as the
+    # same real lab, then the PushT result was about the input being two-dimensional and
+    # not about Transfer being loose with scenes in general. Without this row that stays
+    # an assumption.
+    "droid": {
+        "kind": "lerobot",
+        "dataset": "lerobot/droid_100",
+        "video": "videos/observation.images.exterior_image_1_left/chunk-000/file-000.mp4",
+        "size": (320, 192),
+        "fps": 15,
+        "prompt": (
+            "A Franka robot arm on a laboratory bench, cluttered workspace, natural "
+            "indoor lighting, photorealistic, shot on a high-end camera."
+        ),
+        "note": "Already-real footage. The CONTROL: does Transfer preserve a scene that "
+                "needs no restyling, or does it wander even here?",
+    },
+    "pusht": {
+        "kind": "lerobot",
+        "dataset": "lerobot/pusht",
+        "video": "videos/observation.image/chunk-000/file-000.mp4",
+        "size": (256, 256),
+        "fps": 10,
+        "prompt": (
+            "A robotic manipulator pushes a T-shaped wooden block across a white "
+            "laboratory bench. Overhead studio lighting, photorealistic, crisp shadows "
+            "and realistic material textures."
+        ),
+        "note": "A flat 2D diagram. Kept as a CONTRAST: it is the clip Predict could not "
+                "handle, and it is also not what Transfer is for, because there is no "
+                "realistic counterpart for a schematic to be moved toward.",
+    },
+}
+
+
+@gpu_env.task(report=True)
+async def restyle(
+    source: str = "mujoco",
+    control: str = "edge",
+    offload: bool = False,
+    frames: int = 29,
+    steps: int = 25,
+    guidance: float = 4.0,
+    scale: float = 1.0,
+    seed: int = 0,
+) -> dict:
+    """Cosmos Transfer: keep the geometry, change the rendering. The sim2real half.
+
+    Every other task in this file uses Cosmos PREDICT, which generates a world. This uses
+    Cosmos TRANSFER, which restyles one you already have. That distinction is the whole
+    reason the sim2real pipeline works:
+
+        Isaac Sim / Omniverse  ->  structured output (depth, segmentation, edges)
+                               ->  Cosmos Transfer  ->  photorealistic video
+                               ->  train a policy on it
+
+    and it sidesteps every problem the Predict path ran into. The simulator supplies the
+    actions, so there is **no label tax** at all (`cycle` measured 3x for IDM-recovered
+    labels). You never leave the simulator's robot, so there is **no embodiment
+    mismatch**. And Transfer is handed the geometry as a control signal rather than
+    asked to infer it from an out-of-distribution frame, so the failure that killed
+    `pusht` under Predict cannot happen in the same way.
+
+    Which is why the input here is PushT. `embodiments` proved Predict cannot handle it:
+    given a white background and flat coloured shapes it threw the scene away and
+    rendered a photorealistic arm on a wooden desk. Same clip, different model, and the
+    question is whether the T-block is still a T-block in the same place.
+
+    Note this is a genuinely separate checkpoint, not another door into Cosmos3-Nano, and
+    a larger one than "2B" suggests: the transformer is 2B but the text encoder is
+    Qwen2.5-VL-7B. Gated, so it needs COSMOS_HF_SECRET=1 and an accepted licence; run
+    `access` first if unsure.
+
+    **The guardrail is not optional here, and that is a licence term rather than a
+    dependency accident.** Every Predict task in this file passes
+    `enable_safety_checker=False`, which is sanctioned: the flag exists and NVIDIA's own
+    runner exposes `--disable-safety-checker`. `Cosmos2_5_TransferPipeline` has no such
+    flag, constructs a checker unconditionally, and RAISES if one is absent with a
+    message citing the NVIDIA Open Model License. So `cosmos_guardrail` is installed in
+    the image rather than stubbed out, and these runs DO have a content guardrail even
+    though the rest of this file does not. It pulls `nvidia/Cosmos-1.0-Guardrail` (gated,
+    so it needs the same licence acceptance) and `google/siglip-so400m-patch14-384`
+    (open, 3.5 GB) the first time it runs.
+    """
+    import numpy as np
+    import torch
+
+    spec = RESTYLE_SOURCES[source]
+    rows = [
+        ("Model", f"{TRANSFER_REPO} ({TRANSFER_BRANCH})"),
+        ("Control", f"{control} ({CONTROL_BRANCHES.get(control, '?')})"),
+        ("Source", f"{source}: {spec['note']}"),
+        ("Task", "keep the geometry, change the rendering"),
+    ]
+    _paint("Building the source clip", source, rows)
+
+    sim_actions = None
+    if spec["kind"] == "sim":
+        src_frames, sim_actions = mjc.rollout(
+            frames=frames, width=spec["size"][0], height=spec["size"][1]
+        )
+        rows.append(("Ground-truth actions", f"{sim_actions.shape} commanded by the "
+                                             f"simulator, so no label tax at all"))
+    else:
+        sample = world.load_lerobot_sample(
+            spec["dataset"], spec["video"], start=30, count=frames,
+            size=tuple(spec["size"]),
+        )
+        src_frames = sample["frames"]
+    source_clip = src_frames
+    fps = int(spec["fps"])
+
+    # Canny on each frame. This is the "structured simulation output" stand-in: an Isaac
+    # pipeline would hand over real depth or segmentation buffers instead of deriving
+    # edges from pixels, and would be strictly better for it, but the control signal
+    # enters the model at exactly the same place.
+    import cv2
+
+    edges = [
+        cv2.Canny(cv2.cvtColor(np.array(f.convert("RGB")), cv2.COLOR_RGB2BGR), 100, 200)
+        for f in source_clip
+    ]
+    stacked = torch.from_numpy(np.stack(edges)[None]).expand(3, -1, -1, -1)
+    from PIL import Image
+
+    controls = [Image.fromarray(x.numpy()) for x in stacked.permute(1, 2, 3, 0)]
+    rows.append(("Control frames", f"{len(controls)} {control} maps at {controls[0].size}"))
+    # The prompt belongs in the report, not just in the source. It is the single biggest
+    # lever on what Transfer produces: the control signal fixes the geometry, and the
+    # prompt decides what material, lighting and setting that geometry is rendered as.
+    # Reading an output without seeing the prompt that shaped it is guesswork.
+    rows.append(("Prompt", spec["prompt"]))
+    rows.append(("Negative prompt", prompts.NEGATIVE[:160] + "..."))
+
+    def paint(stage: str, detail: str, out=None) -> None:
+        cells = [
+            ("the synthetic source", media.video_html(
+                media.encode(source_clip, fps=fps), "as the simulator drew it",
+                max_width=300, autoplay=False) + media.strip(source_clip, count=3, width=90)),
+            (f"the {control} control signal", media.video_html(
+                media.encode(controls, fps=fps), "the geometry, handed to the model",
+                max_width=300, autoplay=False) + media.strip(controls, count=3, width=90)),
+        ]
+        if out is not None:
+            cells.append((
+                "Cosmos Transfer's rendering",
+                media.video_html(media.encode(out, fps=fps),
+                                 f"{len(out)} frames, same geometry", max_width=300,
+                                 autoplay=False) + media.strip(out, count=3, width=90)))
+        body = reports._heading("Same geometry, different rendering")
+        body += reports.side_by_side(cells)
+        if out is not None:
+            body += reports.note(
+                "The question is not whether the output looks good. It is whether the "
+                "T-block is still a T-block, still in the same place, still moving the "
+                "same way. Transfer preserving that is what makes the simulator's "
+                "actions valid labels for the restyled video, and it is the entire "
+                "reason this path has no label tax."
+            )
+        live = list(rows) + ([("Progress", detail)] if detail else [])
+        flyte.report.replace(
+            reports.final_html(stage, live, body, reports.RESTYLE_EXPLAINER), do_flush=True
+        )
+
+    paint("Loading Cosmos Transfer", "a separate checkpoint; 2B transformer + a 7B text encoder")
+
+    from diffusers import AutoModel, Cosmos2_5_TransferPipeline
+
+    world.guard_memory(40.0)
+    controlnet = AutoModel.from_pretrained(
+        TRANSFER_REPO, revision=CONTROL_BRANCHES[control], torch_dtype=torch.bfloat16
+    )
+    pipe = Cosmos2_5_TransferPipeline.from_pretrained(
+        TRANSFER_REPO, revision=TRANSFER_BRANCH, controlnet=controlnet,
+        torch_dtype=torch.bfloat16,
+    )
+    # Offload is OFF by default, which is a correction. The pipeline declares an offload
+    # sequence (text_encoder -> transformer -> controlnet -> vae) and turning it on looked
+    # like free prudence, but it cost 1336s for 29 frames at 256x256, about 46 s/frame,
+    # almost all of it swapping the 7B Qwen2.5-VL text encoder across the PCIe bus on
+    # every step. Transfer is far smaller than Cosmos3-Nano and this pod has 96 GiB, so
+    # there is nothing to be prudent about. Pass --offload to put it back if a bigger
+    # resolution ever needs it.
+    if offload:
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe.to("cuda")
+    rows.append(("Resident", f"{torch.cuda.memory_allocated() / 2**30:.1f} GiB after load"))
+
+    paint("Restyling", f"{steps} steps, control scale {scale}")
+    t0 = time.monotonic()
+    result = pipe(
+        controls=controls,
+        controls_conditioning_scale=scale,
+        prompt=spec["prompt"],
+        negative_prompt=prompts.NEGATIVE,
+        num_frames=len(controls),
+        num_inference_steps=steps,
+        guidance_scale=guidance,
+        generator=torch.Generator().manual_seed(seed),
+    )
+    secs = time.monotonic() - t0
+    out = list(result.frames[0])
+    rows.append(("Restyle time", f"{secs / 60:.1f} min for {len(out)} frames"))
+
+    stats_in, stats_out = world.clip_stats(source_clip), world.clip_stats(out)
+    rows.append(("Motion preserved", f"{stats_in['motion']:.2f} source -> "
+                                     f"{stats_out['motion']:.2f} restyled"))
+    paint("Finished", "", out=out)
+
+    log.info("restyle: %s frames in %.0fs, motion %.2f -> %.2f",
+             len(out), secs, stats_in["motion"], stats_out["motion"])
+    return {
+        "source": source,
+        "control": control,
+        "ground_truth_actions": None if sim_actions is None else list(sim_actions.shape),
+        "frames": len(out),
+        "seconds": round(secs, 1),
+        "motion_source": round(stats_in["motion"], 3),
+        "motion_restyled": round(stats_out["motion"], 3),
+        "sharpness_source": round(stats_in["sharpness"], 1),
+        "sharpness_restyled": round(stats_out["sharpness"], 1),
+    }
+
+
+# Standing questions, asked of every window of a long video. Written as yes/no on
+# purpose: `blind`, `judge` and `dream` all found the same thing independently, which is
+# that this model saturates on numeric scales and is reliable on categorical answers.
+# An alerting system wants a decision anyway, not a score.
+WATCH_QUESTIONS: tuple[tuple[str, str], ...] = (
+    ("arm_holding",
+     "Is the robot arm gripping or holding an object? Answer yes or no, then one short sentence."),
+    ("human",
+     "Is a human hand or person visible? Answer yes or no, then one short sentence."),
+    ("moving",
+     "Is anything in the scene moving? Answer yes or no, then one short sentence."),
+)
+
+WATCH_SOURCE = {
+    "dataset": "lerobot/droid_100",
+    "video": "videos/observation.images.exterior_image_1_left/chunk-000/file-000.mp4",
+    "size": (320, 192),
+    "fps": 15,
+}
+
+
+@gpu_env.task(report=True)
+async def watch(
+    repo: str = NANO,
+    windows: int = 20,
+    window: int = 16,
+    start: int = 30,
+    stride: int = 0,
+    summarise: bool = True,
+) -> dict:
+    """A video agent: standing questions asked of a long recording, with timestamps.
+
+    The one use case on NVIDIA's list that nothing else here touches, and the one that
+    has nothing to do with robots being controlled. Factories, warehouses, traffic
+    cameras, smart spaces: "alert me if a forklift enters the pedestrian area",
+    "summarise what happened on camera 8", "find every occurrence of someone entering
+    this zone". It needed a task rather than a capability, because the understanding
+    surface already answers questions about arbitrary video in a second or two.
+
+    No generation at all. Only the 16 GB understanding expert is loaded, which is why
+    this is the cheapest task in the file: a window is one forward pass per question, so
+    twenty windows and three questions is about ninety seconds of GPU after the load.
+
+    The questions are yes/no by design. `blind`, `judge` and `dream` each independently
+    found that this model saturates on 1-10 scales and holds up on categorical answers,
+    and an alerting system wants a decision rather than a score anyway.
+
+    Two honest limits, both visible in the report. The model sees `window` frames at a
+    time and has no memory across windows, so it cannot answer "is this the same person
+    as before". And a yes/no with no confidence attached means a false positive looks
+    exactly like a true one; the frames behind every alert are shown so a human can
+    check, which is the only reason to trust the timeline at all.
+    """
+    stride = stride or window
+    rows = [
+        ("Model", f"{repo}, understanding surface only"),
+        ("Task", "standing questions over a long recording"),
+        ("Source", WATCH_SOURCE["dataset"]),
+        ("Coverage", f"{windows} windows of {window} frames, stride {stride}"),
+        ("Questions", ", ".join(k for k, _ in WATCH_QUESTIONS)),
+    ]
+    _paint("Fetching the recording", WATCH_SOURCE["dataset"], rows)
+
+    fps = int(WATCH_SOURCE["fps"])
+    clips: list[dict] = []
+    for i in range(windows):
+        begin = start + i * stride
+        try:
+            sample = world.load_lerobot_sample(
+                WATCH_SOURCE["dataset"], WATCH_SOURCE["video"],
+                start=begin, count=window, size=tuple(WATCH_SOURCE["size"]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("window %s unavailable: %s", i, exc)
+            break
+        clips.append({"index": i, "start": begin, "frames": sample["frames"],
+                      "t": begin / fps})
+    rows.append(("Fetched", f"{len(clips)} windows spanning "
+                            f"{(clips[-1]['t'] - clips[0]['t']):.1f}s of footage"
+                            if clips else "nothing"))
+
+    world.guard_memory(world.REASONER_NEEDS_GIB)
+    _paint("Loading the understanding surface", "~16 GB; no generation expert at all", rows)
+    model, processor = world.load_reasoner(repo)
+
+    alerts: dict[str, list] = {k: [] for k, _ in WATCH_QUESTIONS}
+    answers: dict[int, dict] = {}
+    summary = ""
+    ask_secs = 0.0
+
+    def timeline(key: str) -> str:
+        """One cell per window, filled when that question answered yes."""
+        cells = ""
+        for c in clips:
+            hit = c["index"] in [a["index"] for a in alerts[key]]
+            known = c["index"] in answers
+            colour = "#00b894" if hit else ("#2d3436" if known else "#1a1a2e")
+            cells += (f'<span title="t={c["t"]:.1f}s" style="display:inline-block;'
+                      f'width:16px;height:16px;margin:1px;border-radius:3px;'
+                      f'background:{colour};"></span>')
+        return (f'<div style="font-family:monospace;font-size:12px;color:#ccc;'
+                f'margin:0 0 8px;"><span style="display:inline-block;width:120px;'
+                f'color:#888;">{key}</span>{cells}'
+                f'<span style="color:#fdcb6e;padding-left:10px;">'
+                f'{len(alerts[key])} hit(s)</span></div>')
+
+    def paint(stage: str, detail: str) -> None:
+        body = reports._heading("The recording")
+        if clips:
+            whole = [f for c in clips for f in c["frames"]]
+            body += media.video_html(media.encode(whole, fps=fps, crf=30),
+                                     f"{len(whole)} frames, {len(whole) / fps:.1f}s",
+                                     max_width=480)
+            body += media.strip(whole, count=10, width=100)
+        if answers:
+            body += reports._heading("Alert timeline")
+            for key, _ in WATCH_QUESTIONS:
+                body += timeline(key)
+            body += reports.note(
+                "One cell per window, left to right in time. Green is a yes, dark grey a "
+                "no, empty not yet looked at. Hover for the timestamp."
+            )
+            # The frames behind the alerts, because a yes/no with no confidence attached
+            # is only trustworthy if a human can check it in one glance.
+            for key, _ in WATCH_QUESTIONS:
+                if not alerts[key]:
+                    continue
+                body += reports._heading(f"What fired '{key}'")
+                cells = []
+                for a in alerts[key][:3]:
+                    c = clips[a["index"]]
+                    cells.append((f"t = {c['t']:.1f}s",
+                                  media.strip(c["frames"], count=3, width=96)
+                                  + reports.quote(a["answer"], "the model")))
+                body += reports.side_by_side(cells)
+        if summary:
+            body += reports._heading("What happened, in one paragraph")
+            body += reports.quote(summary, "asked to summarise the whole recording")
+        live = list(rows) + ([("Progress", detail)] if detail else [])
+        flyte.report.replace(
+            reports.final_html(stage, live, body, reports.WATCH_EXPLAINER), do_flush=True
+        )
+
+    paint("Watching", "starting")
+
+    for c in clips:
+        answers[c["index"]] = {}
+        for key, question in WATCH_QUESTIONS:
+            text, secs = world.ask(model, processor, question, video=c["frames"],
+                                   frames=len(c["frames"]), max_new_tokens=96)
+            ask_secs += secs
+            yes = world.parse_choice(text, ("yes", "no")) == 0
+            answers[c["index"]][key] = {"yes": yes, "answer": text}
+            if yes:
+                alerts[key].append({"index": c["index"], "t": round(c["t"], 2),
+                                    "answer": text})
+        log.info("window %s (t=%.1fs): %s", c["index"], c["t"],
+                 {k: v["yes"] for k, v in answers[c["index"]].items()})
+        paint("Watching", f"window {c['index'] + 1} of {len(clips)}")
+
+    if summarise and clips:
+        paint("Summarising", "one pass over frames sampled across the whole recording")
+        spread = [f for c in clips for f in world.sample_frames(c["frames"], 2)]
+        summary, secs = world.ask(
+            model, processor,
+            "Summarise everything that happens in this recording in one short paragraph.",
+            video=spread, frames=min(len(spread), 16), max_new_tokens=256,
+        )
+        ask_secs += secs
+
+    rows.append(("Watch time", f"{ask_secs:.0f}s of GPU for "
+                               f"{len(clips) * len(WATCH_QUESTIONS)} questions"))
+    paint("Finished", "")
+
+    log.info("watch: %s", {k: len(v) for k, v in alerts.items()})
+    return {
+        "windows": len(clips),
+        "seconds_of_footage": round(len(clips) * window / fps, 1),
+        "alerts": {k: [a["t"] for a in v] for k, v in alerts.items()},
+        "hit_counts": {k: len(v) for k, v in alerts.items()},
+        "summary": summary,
+        "ask_seconds": round(ask_secs, 1),
     }
 
 
