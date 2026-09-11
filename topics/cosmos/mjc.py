@@ -38,6 +38,11 @@ SCENE = """
   <visual>
     <headlight ambient="0.4 0.4 0.4" diffuse="0.7 0.7 0.7"/>
     <quality shadowsize="2048"/>
+    <!-- The offscreen framebuffer defaults to 640x480 and mujoco.Renderer REFUSES a
+         request larger than it, so a caller asking for the generation path's native
+         832x480 dies at construction rather than resizing. Sized to the widest thing
+         any task here asks for. -->
+    <global offwidth="1280" offheight="800"/>
   </visual>
   <asset>
     <texture name="grid" type="2d" builtin="checker" rgb1="0.9 0.9 0.9" rgb2="0.75 0.75 0.78"

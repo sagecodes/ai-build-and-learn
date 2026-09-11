@@ -226,6 +226,13 @@ image = (
     # imported inside the pod as well as on the host, so the package has to exist in
     # both places even though the template itself is only ever read at serialization.
     .with_pip_packages("kubernetes")
+    # Also its own layer, and for the same reason. einops is not a dependency of
+    # anything above; it is what `nvidia/Cosmos-Embed1-448p` imports from inside its
+    # own `modeling_embed1.py`, which arrives through trust_remote_code and so is
+    # invisible to every resolver. Without it `embed` generates the whole rollout,
+    # then dies on the last line inside a try/except and reports a green run with the
+    # one metric it exists to produce quietly missing.
+    .with_pip_packages("einops")
 )
 
 

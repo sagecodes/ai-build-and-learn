@@ -4520,6 +4520,155 @@ async def embed(
     }
 
 
+# v2v reproduces the conditioning frames it was handed before it starts predicting,
+# so the model's first genuinely predicted frame is at this offset. `world.stitch`
+# uses the same constant to join chained segments.
+REPRODUCED = 5
+
+PHYSICS_PROMPT = (
+    "A red capsule slides across a wooden tabletop and topples a grey block. "
+    "Static camera, steady lighting, the block tips over and settles."
+)
+
+
+@gpu_env.task(report=True)
+async def physics(
+    repo: str = NANO,
+    frames: int = 45,
+    condition: int = 8,
+    steps: int = 35,
+    guidance: float = 6.0,
+    seed: int = 0,
+) -> dict:
+    """The world model against a physics engine, with ground truth on both sides.
+
+    Every other task in this file grades Cosmos against itself. `counterfact` compares
+    its rollouts to each other, `judge` asks it to watch its own output, `horizon`
+    watches a number drift with nothing to say what the number SHOULD be. None of them
+    can answer the question a world model actually exists to answer: when it predicts
+    what happens next, is it right?
+
+    MuJoCo can answer it. Render a scripted push, hand Cosmos only the first few frames,
+    and ask it to continue. The simulator already computed the rest, so for once there
+    is a correct answer to score against, frame by frame.
+
+    **The control is the whole experiment.** A generated clip that merely looks
+    plausible will score some divergence against the truth, and that number means
+    nothing on its own. So the same comparison runs against a clip that predicts
+    NOTHING HAPPENS: the last conditioning frame, frozen for the same duration. If the
+    model cannot beat a still image at predicting a falling block, it has learned the
+    scene's appearance and none of its dynamics, and saying so is worth more than
+    another chart of a metric drifting.
+
+    Expect the model to struggle, and that is a result rather than a disappointment.
+    `embodiments` established that a synthetic render is off-distribution for this
+    checkpoint: handed flat 2D PushT shapes it discarded the scene outright. A MuJoCo
+    render is more realistic than PushT and far less realistic than the robot footage
+    Cosmos was trained on, so this measures where in between it lands, against a
+    baseline that makes the answer falsifiable either way.
+    """
+    rows = [
+        ("Model", repo),
+        ("Truth", "MuJoCo, a real physics engine, rendered in a child process"),
+        ("Task", "condition on the opening frames, predict the rest, score against truth"),
+        ("Control", "the last conditioning frame frozen: the 'nothing moves' prediction"),
+    ]
+    _paint("Simulating", "Rendering the scripted push in MuJoCo.", rows)
+
+    # 832x480 because that is what the generation path wants; rendering at the target
+    # size avoids a resample between the truth and the thing being scored against it.
+    truth, sim_actions, _ = mjc.rollout(frames=frames, width=832, height=480)
+    cond, future = truth[:condition], truth[condition:]
+    rows.append(("Simulated", f"{len(truth)} frames, {sim_actions.shape} commanded actions"))
+    rows.append(("Conditioning", f"first {condition} frames given to the model"))
+    rows.append(("To predict", f"{len(future)} frames the simulator already knows"))
+
+    body = reports._heading("The simulator's ground truth")
+    sim_mp4 = media.encode(truth, fps=24)
+    body += media.video_html(sim_mp4, "MuJoCo: what actually happens", max_width=420,
+                             autoplay=False)
+    flyte.report.replace(reports.final_html("Physics", rows, body), do_flush=True)
+
+    guard = world.guard_memory()
+    rows.append(("GPU", guard))
+    _paint("Loading the generation surface", "Streaming a 16B transformer in BF16.", rows)
+    pipe = world.load(repo)
+
+    _paint("Predicting", f"Continuing {condition} real frames for {frames}.", rows)
+    raw, secs = world.extend(
+        pipe, cond, PHYSICS_PROMPT, num_frames=frames, height=480, width=832,
+        steps=steps, guidance=guidance, seed=seed,
+    )
+    dream = raw[REPRODUCED:]
+    rows.append(("Generated", f"{len(raw)} frames in {secs:.0f}s, "
+                              f"{REPRODUCED} reproduced and dropped"))
+
+    # Score both the model and the do-nothing control on the same frames.
+    n = min(len(dream), len(future))
+    dream, future = dream[:n], future[:n]
+    frozen = [cond[-1]] * n
+
+    div_model = world.frame_divergence(dream, future)
+    div_frozen = world.frame_divergence(frozen, future)
+    per_model = [world.frame_divergence([dream[i]], [future[i]]) for i in range(n)]
+    per_frozen = [world.frame_divergence([frozen[i]], [future[i]]) for i in range(n)]
+
+    beats = div_model < div_frozen
+    verdict = (
+        f"The model beats the frozen-frame control ({div_model:.2f} vs {div_frozen:.2f}), "
+        "so it predicted some of the motion rather than just the scene."
+        if beats else
+        f"The model does NOT beat the frozen-frame control ({div_model:.2f} vs "
+        f"{div_frozen:.2f}). Predicting that nothing moves is closer to the truth than "
+        "what it generated, which means it reproduced the look of the scene and not its "
+        "dynamics."
+    )
+
+    dream_mp4 = media.encode(dream, fps=24)
+    body = reports._heading("Truth, prediction, and the control")
+    body += reports.side_by_side([
+        ("MuJoCo (truth)", media.video_html(media.encode(future, fps=24),
+                                            "what the engine computed", max_width=320,
+                                            autoplay=False)),
+        ("Cosmos (predicted)", media.video_html(dream_mp4, "what the model imagined",
+                                                max_width=320, autoplay=False)),
+        ("Frozen (control)", media.image_html(cond[-1], "the 'nothing moves' prediction",
+                                              width=320)),
+    ])
+    body += reports._heading("Divergence from the truth, per frame (0-255, lower is better)")
+    body += reports.metric_lines({
+        "Cosmos prediction vs truth": per_model,
+        "frozen frame vs truth (control)": per_frozen,
+    }, caption="Where the model's line sits below the control's, it is genuinely predicting.")
+    body += reports.bars([("Cosmos", div_model), ("frozen control", div_frozen)],
+                         caption="Mean absolute pixel difference from the simulator",
+                         unit="")
+    body += reports.note(verdict)
+
+    stats_dream, stats_truth = world.clip_stats(dream), world.clip_stats(future)
+    rows += [
+        ("Cosmos vs truth", f"{div_model:.2f}"),
+        ("Frozen vs truth", f"{div_frozen:.2f}"),
+        ("Motion, truth", f"{stats_truth['motion']:.2f}"),
+        ("Motion, predicted", f"{stats_dream['motion']:.2f}"),
+    ]
+    flyte.report.replace(
+        reports.final_html("Physics: the world model against the engine", rows, body,
+                           explainer=verdict),
+        do_flush=True,
+    )
+    log.info("physics: model %.2f frozen %.2f beats=%s", div_model, div_frozen, beats)
+    return {
+        "divergence_model": round(div_model, 3),
+        "divergence_frozen_control": round(div_frozen, 3),
+        "beats_control": bool(beats),
+        "motion_truth": round(stats_truth["motion"], 3),
+        "motion_predicted": round(stats_dream["motion"], 3),
+        "generate_seconds": round(secs, 1),
+        "frames_scored": n,
+    }
+
+
 @orch_env.task(report=True)
 async def world_models(scene: str = "box-topple", repo: str = NANO) -> dict:
     """Entry point for the short tasks. CPU-only orchestrator, so it cannot deadlock

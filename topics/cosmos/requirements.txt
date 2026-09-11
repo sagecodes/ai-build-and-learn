@@ -52,3 +52,7 @@ imageio
 # Only for building the shared-model-cache PodTemplate in config.py (hostPath volume).
 # Not a flyte dependency, so it has to be asked for explicitly.
 kubernetes
+
+# Imported by nvidia/Cosmos-Embed1-448p's own modeling code, which arrives through
+# trust_remote_code and is therefore invisible to every resolver. `embed` needs it.
+einops
