@@ -83,7 +83,7 @@ import mjc
 import prompts
 import reports
 import world
-from config import NANO, gpu_env, orch_env
+from config import EDGE, NANO, gpu_env, orch_env
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s", force=True)
 log = logging.getLogger(__name__)
@@ -3771,6 +3771,7 @@ RESTYLE_SOURCES = {
 async def restyle(
     source: str = "mujoco",
     control: str = "edge",
+    sweep: str = "",
     offload: bool = False,
     frames: int = 29,
     steps: int = 25,
@@ -3828,9 +3829,9 @@ async def restyle(
     ]
     _paint("Building the source clip", source, rows)
 
-    sim_actions = None
+    sim_actions, sim_depth = None, None
     if spec["kind"] == "sim":
-        src_frames, sim_actions = mjc.rollout(
+        src_frames, sim_actions, sim_depth = mjc.rollout(
             frames=frames, width=spec["size"][0], height=spec["size"][1]
         )
         rows.append(("Ground-truth actions", f"{sim_actions.shape} commanded by the "
@@ -3848,23 +3849,38 @@ async def restyle(
     # pipeline would hand over real depth or segmentation buffers instead of deriving
     # edges from pixels, and would be strictly better for it, but the control signal
     # enters the model at exactly the same place.
-    import cv2
-
-    edges = [
-        cv2.Canny(cv2.cvtColor(np.array(f.convert("RGB")), cv2.COLOR_RGB2BGR), 100, 200)
-        for f in source_clip
-    ]
-    stacked = torch.from_numpy(np.stack(edges)[None]).expand(3, -1, -1, -1)
     from PIL import Image
 
-    controls = [Image.fromarray(x.numpy()) for x in stacked.permute(1, 2, 3, 0)]
-    rows.append(("Control frames", f"{len(controls)} {control} maps at {controls[0].size}"))
+    if control == "depth" and sim_depth is not None:
+        # The simulator's OWN depth buffer, which is the entire reason to source from a
+        # simulator rather than a video. Everything below is the fallback, and measuring
+        # it across three sources is what made the case for this branch: Canny edges were
+        # too sparse on a 2D scene (the model invented geometry), dominated by furniture
+        # on a badly framed one, and so dense on a cluttered real lab that Transfer simply
+        # reproduced the edge map as grey lines. Depth is what Isaac and Omniverse hand
+        # over, and a simulator can give it exactly instead of inferring it from pixels.
+        controls = sim_depth
+    else:
+        import cv2
+
+        edges = [
+            cv2.Canny(cv2.cvtColor(np.array(f.convert("RGB")), cv2.COLOR_RGB2BGR), 100, 200)
+            for f in source_clip
+        ]
+        stacked = torch.from_numpy(np.stack(edges)[None]).expand(3, -1, -1, -1)
+        controls = [Image.fromarray(x.numpy()) for x in stacked.permute(1, 2, 3, 0)]
+    rows.append(("Control frames", f"{len(controls)} {control} maps at {controls[0].size}"
+                                   + (" from the simulator's own buffer"
+                                      if control == "depth" and sim_depth is not None
+                                      else " derived from pixels")))
     # The prompt belongs in the report, not just in the source. It is the single biggest
     # lever on what Transfer produces: the control signal fixes the geometry, and the
     # prompt decides what material, lighting and setting that geometry is rendered as.
     # Reading an output without seeing the prompt that shaped it is guesswork.
     rows.append(("Prompt", spec["prompt"]))
     rows.append(("Negative prompt", prompts.NEGATIVE[:160] + "..."))
+
+    variants: list[dict] = []
 
     def paint(stage: str, detail: str, out=None) -> None:
         cells = [
@@ -3875,15 +3891,17 @@ async def restyle(
                 media.encode(controls, fps=fps), "the geometry, handed to the model",
                 max_width=300, autoplay=False) + media.strip(controls, count=3, width=90)),
         ]
-        if out is not None:
+        for v in (variants if variants else []):
             cells.append((
-                "Cosmos Transfer's rendering",
-                media.video_html(media.encode(out, fps=fps),
-                                 f"{len(out)} frames, same geometry", max_width=300,
-                                 autoplay=False) + media.strip(out, count=3, width=90)))
+                f"Transfer, {v['steps']} steps",
+                media.video_html(media.encode(v["frames"], fps=fps),
+                                 f"{v['seconds']:.0f}s ({v['per_step']}s/step), "
+                                 f"motion {v['motion']}, sharpness {v['sharpness']}",
+                                 max_width=300, autoplay=False)
+                + media.strip(v["frames"], count=3, width=90)))
         body = reports._heading("Same geometry, different rendering")
         body += reports.side_by_side(cells)
-        if out is not None:
+        if variants:
             body += reports.note(
                 "The question is not whether the output looks good. It is whether the "
                 "T-block is still a T-block, still in the same place, still moving the "
@@ -3921,21 +3939,43 @@ async def restyle(
         pipe.to("cuda")
     rows.append(("Resident", f"{torch.cuda.memory_allocated() / 2**30:.1f} GiB after load"))
 
-    paint("Restyling", f"{steps} steps, control scale {scale}")
-    t0 = time.monotonic()
-    result = pipe(
-        controls=controls,
-        controls_conditioning_scale=scale,
-        prompt=spec["prompt"],
-        negative_prompt=prompts.NEGATIVE,
-        num_frames=len(controls),
-        num_inference_steps=steps,
-        guidance_scale=guidance,
-        generator=torch.Generator().manual_seed(seed),
-    )
-    secs = time.monotonic() - t0
-    out = list(result.frames[0])
-    rows.append(("Restyle time", f"{secs / 60:.1f} min for {len(out)} frames"))
+    # A sweep generates one clip per step count FROM ONE MODEL LOAD, which is the only
+    # reason a throughput question is affordable to ask: the load is minutes and separate
+    # runs would pay it every time. `--sweep 6,10,25` is the shape.
+    #
+    # The question it exists to answer is whether the sim2real pipeline is usable at all.
+    # Transfer at 25 steps takes about 30 minutes for 29 frames, and a behaviour-cloning
+    # dataset wants 50+ clips. That is 25 hours, which is not a plan. If 8 steps looks as
+    # good as 25 it becomes an overnight job instead.
+    schedule = [int(x) for x in sweep.split(",") if x.strip()] or [steps]
+    for n in schedule:
+        paint("Restyling", f"{n} steps, control scale {scale}")
+        t0 = time.monotonic()
+        result = pipe(
+            controls=controls,
+            controls_conditioning_scale=scale,
+            prompt=spec["prompt"],
+            negative_prompt=prompts.NEGATIVE,
+            num_frames=len(controls),
+            num_inference_steps=n,
+            guidance_scale=guidance,
+            generator=torch.Generator().manual_seed(seed),
+        )
+        secs = time.monotonic() - t0
+        frames_out = list(result.frames[0])
+        st = world.clip_stats(frames_out)
+        variants.append({"steps": n, "seconds": round(secs, 1),
+                         "per_step": round(secs / n, 1), "frames": frames_out,
+                         "motion": round(st["motion"], 2),
+                         "sharpness": round(st["sharpness"], 1)})
+        log.info("restyle %s steps: %.0fs (%.1fs/step) motion %.2f sharp %.0f",
+                 n, secs, secs / n, st["motion"], st["sharpness"])
+        paint("Restyling", f"{n} steps done")
+
+    out = variants[-1]["frames"]
+    secs = sum(v["seconds"] for v in variants)
+    rows.append(("Restyle time", f"{secs / 60:.1f} min total for "
+                                 f"{len(schedule)} setting(s) at {len(out)} frames"))
 
     stats_in, stats_out = world.clip_stats(source_clip), world.clip_stats(out)
     rows.append(("Motion preserved", f"{stats_in['motion']:.2f} source -> "
@@ -3947,6 +3987,7 @@ async def restyle(
     return {
         "source": source,
         "control": control,
+        "sweep": [{k: v for k, v in d.items() if k != "frames"} for d in variants],
         "ground_truth_actions": None if sim_actions is None else list(sim_actions.shape),
         "frames": len(out),
         "seconds": round(secs, 1),
@@ -4139,6 +4180,492 @@ async def watch(
         "hit_counts": {k: len(v) for k, v in alerts.items()},
         "summary": summary,
         "ask_seconds": round(ask_secs, 1),
+    }
+
+
+@gpu_env.task(report=True)
+async def sizes(
+    small: str = EDGE,
+    large: str = NANO,
+    steps: int = 35,
+    guidance: float = 6.0,
+    seed: int = 0,
+) -> dict:
+    """Does the 4B model still know that actions matter, or only the 16B one?
+
+    The size axis this repo has never run, and the question is sharper than "is the small
+    one worse". `counterfact` is the control that decides whether a checkpoint is usable
+    as a simulator at all: same conditioning frame, same seed, four action sequences, and
+    the predicted motion has to come out in the order the actions describe. A model that
+    quietly ignores its action channel produces beautiful video and is worthless for
+    generating training data.
+
+    So this runs that exact control on BOTH checkpoints. `Cosmos3-Edge` is 4B and 9.2 GB
+    against Nano's 16B and 33 GB, and if the ordering survives at 4B then bulk data
+    generation can run on a quarter of the weights. That is not a cosmetic saving: it is
+    the difference between the throughput wall this pipeline keeps hitting and not.
+
+    Judge it on the ORDERING, not on which clips look nicer. `held` must sit at the
+    bottom and `amplified` at the top on both, and `robust` already established that the
+    ordering is a property of the actions rather than of one seed.
+    """
+    rows = [
+        ("Small", f"{small} (4B)"),
+        ("Large", f"{large} (16B)"),
+        ("Test", "the `counterfact` control, run on both"),
+        ("Claim", "held < reversed < recorded < amplified, by inter-frame motion"),
+    ]
+    _paint("Fetching weights", "the small checkpoint is a fresh ~9 GB download.", rows)
+
+    path = world.snapshot(large)
+    meta = world.load_action_example(path)
+    chunk = meta["chunks"][0]
+    fps = int(meta.get("fps", 10))
+    variants = world.counterfactuals(chunk)
+    names = [n for n, _, _ in variants]
+
+    CLAIMED = ["held", "reversed", "recorded", "amplified"]
+    results: dict[str, dict] = {}
+    strips: dict[str, dict] = {}
+    note = ""
+
+    def paint(stage: str, detail: str) -> None:
+        body = ""
+        for repo in [r for r in (small, large) if r in results]:
+            motion = results[repo]["motion"]
+            order = world.rank_string(motion)
+            ok = order.split(" < ") == CLAIMED
+            body += reports._heading(f"{repo} ({results[repo]['params']})")
+            body += reports.note(
+                f"ordering: <b>{order}</b> "
+                + ("&#10003; matches the claim" if ok else "&#10007; DIFFERENT")
+                + f" &nbsp;|&nbsp; load {results[repo]['load_min']:.1f} min, "
+                  f"{results[repo]['gen_min']:.1f} min for {len(motion)} rollouts"
+            )
+            body += reports.side_by_side([
+                (f"{n}<br/><span style='color:#888;'>motion {motion[n]:.2f}</span>",
+                 strips[repo][n]) for n in names if n in strips[repo]
+            ])
+        if len(results) == 2:
+            body += reports._heading("Same comparison, both checkpoints")
+            bars = []
+            for repo in (small, large):
+                tag = "4B" if repo == small else "16B"
+                for n in names:
+                    if n in results[repo]["motion"]:
+                        bars.append((f"{tag} {n}", results[repo]["motion"][n]))
+            body += reports.bars(bars, caption=(
+                "Inter-frame motion per variant, both checkpoints. Read the ORDER within "
+                "each block, not the absolute heights: the two models need not agree on "
+                "how much motion a scene has, only on which action sequence produces more "
+                "of it. If the small model preserves the ordering, bulk generation can run "
+                "on a quarter of the weights."
+            ))
+        if note:
+            body += reports.note(note)
+        live = list(rows) + ([("Progress", detail)] if detail else [])
+        flyte.report.replace(
+            reports.final_html(stage, live, body, reports.SIZES_EXPLAINER), do_flush=True
+        )
+
+    for repo in (small, large):
+        # Sequentially, releasing between: 9 GB and 33 GB co-resident is affordable but
+        # pointless, and one at a time keeps the peak where the rest of this file keeps it.
+        _paint("Loading", f"{repo}", rows)
+        try:
+            t0 = time.monotonic()
+            pipe = world.load(repo)
+            load_min = (time.monotonic() - t0) / 60
+        except Exception as exc:  # noqa: BLE001
+            note = f"{repo} failed to load and the comparison moved on: {exc}"
+            log.warning(note)
+            continue
+
+        import torch
+
+        params = f"{sum(p.numel() for p in pipe.transformer.parameters()) / 1e9:.1f}B"
+        motion, gen = {}, 0.0
+        for i, (name, actions, _) in enumerate(variants):
+            paint("Generating", f"{repo}: variant {i + 1} of {len(names)}")
+            try:
+                frames, secs = world.rollout_chunk(
+                    pipe, meta, actions, steps=steps, guidance=guidance, seed=seed
+                )
+            except Exception as exc:  # noqa: BLE001
+                note = f"{repo}/{name} failed: {exc}"
+                log.warning(note)
+                continue
+            gen += secs
+            motion[name] = world.clip_stats(frames)["motion"]
+            # Video, not just a strip. A comparison of two checkpoints that shows only
+            # still frames is asking the reader to take the motion numbers on faith, and
+            # motion is the entire quantity being compared.
+            mp4 = media.encode(frames, fps=fps, crf=26)
+            strips.setdefault(repo, {})[name] = (
+                media.video_html(mp4, f"{len(frames)} frames, {secs:.0f}s",
+                                 max_width=300, autoplay=False)
+                + media.strip(frames, count=4, width=92)
+            )
+            log.info("%s %s: motion %.2f (%.0fs)", repo, name, motion[name], secs)
+        results[repo] = {"motion": motion, "params": params,
+                         "load_min": load_min, "gen_min": gen / 60}
+        pipe = None
+        world.release()
+        paint("Generating", f"{repo} done")
+
+    paint("Finished", "")
+
+    verdict = {}
+    for repo, r in results.items():
+        if len(r["motion"]) == len(names):
+            verdict[repo] = world.rank_string(r["motion"]).split(" < ") == CLAIMED
+    log.info("sizes: %s", verdict)
+    return {
+        "checkpoints": {r: {"params": v["params"],
+                            "motion": {k: round(m, 3) for k, m in v["motion"].items()},
+                            "ordering": world.rank_string(v["motion"]),
+                            "load_minutes": round(v["load_min"], 2),
+                            "generate_minutes": round(v["gen_min"], 2)}
+                        for r, v in results.items()},
+        "preserves_ordering": verdict,
+        "note": note,
+    }
+
+
+EMBED_REPO = "nvidia/Cosmos-Embed1-448p"
+
+
+@gpu_env.task(report=True)
+async def embed(
+    repo: str = NANO,
+    chunks: int = 1,
+    segments: int = 14,
+    frames: int = 45,
+    steps: int = 35,
+    guidance: float = 6.0,
+    seed: int = 0,
+) -> dict:
+    """Measure long-horizon drift with a real video embedder instead of word overlap.
+
+    `judge` found the most interesting result in this repo: over 21 segments a rollout's
+    CONTENT drifts at segment 7 while its PHYSICS holds until 17. But it measured content
+    drift with `world.description_overlap`, a Jaccard set overlap between two sentences
+    the model wrote. That is transparent and checkable, and it is also crude in a way
+    worth being honest about: a segment scoring 0.857 rather than 1.0 can just be the
+    word "arm" appearing or not.
+
+    `Cosmos-Embed1` is a joint video-text embedder built for exactly this, 2.4 GB, and it
+    gives a cosine distance between two clips directly from pixels, with no sentence in
+    between. So this rolls a world forward and measures the drift BOTH ways on the same
+    segments: embedding distance from segment 0, and the word overlap `judge` uses.
+
+    Two outcomes and both are worth having. If the curves agree, the cheap metric is
+    validated and `judge`'s headline result stands on something firmer than a word count.
+    If they disagree, the embedder is the better instrument and says so.
+
+    Three models in sequence: the generation expert to produce the rollout, the
+    understanding expert to describe each segment, then the embedder. Released between,
+    which is why this is minutes of loading on top of the generation.
+    """
+    rows = [
+        ("Model", repo),
+        ("Embedder", f"{EMBED_REPO} (2.4 GB)"),
+        ("Task", "is `judge`'s word-overlap drift metric measuring the right thing?"),
+        ("Plan", f"{chunks} action chunk(s) + {segments} continuation(s), scored twice"),
+    ]
+    _paint("Fetching weights", f"{repo} from the shared model cache.", rows)
+
+    path = world.snapshot(repo)
+    meta = world.load_action_example(path)
+    fps = int(meta.get("fps", 10))
+
+    guard = world.guard_memory()
+    rows.append(("GPU", guard))
+    _paint("Loading the generation surface", "Streaming a 16B transformer in BF16.", rows)
+    pipe = world.load(repo)
+
+    pieces: list[list] = []
+    clips: list[bytes] = []
+    labels: list[str] = []
+    stats: list[dict] = []
+    captions: list[str] = []
+    overlap: list[float] = []
+    cosine: list[float] = []
+    note = ""
+
+    def paint(stage: str, detail: str) -> None:
+        if not pieces:
+            _paint(stage, detail, rows)
+            return
+        body = reports._heading("The rollout")
+        cells = []
+        for i, mp4 in enumerate(clips[-4:]):
+            j = len(clips) - min(4, len(clips)) + i
+            blk = media.video_html(mp4, labels[j], max_width=300, autoplay=False)
+            blk += media.strip(pieces[j], count=3, width=90)
+            if j < len(captions):
+                blk += reports.quote(captions[j], "the model, on this segment")
+            cells.append((f"segment {j}", blk))
+        body += reports.side_by_side(cells)
+        body += reports.note("The four most recent segments; the charts below cover all of them.")
+
+        series = {}
+        if len(stats) > 1:
+            series["sharpness (variance of Laplacian)"] = [s["sharpness"] for s in stats]
+        if len(overlap) > 1:
+            series["word overlap with segment 0 (what `judge` uses)"] = overlap
+        if len(cosine) > 1:
+            series["Cosmos-Embed1 similarity to segment 0"] = cosine
+        if series:
+            body += reports._heading("Two ways of measuring the same drift")
+            body += reports.metric_lines(series, caption=(
+                "One point per segment. The word overlap compares two sentences the model "
+                "wrote about the clips; the embedding similarity compares the clips "
+                "themselves, with no sentence in between. If they fall together, the cheap "
+                "metric is measuring something real. If the embedding holds while the words "
+                "move, the words were tracking phrasing rather than content."
+            ))
+        if len(cosine) > 2 and len(overlap) == len(cosine):
+            import statistics
+
+            try:
+                agree = statistics.correlation(cosine, overlap)
+                body += reports.note(
+                    f"Correlation between the two curves: <b>{agree:+.2f}</b>. "
+                    + ("They are measuring the same thing, so `judge`'s word overlap is "
+                       "doing real work despite being a word count."
+                       if agree > 0.5 else
+                       "They are NOT tracking together, which means at least one of them "
+                       "is not measuring content drift and the embedder is the one with a "
+                       "claim to be.")
+                )
+            except statistics.StatisticsError:
+                pass
+        if note:
+            body += reports.note(note)
+        live = list(rows) + ([("Progress", detail)] if detail else [])
+        flyte.report.replace(
+            reports.final_html(stage, live, body, reports.EMBED_EXPLAINER), do_flush=True
+        )
+
+    # ── Generate ────────────────────────────────────────────────────────────────
+    frame = meta["first_frame"]
+    gen_secs = 0.0
+    for i in range(min(chunks, int(meta["chunks"].shape[0]))):
+        paint("Rolling forward on recorded actions", f"chunk {i + 1}")
+        seg, secs = world.rollout_chunk(pipe, meta, meta["chunks"][i], frame=frame,
+                                        steps=steps, guidance=guidance, seed=seed + i)
+        pieces.append(seg); clips.append(media.encode(seg, fps=fps, crf=28))
+        stats.append(world.clip_stats(seg)); labels.append(f"action chunk {i}")
+        gen_secs += secs; frame = seg[-1]
+
+    if pieces:
+        tail = pieces[-1]
+        w, h = tail[-1].size
+        w, h = w - (w % 16), h - (h % 16)
+        for i in range(segments):
+            paint("Continuing past the recorded actions", f"continuation {i + 1} of {segments}")
+            try:
+                seg, secs = world.extend(pipe, tail, meta["prompt"], num_frames=frames,
+                                         height=h, width=w, fps=fps, steps=steps,
+                                         guidance=guidance, seed=seed + 100 + i)
+            except Exception as exc:  # noqa: BLE001
+                note = f"Continuation {i} failed after {len(pieces)} segments: {exc}"
+                log.warning(note); break
+            body_frames = seg[world.V2V_OVERLAP:]
+            pieces.append(body_frames); clips.append(media.encode(body_frames, fps=fps, crf=28))
+            stats.append(world.clip_stats(body_frames))
+            labels.append(f"continuation {i}")
+            gen_secs += secs; tail = seg
+
+    pipe = None
+    world.release()
+    rows.append(("Generation", f"{gen_secs / 60:.1f} min for {len(pieces)} segments"))
+
+    # ── Describe (the metric judge uses) ─────────────────────────────────────────
+    paint("Describing each segment", "loading the understanding surface")
+    model, processor = world.load_reasoner(repo)
+    for i, seg in enumerate(pieces):
+        paint("Describing", f"segment {i + 1} of {len(pieces)}")
+        text, _ = world.ask(model, processor, Q_DESCRIBE, video=seg, max_new_tokens=96)
+        captions.append(text)
+        overlap.append(1.0 if i == 0
+                       else round(world.description_overlap(captions[0], text), 3))
+    model, processor = None, None
+    world.release()
+
+    # ── Embed (the metric that skips the sentence) ──────────────────────────────
+    paint("Embedding each segment", f"loading {EMBED_REPO}")
+    try:
+        vecs = world.embed_clips(EMBED_REPO, pieces)
+        import torch
+
+        ref = vecs[0]
+        cosine.extend([round(float(torch.nn.functional.cosine_similarity(
+            ref.unsqueeze(0), v.unsqueeze(0)).item()), 4) for v in vecs])
+    except Exception as exc:  # noqa: BLE001
+        note = f"Embedding failed, so only the word overlap is charted: {exc}"
+        log.warning(note)
+
+    paint("Finished", "")
+    log.info("embed: overlap %s cosine %s", overlap, cosine)
+    return {
+        "segments": len(pieces),
+        "word_overlap": overlap,
+        "embed_similarity": cosine,
+        "sharpness": [round(s["sharpness"], 1) for s in stats],
+        "captions": captions,
+        "generate_seconds": round(gen_secs, 1),
+        "note": note,
+    }
+
+
+# v2v reproduces the conditioning frames it was handed before it starts predicting,
+# so the model's first genuinely predicted frame is at this offset. `world.stitch`
+# uses the same constant to join chained segments.
+REPRODUCED = 5
+
+PHYSICS_PROMPT = (
+    "A red capsule slides across a wooden tabletop and topples a grey block. "
+    "Static camera, steady lighting, the block tips over and settles."
+)
+
+
+@gpu_env.task(report=True)
+async def physics(
+    repo: str = NANO,
+    frames: int = 45,
+    condition: int = 8,
+    steps: int = 35,
+    guidance: float = 6.0,
+    seed: int = 0,
+) -> dict:
+    """The world model against a physics engine, with ground truth on both sides.
+
+    Every other task in this file grades Cosmos against itself. `counterfact` compares
+    its rollouts to each other, `judge` asks it to watch its own output, `horizon`
+    watches a number drift with nothing to say what the number SHOULD be. None of them
+    can answer the question a world model actually exists to answer: when it predicts
+    what happens next, is it right?
+
+    MuJoCo can answer it. Render a scripted push, hand Cosmos only the first few frames,
+    and ask it to continue. The simulator already computed the rest, so for once there
+    is a correct answer to score against, frame by frame.
+
+    **The control is the whole experiment.** A generated clip that merely looks
+    plausible will score some divergence against the truth, and that number means
+    nothing on its own. So the same comparison runs against a clip that predicts
+    NOTHING HAPPENS: the last conditioning frame, frozen for the same duration. If the
+    model cannot beat a still image at predicting a falling block, it has learned the
+    scene's appearance and none of its dynamics, and saying so is worth more than
+    another chart of a metric drifting.
+
+    Expect the model to struggle, and that is a result rather than a disappointment.
+    `embodiments` established that a synthetic render is off-distribution for this
+    checkpoint: handed flat 2D PushT shapes it discarded the scene outright. A MuJoCo
+    render is more realistic than PushT and far less realistic than the robot footage
+    Cosmos was trained on, so this measures where in between it lands, against a
+    baseline that makes the answer falsifiable either way.
+    """
+    rows = [
+        ("Model", repo),
+        ("Truth", "MuJoCo, a real physics engine, rendered in a child process"),
+        ("Task", "condition on the opening frames, predict the rest, score against truth"),
+        ("Control", "the last conditioning frame frozen: the 'nothing moves' prediction"),
+    ]
+    _paint("Simulating", "Rendering the scripted push in MuJoCo.", rows)
+
+    # 832x480 because that is what the generation path wants; rendering at the target
+    # size avoids a resample between the truth and the thing being scored against it.
+    truth, sim_actions, _ = mjc.rollout(frames=frames, width=832, height=480)
+    cond, future = truth[:condition], truth[condition:]
+    rows.append(("Simulated", f"{len(truth)} frames, {sim_actions.shape} commanded actions"))
+    rows.append(("Conditioning", f"first {condition} frames given to the model"))
+    rows.append(("To predict", f"{len(future)} frames the simulator already knows"))
+
+    body = reports._heading("The simulator's ground truth")
+    sim_mp4 = media.encode(truth, fps=24)
+    body += media.video_html(sim_mp4, "MuJoCo: what actually happens", max_width=420,
+                             autoplay=False)
+    flyte.report.replace(reports.final_html("Physics", rows, body), do_flush=True)
+
+    guard = world.guard_memory()
+    rows.append(("GPU", guard))
+    _paint("Loading the generation surface", "Streaming a 16B transformer in BF16.", rows)
+    pipe = world.load(repo)
+
+    _paint("Predicting", f"Continuing {condition} real frames for {frames}.", rows)
+    raw, secs = world.extend(
+        pipe, cond, PHYSICS_PROMPT, num_frames=frames, height=480, width=832,
+        steps=steps, guidance=guidance, seed=seed,
+    )
+    dream = raw[REPRODUCED:]
+    rows.append(("Generated", f"{len(raw)} frames in {secs:.0f}s, "
+                              f"{REPRODUCED} reproduced and dropped"))
+
+    # Score both the model and the do-nothing control on the same frames.
+    n = min(len(dream), len(future))
+    dream, future = dream[:n], future[:n]
+    frozen = [cond[-1]] * n
+
+    div_model = world.frame_divergence(dream, future)
+    div_frozen = world.frame_divergence(frozen, future)
+    per_model = [world.frame_divergence([dream[i]], [future[i]]) for i in range(n)]
+    per_frozen = [world.frame_divergence([frozen[i]], [future[i]]) for i in range(n)]
+
+    beats = div_model < div_frozen
+    verdict = (
+        f"The model beats the frozen-frame control ({div_model:.2f} vs {div_frozen:.2f}), "
+        "so it predicted some of the motion rather than just the scene."
+        if beats else
+        f"The model does NOT beat the frozen-frame control ({div_model:.2f} vs "
+        f"{div_frozen:.2f}). Predicting that nothing moves is closer to the truth than "
+        "what it generated, which means it reproduced the look of the scene and not its "
+        "dynamics."
+    )
+
+    dream_mp4 = media.encode(dream, fps=24)
+    body = reports._heading("Truth, prediction, and the control")
+    body += reports.side_by_side([
+        ("MuJoCo (truth)", media.video_html(media.encode(future, fps=24),
+                                            "what the engine computed", max_width=320,
+                                            autoplay=False)),
+        ("Cosmos (predicted)", media.video_html(dream_mp4, "what the model imagined",
+                                                max_width=320, autoplay=False)),
+        ("Frozen (control)", media.image_html(cond[-1], "the 'nothing moves' prediction",
+                                              width=320)),
+    ])
+    body += reports._heading("Divergence from the truth, per frame (0-255, lower is better)")
+    body += reports.metric_lines({
+        "Cosmos prediction vs truth": per_model,
+        "frozen frame vs truth (control)": per_frozen,
+    }, caption="Where the model's line sits below the control's, it is genuinely predicting.")
+    body += reports.bars([("Cosmos", div_model), ("frozen control", div_frozen)],
+                         caption="Mean absolute pixel difference from the simulator",
+                         unit="")
+    body += reports.note(verdict)
+
+    stats_dream, stats_truth = world.clip_stats(dream), world.clip_stats(future)
+    rows += [
+        ("Cosmos vs truth", f"{div_model:.2f}"),
+        ("Frozen vs truth", f"{div_frozen:.2f}"),
+        ("Motion, truth", f"{stats_truth['motion']:.2f}"),
+        ("Motion, predicted", f"{stats_dream['motion']:.2f}"),
+    ]
+    flyte.report.replace(
+        reports.final_html("Physics: the world model against the engine", rows, body,
+                           explainer=verdict),
+        do_flush=True,
+    )
+    log.info("physics: model %.2f frozen %.2f beats=%s", div_model, div_frozen, beats)
+    return {
+        "divergence_model": round(div_model, 3),
+        "divergence_frozen_control": round(div_frozen, 3),
+        "beats_control": bool(beats),
+        "motion_truth": round(stats_truth["motion"], 3),
+        "motion_predicted": round(stats_dream["motion"], 3),
+        "generate_seconds": round(secs, 1),
+        "frames_scored": n,
     }
 
 

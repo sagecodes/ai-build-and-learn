@@ -672,3 +672,32 @@ WATCH_EXPLAINER = (
     "a false positive looks exactly like a true one. The frames behind every alert are "
     "shown for that reason."
 )
+
+
+SIZES_EXPLAINER = (
+    "The size axis, asked as a control rather than a beauty contest. `counterfact` is what "
+    "decides whether a checkpoint can stand in for a simulator: hold the frame, the seed "
+    "and the schedule fixed, change only the actions, and the predicted motion has to come "
+    "out in the order the actions describe. A model that ignores its action channel makes "
+    "convincing video and is useless for generating training data. So the same control runs "
+    "on a 4B checkpoint and a 16B one. Read the ordering within each block, not the "
+    "absolute heights: the two need not agree on how much motion a scene contains, only on "
+    "which action sequence produces more of it. If the small model preserves the ordering, "
+    "bulk data generation can run on a quarter of the weights, which is the difference "
+    "between the throughput wall this pipeline keeps hitting and not hitting it."
+)
+
+
+EMBED_EXPLAINER = (
+    "A check on this repo's own instrument. `judge` found that a long rollout's CONTENT "
+    "drifts long before its PHYSICS does, and it measured content drift with a Jaccard "
+    "overlap between two sentences the model wrote about the clips. That is transparent "
+    "and checkable, and also crude: a segment can score 0.857 instead of 1.0 because the "
+    "word 'arm' appeared once. Cosmos-Embed1 is a joint video-text embedder built for "
+    "physical AI, and it compares the clips themselves with no sentence in between. Both "
+    "metrics run over the same segments here. If the curves fall together, the cheap one "
+    "is measuring something real and `judge`'s headline result rests on more than a word "
+    "count. If the embedding holds steady while the words move, the words were tracking "
+    "phrasing rather than content, and the embedder is the instrument with a claim to be "
+    "believed."
+)
