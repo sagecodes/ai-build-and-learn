@@ -207,12 +207,26 @@ def probe(mp4: bytes) -> str:
         return f"probe failed: {exc}"
 
 
-def video_html(mp4: bytes, caption: str = "", max_width: int = 560, sound: bool = False) -> str:
+def video_html(
+    mp4: bytes,
+    caption: str = "",
+    max_width: int = 560,
+    sound: bool = False,
+    autoplay: bool = True,
+) -> str:
     """base64 an mp4 into a self-contained <video> tag.
 
     `sound=True` drops `autoplay muted`. Every browser refuses to autoplay audio, so
     a muted autoplay tag would play a clip with sound in it silently and look exactly
     like the sound never got muxed. Better to make the viewer press play.
+
+    `autoplay=False` is for reports that embed MANY clips, and it is not cosmetic. A
+    page of twenty autoplaying looping videos asks the browser to decode twenty video
+    streams at once forever, which pegs a core and can leave the tab blank -- a report
+    that is completely intact on the object store and completely unreadable in front
+    of you. It also adds `preload="none"` so the decoder is not handed the bytes until
+    someone actually presses play. One or two clips: leave it on. More than about four:
+    turn it off.
     """
     if not mp4:
         return '<p style="color:#888;font-family:monospace;">no clip</p>'
@@ -230,10 +244,11 @@ def video_html(mp4: bytes, caption: str = "", max_width: int = 560, sound: bool 
         if caption
         else ""
     )
+    live = autoplay and not sound
     return (
         f'<div style="background:#0f0f23;padding:12px;border-radius:8px;">'
         f'<video src="data:video/mp4;base64,{b64}" controls loop '
-        f'{"" if sound else "autoplay muted "}'
+        f'{"autoplay muted " if live else "preload=\"none\" "}'
         f'playsinline style="max-width:{max_width}px;width:100%;border:2px solid #333;'
         f'border-radius:4px;display:block;"></video>{cap}</div>'
     )
@@ -293,3 +308,54 @@ def image_html(img, caption: str = "", width: int = 320) -> str:
         f'<img src="data:image/png;base64,{b64}" style="max-width:{width}px;width:100%;'
         f'border:2px solid #333;border-radius:4px;display:block;"/>{cap}</div>'
     )
+
+
+def label_frames(frames: list, text: str) -> list:
+    """Burn a short caption into the top-left of every frame.
+
+    Only used where the frames of several clips get concatenated into one video and
+    the viewer would otherwise have no way to tell which is which. A report caption
+    cannot do this job: it sits outside the <video> element and stays put while the
+    thing it describes scrolls past inside it.
+
+    PIL's default bitmap font, deliberately. Loading a TTF means finding one that is
+    present in the image, and a missing font file would fail the whole encode for a
+    label; the bitmap font ships with pillow and is always there.
+    """
+    from PIL import Image, ImageDraw
+
+    out = []
+    for frame in frames:
+        img = frame.convert("RGB").copy()
+        draw = ImageDraw.Draw(img)
+        # A filled plate behind the text, because white-on-white is the failure mode
+        # in exactly the bright generated scenes this is most useful for.
+        draw.rectangle([0, 0, 8 + 6 * len(text), 16], fill=(0, 0, 0))
+        draw.text((4, 4), text, fill=(255, 255, 255))
+        out.append(img)
+    return out
+
+
+def downscale(frames: list, max_width: int = 480) -> list:
+    """Shrink frames to `max_width` if they are wider, preserving aspect.
+
+    Only the long-horizon run needs this, and it needs it badly. That task re-encodes
+    the ENTIRE rollout so far into the report after every segment, so the embedded
+    clip grows without bound while the 24 MB embed ceiling does not: by segment thirty
+    a full-resolution stitch is over budget and `video_html` degrades to an apologetic
+    paragraph where the video should be. Halving the width cuts the payload roughly
+    fourfold and costs nothing that matters, because the per-segment clips are still
+    shown at full size next to it.
+    """
+    from PIL import Image
+
+    if not frames:
+        return frames
+    w, _ = frames[0].size
+    if w <= max_width:
+        return list(frames)
+    scale = max_width / w
+    return [
+        f.resize((max_width, max(2, int(f.size[1] * scale))), Image.LANCZOS)
+        for f in frames
+    ]
