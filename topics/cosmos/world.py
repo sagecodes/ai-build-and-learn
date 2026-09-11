@@ -1517,3 +1517,44 @@ def scene_retained(generated: list, real: list, tolerance: float = 0.15) -> dict
         "motion_real": round(clip_stats(real)["motion"], 2),
         "kept": abs(ratio - 1.0) <= tolerance,
     }
+
+
+def embed_clips(repo: str, clips: list[list], frames_per_clip: int = 8):
+    """Embed each clip with Cosmos-Embed1. Returns a list of vectors, one per clip.
+
+    A joint video-text embedder built for physical AI, 2.4 GB, and the reason to want it
+    here is that it compares CLIPS rather than sentences about clips. `judge` measures
+    long-horizon content drift with a Jaccard overlap between two generated descriptions,
+    which is transparent and checkable and also crude: a segment can score 0.857 instead
+    of 1.0 because the word "arm" appeared once.
+
+    `trust_remote_code=True` is required. The repo ships its own modeling files
+    (`modeling_embed1.py`, `preprocessing_embed1.py`) and registers them through
+    `auto_map`, so there is no in-library implementation to fall back on.
+    """
+    import numpy as np
+    import torch
+    from transformers import AutoModel, AutoProcessor
+
+    guard_memory(8.0)
+    processor = AutoProcessor.from_pretrained(repo, trust_remote_code=True)
+    model = AutoModel.from_pretrained(repo, trust_remote_code=True).to(
+        "cuda", dtype=torch.bfloat16
+    )
+
+    out = []
+    for clip in clips:
+        picked = sample_frames(clip, frames_per_clip)
+        arr = np.stack([np.asarray(f.convert("RGB")) for f in picked])   # THWC
+        batch = np.transpose(arr[None], (0, 1, 4, 2, 3))                 # BTCHW
+        inputs = processor(videos=batch, return_tensors="pt")
+        inputs = {k: (v.to("cuda", dtype=torch.bfloat16) if v.is_floating_point()
+                      else v.to("cuda")) for k, v in inputs.items()}
+        with torch.inference_mode():
+            res = model.get_video_embeddings(**inputs)
+        vec = res.visual_proj if hasattr(res, "visual_proj") else (
+            res[0] if isinstance(res, (tuple, list)) else res
+        )
+        out.append(vec.float().squeeze().cpu())
+    log.info("embedded %s clips -> %s", len(out), tuple(out[0].shape))
+    return out

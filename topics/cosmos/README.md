@@ -1072,6 +1072,8 @@ different claims.
 | `watch` | `r9ghd6zbvq7wqxjncktb` | Asked three standing yes/no questions of twenty windows of a real robot recording and timestamped every hit. A video agent for factories, warehouses and traffic cameras, and the cheapest task here since no generation happens at all. |
 | `restyle` (pusht) | `rwz8lrjzn5z5xrt9dlk4` | Handed Transfer a 2D PushT clip plus its edge map. It did its job exactly and the result is still wrong, which is the clearest argument in this repo for why sim2real input has to be 3D. |
 | `restyle` (droid) | `rqgj5jsx8slp445nqcrx` | The fidelity control: real cluttered lab footage plus its edge map. Transfer reproduced the edge map as grey lines, which is how a dense control signal fails and why depth beats Canny. |
+| `sizes` | `rx9b5n5hldfn6p87p2kg` | Ran the `counterfact` control on a 4B checkpoint and a 16B one. Both reproduce the action ordering and the 4B is 3x faster, so bulk data generation can run on a quarter of the weights. |
+| `restyle` (step sweep) | `rh8t8d66kgtlqtpcshfl` | Rendered the same scene at 6, 10 and 25 denoising steps from one model load. A throughput question with teeth: 10 steps is 2.3x faster than 25 for a difference you have to hunt for, and sharpness argued for the one setting that is visibly broken. |
 | `restyle` (mujoco, depth) | `rmdqjxxrvt7nvkcg8vkv` | **The sim2real demo, working.** A MuJoCo render plus the simulator's own depth buffer, returned as photorealistic video with the geometry and the block's tipping motion intact. The simulator's commanded actions stay valid labels, so this path carries no label tax at all. |
 | `restyle` (mujoco, edge) | `rwl9v7dps5xc4n8hlnnq` | The first 3D source. Succeeded, rendered a plausible photoreal cabinet, and measured inter-frame motion 0.03: the run that proves a green task can still be measuring nothing. |
 
@@ -1135,6 +1137,60 @@ scene, and nothing here has trained a policy on the output or measured whether d
 helps. What it establishes is that the conversion step works and preserves what it has to
 preserve, which is the precondition everything else rested on and the one thing three
 earlier attempts failed to demonstrate.
+
+### The 4B model passes the control too, at 3x the speed
+
+`rx9b5n5hldfn6p87p2kg`. The `counterfact` control, run on both checkpoints. The question
+is not "is the small one worse", it is whether `Cosmos3-Edge` still knows that actions
+matter, because a model that ignores its action channel makes convincing video and is
+useless for generating training data.
+
+| variant | Edge (4B, 9.2 GB) | Nano (16B, 33 GB) |
+| --- | --- | --- |
+| `held` | 1.10 | 0.99 |
+| `reversed` | 2.13 | 2.10 |
+| `recorded` | 2.67 | 2.48 |
+| `amplified` | 3.42 | 3.30 |
+| **per rollout** | **16 to 19s** | 47 to 48s |
+
+**Both reproduce `held < reversed < recorded < amplified`**, and Edge is **3x faster on a
+quarter of the weights**. Edge reads slightly higher than Nano on every variant, a small
+systematic offset rather than a different answer; the ordering and the spread match.
+
+That is the second half of the throughput answer. Combined with 10 denoising steps for
+Transfer, bulk data generation no longer has to run on the 16B checkpoint at 25 steps, and
+the arithmetic that made a policy-training dataset look like a 24-hour job stops saying
+that.
+
+The caveat is the scope of what was tested: this is the action-conditioning control on one
+embodiment and one chunk. It says Edge's action channel works. It does not say Edge's
+video is as good, and `emerge`, `judge` or a human would all have something to add there.
+
+### How many denoising steps Transfer actually needs: 10, not 25
+
+`rh8t8d66kgtlqtpcshfl`. Three step counts from one model load, same scene, same depth
+control, same seed. This was a throughput question with a real consequence: Transfer at 25
+steps is about 29 minutes per 29-frame clip, and a behaviour-cloning dataset wants 50+
+clips. That is 24 hours, which is not a plan.
+
+| steps | time | s/step | motion | sharpness | how it looks |
+| --- | --- | --- | --- | --- | --- |
+| 6 | 495s | 82.5 | 7.59 | **617** | washed out: the red capsule is grey-pink, lighting flat and hazy |
+| 10 | 762s | 76.2 | 8.10 | 479 | **vivid red, crisp shadows, correct materials** |
+| 25 | 1761s | 70.4 | 7.92 | 513 | marginally crisper than 10 |
+
+**10 steps is the answer**, and it is 2.3x faster than 25 for a difference you have to
+hunt for. A 30-clip dataset goes from a 15-hour job to a 6.5-hour one.
+
+**The metrics were actively misleading here, which is the more useful finding.** Sharpness
+was HIGHEST at 6 steps, the one setting that is obviously undercooked, because a washed-out
+noisy frame has plenty of high-frequency content and variance-of-Laplacian cannot tell
+noise from detail. Motion was flat across all three. Both numbers would have argued for 6
+steps. Only looking at the frames settles it, which is the third time in this repo a
+plausible metric pointed the wrong way.
+
+Per-step cost is roughly constant (70 to 82 s/step), so steps are a straight linear lever
+and nothing is amortised by running more of them.
 
 ### Canny edges were the wrong control signal, three times over
 
