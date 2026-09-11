@@ -3828,9 +3828,9 @@ async def restyle(
     ]
     _paint("Building the source clip", source, rows)
 
-    sim_actions = None
+    sim_actions, sim_depth = None, None
     if spec["kind"] == "sim":
-        src_frames, sim_actions = mjc.rollout(
+        src_frames, sim_actions, sim_depth = mjc.rollout(
             frames=frames, width=spec["size"][0], height=spec["size"][1]
         )
         rows.append(("Ground-truth actions", f"{sim_actions.shape} commanded by the "
@@ -3848,17 +3848,30 @@ async def restyle(
     # pipeline would hand over real depth or segmentation buffers instead of deriving
     # edges from pixels, and would be strictly better for it, but the control signal
     # enters the model at exactly the same place.
-    import cv2
-
-    edges = [
-        cv2.Canny(cv2.cvtColor(np.array(f.convert("RGB")), cv2.COLOR_RGB2BGR), 100, 200)
-        for f in source_clip
-    ]
-    stacked = torch.from_numpy(np.stack(edges)[None]).expand(3, -1, -1, -1)
     from PIL import Image
 
-    controls = [Image.fromarray(x.numpy()) for x in stacked.permute(1, 2, 3, 0)]
-    rows.append(("Control frames", f"{len(controls)} {control} maps at {controls[0].size}"))
+    if control == "depth" and sim_depth is not None:
+        # The simulator's OWN depth buffer, which is the entire reason to source from a
+        # simulator rather than a video. Everything below is the fallback, and measuring
+        # it across three sources is what made the case for this branch: Canny edges were
+        # too sparse on a 2D scene (the model invented geometry), dominated by furniture
+        # on a badly framed one, and so dense on a cluttered real lab that Transfer simply
+        # reproduced the edge map as grey lines. Depth is what Isaac and Omniverse hand
+        # over, and a simulator can give it exactly instead of inferring it from pixels.
+        controls = sim_depth
+    else:
+        import cv2
+
+        edges = [
+            cv2.Canny(cv2.cvtColor(np.array(f.convert("RGB")), cv2.COLOR_RGB2BGR), 100, 200)
+            for f in source_clip
+        ]
+        stacked = torch.from_numpy(np.stack(edges)[None]).expand(3, -1, -1, -1)
+        controls = [Image.fromarray(x.numpy()) for x in stacked.permute(1, 2, 3, 0)]
+    rows.append(("Control frames", f"{len(controls)} {control} maps at {controls[0].size}"
+                                   + (" from the simulator's own buffer"
+                                      if control == "depth" and sim_depth is not None
+                                      else " derived from pixels")))
     # The prompt belongs in the report, not just in the source. It is the single biggest
     # lever on what Transfer produces: the control signal fixes the geometry, and the
     # prompt decides what material, lighting and setting that geometry is rendered as.

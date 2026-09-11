@@ -1069,7 +1069,11 @@ different claims.
 | `embodiments` | `rzn9v9gdqz8bhhw9ppmk` | Fed real in-domain footage to two embodiments and asked whether the scene survived. Tells you which robots the checkpoint actually knows rather than merely accepts, which decides what simulator you could ever bridge to. |
 | `train` | `rmg7m2n7hnpn8jv6gl7n` | Trained two identical policies, one on real footage and one on dreams, and tested both on held-out real frames. Stage 6 of the data engine, and the run where a trivial baseline proved neither had learned anything. |
 | `access` | `r74d2wtswvjdnvbwf64d` | Probed a real weight file in each gated repo from inside a pod with the secret mounted. The token is a cluster secret, not a shell variable, so this is the only way to tell "licence not accepted" from "no credentials here". |
-| `restyle` | `rwz8lrjzn5z5xrt9dlk4` | Handed Cosmos Transfer a 2D PushT clip plus its edge map and asked for a photorealistic rendering of the same geometry. Transfer did its job exactly and the result is still wrong, which is the clearest argument in this repo for why sim2real input has to be 3D. |
+| `watch` | `r9ghd6zbvq7wqxjncktb` | Asked three standing yes/no questions of twenty windows of a real robot recording and timestamped every hit. A video agent for factories, warehouses and traffic cameras, and the cheapest task here since no generation happens at all. |
+| `restyle` (pusht) | `rwz8lrjzn5z5xrt9dlk4` | Handed Transfer a 2D PushT clip plus its edge map. It did its job exactly and the result is still wrong, which is the clearest argument in this repo for why sim2real input has to be 3D. |
+| `restyle` (droid) | `rqgj5jsx8slp445nqcrx` | The fidelity control: real cluttered lab footage plus its edge map. Transfer reproduced the edge map as grey lines, which is how a dense control signal fails and why depth beats Canny. |
+| `restyle` (mujoco, depth) | `rmdqjxxrvt7nvkcg8vkv` | **The sim2real demo, working.** A MuJoCo render plus the simulator's own depth buffer, returned as photorealistic video with the geometry and the block's tipping motion intact. The simulator's commanded actions stay valid labels, so this path carries no label tax at all. |
+| `restyle` (mujoco, edge) | `rwl9v7dps5xc4n8hlnnq` | The first 3D source. Succeeded, rendered a plausible photoreal cabinet, and measured inter-frame motion 0.03: the run that proves a green task can still be measuring nothing. |
 
 ### What `restyle` showed: Transfer worked, and the input was still wrong
 
@@ -1102,6 +1106,106 @@ Cost note: 1336s for 29 frames, about 46 s/frame, almost certainly
 `enable_model_cpu_offload` swapping the 7B Qwen2.5-VL text encoder in and out. Transfer is
 much smaller than Cosmos3-Nano and the pod has 96 GiB, so the offload is probably
 unnecessary and is the first thing to try removing.
+
+### It works: a simulator render, made photoreal, with its physics intact
+
+`rmdqjxxrvt7nvkcg8vkv`. MuJoCo source, the simulator's own depth buffer as the control,
+29 frames in 1777s. Inter-frame motion **5.18 in, 7.92 out**.
+
+The source is unmistakably a simulator: flat shading, uniform colours, no real shadows.
+What came back is a concrete bench under soft studio lighting, a glossy red capsule with
+a specular highlight, a dark blue block with realistic shading and a cast shadow, and a
+white paper card where the green target decal was.
+
+**And the physics survived.** The block tracks across the bench and tips over at the end,
+frame for frame with the simulation. That is the whole argument: because the geometry and
+motion are preserved, the actions the simulator COMMANDED are still valid labels for the
+restyled video. No inverse dynamics, no recovered estimate, and therefore none of the 3x
+label tax `cycle` measured on the Predict path.
+
+```
+MuJoCo (physics + ground-truth actions)  ->  depth buffer  ->  Cosmos Transfer
+                                         ->  photorealistic video  ->  train a policy
+```
+
+Swap MuJoCo for Isaac Sim and that is NVIDIA's pipeline, unchanged.
+
+Worth being clear about what this does and does not show. It is one 29-frame clip of one
+scene, and nothing here has trained a policy on the output or measured whether doing so
+helps. What it establishes is that the conversion step works and preserves what it has to
+preserve, which is the precondition everything else rested on and the one thing three
+earlier attempts failed to demonstrate.
+
+### Canny edges were the wrong control signal, three times over
+
+`restyle` was run against all three sources with `--control edge`, and every one failed in
+a different direction. The common factor was not the source. It was the control.
+
+| source | its edge map | what Transfer produced |
+| --- | --- | --- |
+| `pusht` (2D synthetic) | too **sparse** | a photorealistic wooden sculpture: a silhouette with no depth, so it invented a 3D object with the right profile |
+| `mujoco` (3D synthetic, badly framed) | dominated by the **table** | a photorealistic kitchen cabinet, with the objects that mattered as mush |
+| `droid` (3D real, cluttered) | far too **dense** | the edge map itself, rendered as faint grey lines on a flat background |
+
+That last one is the sharpest. A real lab is visually busy, so Canny returns a thicket of
+lines covering the whole frame, and given an overwhelming control signal Transfer stopped
+rendering a scene and simply reproduced its input. It was intended as a fidelity control
+(does Transfer preserve a scene that already looks real?) and it could not answer that,
+because the input was pathological before the model ever saw it.
+
+**The fix is the thing a real pipeline does anyway: hand over a depth buffer.** Isaac Sim
+and Omniverse produce depth, segmentation and LiDAR directly, and Transfer ships
+controlnet branches for exactly those. Canny is a lossy stand-in derived from pixels; a
+simulator does not need to infer depth, it knows it.
+
+`mjc.rollout` now returns the simulator's own depth buffer alongside the RGB and the
+actions, and `--control depth` feeds it straight through. Getting that right needed one
+more fix worth recording: the renderer returns about 51 m for rays that hit nothing, which
+is 10% of this frame, and normalising with a `< 100 m` filter let the far plane set the
+scale. Every real surface was compressed into the top 2% of the range and the "depth map"
+came out uniformly white, mean 225 of 255. The scene's actual geometry lives between 0.53
+and 2.3 m; filtering at 10 m instead gives a control signal with structure in it.
+
+### The prompts `restyle` uses, and why they matter
+
+Transfer takes **two** conditioning inputs and the report now shows both, because reading
+an output without seeing the prompt that shaped it is guesswork. The control signal fixes
+the **geometry**; the prompt decides what material, lighting and setting that geometry
+gets rendered as. Same edge map plus a different prompt is a different world.
+
+| source | prompt |
+| --- | --- |
+| `mujoco` | *"A red robotic end effector pushes a blue plastic block across a white laboratory bench toward a marked target. Photorealistic, shot on a high-end camera, soft overhead studio lighting, realistic material textures, subtle shadows and shallow depth of field."* |
+| `droid` | *"A Franka robot arm on a laboratory bench, cluttered workspace, natural indoor lighting, photorealistic, shot on a high-end camera."* |
+| `pusht` | *"A robotic manipulator pushes a T-shaped wooden block across a white laboratory bench. Overhead studio lighting, photorealistic, crisp shadows and realistic material textures."* |
+
+All three share `prompts.NEGATIVE`, the same negative prompt every generation task here
+uses.
+
+The PushT result is the clearest evidence that the prompt is doing real work: it asked
+for a *wooden* block on a bench and got back a **wooden sculpture**, because the prompt
+supplied the material while the edge map supplied only an ambiguous silhouette. The model
+took the one instruction it could act on unambiguously and ran with it.
+
+### Building the MuJoCo scene took three bugs to get right
+
+Worth recording, because none of them announced themselves and two were only visible in a
+number rather than in an error.
+
+1. **The camera framed the furniture.** The table filled the shot and the pusher and block
+   were a handful of pixels, so the Canny map was mostly table outline. Transfer duly
+   rendered a photorealistic kitchen cabinet and turned the objects that mattered into
+   mush. Fixed with `mode="targetbody" target="block"` so MuJoCo aims the camera itself
+   rather than me guessing at `xyaxes`.
+2. **The pusher spawned inside the table.** A capsule's radius extends BEYOND its `fromto`
+   endpoints, so the geom's lowest point was 0.165 against a table top at 0.2. It spent
+   the whole episode fighting the contact solver at 49 N and travelled 2 cm.
+3. **Consequently there was no motion at all**, and this is the part worth internalising:
+   the first MuJoCo run completed successfully, produced a valid video, and reported
+   **inter-frame motion 0.03**. Nothing errored. The number was the only signal that the
+   scene was broken, and after the fixes it reads **5.16**.
+
+A run that succeeds, renders, and shows you a video can still be measuring nothing.
 
 ### The runs that were wrong, which are the better story
 

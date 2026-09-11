@@ -57,13 +57,13 @@ SCENE = """
       <freejoint/>
       <geom name="block" type="box" size="0.065 0.065 0.065" material="blockmat" mass="0.2"/>
     </body>
-    <body name="pusher" pos="-0.32 0.0 0.27">
+    <body name="pusher" pos="-0.32 0.0 0.32">
       <joint name="px" type="slide" axis="1 0 0" range="-0.42 0.42"/>
       <joint name="py" type="slide" axis="0 1 0" range="-0.3 0.3"/>
       <geom name="pusher" type="capsule" fromto="0 0 -0.065 0 0 0.07" size="0.04"
             material="pushermat" mass="1"/>
     </body>
-    <camera name="rig" pos="0.0 -0.52 0.78" xyaxes="1 0 0 0 0.90 0.44"/>
+    <camera name="rig" pos="0.05 -0.70 0.62" mode="targetbody" target="block" fovy="42"/>
   </worldbody>
   <actuator>
     <position joint="px" kp="220" ctrlrange="-0.42 0.42"/>
@@ -112,12 +112,13 @@ def rollout(frames: int = 29, width: int = 640, height: int = 384, substeps: int
                 f"{proc.stderr[-2000:]}"
             )
         blob = np.load(out)
-        rgb, actions = blob["rgb"], blob["actions"]
+        rgb, depth, actions = blob["rgb"], blob["depth"], blob["actions"]
 
     out_frames = [Image.fromarray(f).convert("RGB") for f in rgb]
-    log.info("mujoco: %s frames at %sx%s, actions %s (child process)",
+    depth_frames = [Image.fromarray(f).convert("RGB") for f in depth]
+    log.info("mujoco: %s frames at %sx%s, actions %s, real depth buffer (child process)",
              len(out_frames), width, height, actions.shape)
-    return out_frames, actions
+    return out_frames, actions, depth_frames
 
 
 def _render(path: str, frames: int, width: int, height: int, substeps: int) -> None:
@@ -135,7 +136,16 @@ def _render(path: str, frames: int, width: int, height: int, substeps: int) -> N
     cam.fixedcamid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "rig")
     cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
 
-    rgb, actions = [], []
+    # A REAL depth buffer, which is the whole reason to source from a simulator. Canny
+    # edges are a derived, lossy stand-in: measured across three sources they were sparse
+    # enough to be ambiguous (PushT), dominated by furniture (a badly framed table), or so
+    # dense on a cluttered real scene that Transfer simply reproduced the edge map. Depth
+    # is what Isaac and Omniverse actually hand to Transfer, and a simulator can give it
+    # exactly rather than infer it.
+    depth_renderer = mujoco.Renderer(model, height=height, width=width)
+    depth_renderer.enable_depth_rendering()
+
+    rgb, depth, actions = [], [], []
     for i in range(frames):
         # Drive the pusher straight through the block, with a slight lateral drift so the
         # block rotates as well as translates. A pure translation is a weaker test: it
@@ -147,9 +157,32 @@ def _render(path: str, frames: int, width: int, height: int, substeps: int) -> N
             mujoco.mj_step(model, data)
         renderer.update_scene(data, camera=cam)
         rgb.append(renderer.render().copy())
+        depth_renderer.update_scene(data, camera=cam)
+        depth.append(depth_renderer.render().copy())
         actions.append(ctrl)
     renderer.close()
-    np.savez_compressed(path, rgb=np.stack(rgb), actions=np.stack(actions))
+    depth_renderer.close()
+
+    # Normalise depth to 8-bit over the scene's own near/far, ignoring the infinite
+    # background the renderer returns for rays that hit nothing. Left as raw metres it is
+    # mostly a single saturated value and carries no usable structure.
+    d = np.stack(depth)
+    # Percentiles at BOTH ends, not min-to-99th. Using the raw minimum as the near plane
+    # lets one stray pixel set the scale, and the first version of this came out almost
+    # uniformly white (mean 225 of 255) and carried no usable structure at all. A depth
+    # control signal with no contrast is worth less than no control signal, because the
+    # model still has to honour it.
+    # 10 metres, not 100. The renderer returns ~51 m for rays that hit nothing, and in
+    # this scene that is 10% of the frame (the sky above the horizon). A threshold of 100
+    # let those through, so the 98th percentile WAS the far plane and every real surface
+    # got compressed into the top 2% of the range: a uniformly white image with a mean of
+    # 225. The scene's actual geometry lives between 0.53 and 2.3 m.
+    finite = d[np.isfinite(d) & (d < 10.0)]
+    near, far = ((float(np.percentile(finite, 2)), float(np.percentile(finite, 98)))
+                 if finite.size else (0.0, 1.0))
+    d = np.clip((d - near) / max(far - near, 1e-6), 0.0, 1.0)
+    d = ((1.0 - d) * 255).astype("uint8")      # near = bright, the usual convention
+    np.savez_compressed(path, rgb=np.stack(rgb), depth=d, actions=np.stack(actions))
 
 
 if __name__ == "__main__":
