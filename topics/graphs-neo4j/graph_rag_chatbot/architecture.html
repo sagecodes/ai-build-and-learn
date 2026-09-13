@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Graph RAG Chatbot — Architecture Walkthrough</title>
+<style>
+:root {
+  --bg:       #0a0c10;
+  --surface:  #111418;
+  --card:     #161b22;
+  --border:   #21262d;
+  --border2:  #30363d;
+  --text:     #e6edf3;
+  --muted:    #7d8590;
+  --muted2:   #484f58;
+  --accent:   #388bfd;
+  --hi:       #e3a008;
+  --hi-glow:  rgba(227,160,8,0.22);
+  --hi-text:  #fbbf24;
+  --code-bg:  #0d1117;
+  --code-fg:  #79c0ff;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:24px 20px 40px;}
+
+.header{text-align:center;margin-bottom:20px;}
+.header h1{font-size:1.4em;font-weight:700;letter-spacing:-.02em;}
+.header .badge{display:inline-block;margin-left:10px;background:var(--border2);color:var(--muted);font-size:.68em;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:3px 10px;border-radius:4px;vertical-align:middle;}
+
+.tabs{display:flex;justify-content:center;gap:8px;margin-bottom:18px;}
+.tab{padding:7px 22px;border-radius:6px;border:1px solid var(--border2);background:var(--card);color:var(--muted);font-size:.83em;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:6px;}
+.tab.active{background:var(--hi);color:#000;border-color:var(--hi);}
+.tab:hover:not(.active){background:var(--surface);color:var(--text);}
+
+.diagram-outer{max-width:1140px;margin:0 auto 18px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;}
+.diagram-grid{display:grid;grid-template-columns:152px 600px 152px;gap:0;position:relative;z-index:1;justify-content:space-between;}
+
+#svg-arrows{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:0;}
+.arrow-path{fill:none;stroke:var(--border2);stroke-width:1.5;transition:stroke .35s,stroke-width .35s,opacity .35s;opacity:.45;marker-end:url(#arr-dim);}
+.arrow-path.lit{stroke:var(--hi);stroke-width:2.5;opacity:1;marker-end:url(#arr-lit);}
+
+.col{display:flex;flex-direction:column;gap:12px;justify-content:space-around;padding:10px 0;}
+
+.node{background:var(--card);border:1.5px solid var(--border2);border-radius:9px;padding:13px 14px;transition:border-color .35s,box-shadow .35s,background .35s;}
+.node.active{border-color:var(--hi);box-shadow:0 0 16px var(--hi-glow);background:#19160a;}
+.node-icon{font-size:1.4em;margin-bottom:6px;}
+.node-name{font-weight:700;font-size:.83em;margin-bottom:3px;}
+.node-sub{color:var(--muted);font-size:.72em;line-height:1.4;}
+.node-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-top:8px;}
+
+.cluster{border:1.5px dashed var(--border2);border-radius:10px;padding:14px;transition:border-color .35s;align-self:center;}
+.cluster.active{border-color:var(--accent);}
+.cluster-hdr{font-size:.65em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:6px;}
+.section-label{font-size:.62em;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted2);margin:8px 0 6px 2px;}
+.cluster-div{border-top:1px solid var(--border);margin:10px 0;}
+
+.task{display:flex;align-items:center;gap:9px;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 10px;margin-bottom:8px;transition:border-color .35s,background .35s,box-shadow .35s;}
+.task:last-child{margin-bottom:0;}
+.task.active{border-color:var(--hi);background:#130e00;box-shadow:0 0 10px var(--hi-glow);}
+.task-ico{font-size:1em;flex-shrink:0;}
+.task-body{flex:1;min-width:0;}
+.task-name{font-weight:700;font-size:.78em;}
+.task-detail{color:var(--muted);font-size:.68em;margin-top:2px;line-height:1.3;}
+.tbadge{flex-shrink:0;background:var(--border);color:var(--muted);font-size:.62em;font-weight:700;padding:2px 7px;border-radius:8px;transition:background .35s,color .35s;white-space:nowrap;}
+.task.active .tbadge{background:var(--hi);color:#000;}
+
+.nav-row{display:flex;justify-content:center;align-items:center;gap:12px;max-width:1140px;margin:0 auto 16px;}
+.nav-row .btn{padding:6px 16px;font-size:.78em;}
+.dots{display:flex;gap:6px;align-items:center;}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--border2);cursor:pointer;transition:background .3s,transform .3s;}
+.dot.cur{background:var(--hi);transform:scale(1.4);}
+.dot.past{background:var(--accent);}
+
+.step-panel{max-width:1140px;margin:0 auto 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.step-top{display:flex;align-items:center;gap:10px;padding:14px 18px 12px;border-bottom:1px solid var(--border);}
+.step-num{background:var(--hi);color:#000;font-size:.72em;font-weight:800;padding:3px 11px;border-radius:11px;flex-shrink:0;}
+.step-ttl{font-weight:700;font-size:1em;color:var(--hi-text);}
+.step-body{display:grid;grid-template-columns:1fr 1fr;gap:0;}
+.step-left{padding:14px 18px;border-right:1px solid var(--border);}
+.step-right{padding:14px 18px;background:var(--code-bg);}
+.panel-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-bottom:7px;}
+.step-desc{color:var(--muted);font-size:.83em;line-height:1.65;margin-bottom:14px;white-space:pre-line;}
+.comp-tags{display:flex;flex-wrap:wrap;gap:5px;}
+.comp-tag{background:var(--border);color:var(--text);font-size:.72em;font-weight:600;padding:3px 9px;border-radius:5px;font-family:'SFMono-Regular',Consolas,monospace;}
+.step-code{font-family:'SFMono-Regular',Consolas,monospace;font-size:.75em;color:var(--code-fg);line-height:1.65;white-space:pre;overflow-x:auto;min-height:80px;}
+.step-code .kw{color:#ff7b72;}
+.step-code .fn{color:#d2a8ff;}
+.step-code .str{color:#a5d6ff;}
+.step-code .cm{color:#8b949e;font-style:italic;}
+
+.btn{padding:9px 26px;border-radius:7px;border:none;font-weight:700;font-size:.85em;cursor:pointer;transition:background .2s;}
+.btn-p{background:var(--hi);color:#000;}
+.btn-p:hover:not(:disabled){background:#c88a00;}
+.btn-s{background:var(--card);color:var(--text);border:1px solid var(--border2);}
+.btn-s:hover:not(:disabled){background:var(--border);}
+.btn:disabled{opacity:.28;cursor:not-allowed;}
+.step-ct{color:var(--muted);font-size:.83em;font-weight:600;min-width:56px;text-align:center;}
+.hint{text-align:center;color:var(--muted2);font-size:.72em;margin-top:12px;}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Graph RAG Chatbot <span class="badge">Architecture Walkthrough</span></h1>
+</div>
+
+<div class="tabs">
+  <button class="tab active" id="tab-ingest" onclick="setFlow('ingest')">↑ Ingest Flow</button>
+  <button class="tab"        id="tab-query"  onclick="setFlow('query')">↻ Query Flow</button>
+</div>
+
+<div class="diagram-outer" id="diagram-outer">
+
+  <svg id="svg-arrows">
+    <defs>
+      <marker id="arr-dim" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+        <path d="M0,0 L7,3.5 L0,7 Z" fill="#30363d"/>
+      </marker>
+      <marker id="arr-lit" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+        <path d="M0,0 L7,3.5 L0,7 Z" fill="#e3a008"/>
+      </marker>
+    </defs>
+  </svg>
+
+  <div class="diagram-grid" id="diagram-grid">
+
+    <!-- Left column -->
+    <div class="col">
+      <div class="node" id="n-user">
+        <div class="node-icon">👤</div>
+        <div class="node-name">User</div>
+        <div class="node-sub">Browser — uploads PDFs or asks questions</div>
+        <div class="node-label">User</div>
+      </div>
+      <div class="node" id="n-gradio">
+        <div class="node-icon">🖥️</div>
+        <div class="node-name">Gradio UI</div>
+        <div class="node-sub">app.py — Chat + Ingest tabs. Calls flyte.run() to dispatch Union tasks</div>
+        <div class="node-label">Gradio</div>
+      </div>
+    </div>
+
+    <!-- Center: Union Cluster -->
+    <div class="cluster" id="n-union">
+      <div class="cluster-hdr">☁️ Union Cluster</div>
+
+      <div class="section-label ingest-only">Ingest</div>
+      <div class="task ingest-only" id="n-ingest-pipe">
+        <div class="task-ico">🔀</div>
+        <div class="task-body">
+          <div class="task-name">ingest_pipeline</div>
+          <div class="task-detail">asyncio.gather fan-out per PDF, then sequential graph enrichment</div>
+        </div>
+        <span class="tbadge">orchestrator</span>
+      </div>
+      <div class="task ingest-only" id="n-process-pdf">
+        <div class="task-ico">📄</div>
+        <div class="task-body">
+          <div class="task-name">process_pdf</div>
+          <div class="task-detail">PyMuPDF → chunks · Claude tool use → entities + relationships per chunk</div>
+        </div>
+        <span class="tbadge">×15 parallel</span>
+      </div>
+      <div class="task ingest-only" id="n-load-graph">
+        <div class="task-ico">🗂️</div>
+        <div class="task-body">
+          <div class="task-name">load_graph</div>
+          <div class="task-detail">gte-small embeddings · MERGE Document/Chunk/Entity/RELATED into Neo4j</div>
+        </div>
+        <span class="tbadge">step 1/5</span>
+      </div>
+      <div class="task ingest-only" id="n-vec-index">
+        <div class="task-ico">🔢</div>
+        <div class="task-body">
+          <div class="task-name">create_vector_index</div>
+          <div class="task-detail">HNSW index on Chunk.embedding in Neo4j (IF NOT EXISTS — idempotent)</div>
+        </div>
+        <span class="tbadge">step 2/5</span>
+      </div>
+      <div class="task ingest-only" id="n-resolve">
+        <div class="task-ico">🔗</div>
+        <div class="task-body">
+          <div class="task-name">resolve_entities</div>
+          <div class="task-detail">Embed all Entity names · merge near-duplicates above cosine threshold</div>
+        </div>
+        <span class="tbadge">step 3/5</span>
+      </div>
+      <div class="task ingest-only" id="n-detect">
+        <div class="task-ico">🕸️</div>
+        <div class="task-body">
+          <div class="task-name">detect_communities</div>
+          <div class="task-detail">Louvain algorithm over RELATED edges → community_id on each Entity</div>
+        </div>
+        <span class="tbadge">step 4/5</span>
+      </div>
+      <div class="task ingest-only" id="n-summarize">
+        <div class="task-ico">📝</div>
+        <div class="task-body">
+          <div class="task-name">summarize_communities</div>
+          <div class="task-detail">Claude summarizes each entity cluster → Community nodes in Neo4j</div>
+        </div>
+        <span class="tbadge">step 5/5</span>
+      </div>
+
+      <div class="cluster-div query-only"></div>
+      <div class="section-label query-only">Query</div>
+
+      <div class="task query-only" id="n-query-pipe">
+        <div class="task-ico">🔀</div>
+        <div class="task-body">
+          <div class="task-name">query_pipeline</div>
+          <div class="task-detail">Routes question → dispatches one retrieval task → generates answer</div>
+        </div>
+        <span class="tbadge">orchestrator</span>
+      </div>
+      <div class="task query-only" id="n-route">
+        <div class="task-ico">🧭</div>
+        <div class="task-body">
+          <div class="task-name">route_query</div>
+          <div class="task-detail">Claude tool use classifies question → hybrid | entity | community</div>
+        </div>
+        <span class="tbadge">step 1/3</span>
+      </div>
+      <div class="task query-only" id="n-retrieve">
+        <div class="task-ico">🔍</div>
+        <div class="task-body">
+          <div class="task-name">hybrid / entity / community _retrieve</div>
+          <div class="task-detail">One task dispatched based on route_query result — Neo4j graph + vectors</div>
+        </div>
+        <span class="tbadge">step 2/3</span>
+      </div>
+      <div class="task query-only" id="n-generate">
+        <div class="task-ico">✍️</div>
+        <div class="task-body">
+          <div class="task-name">generate</div>
+          <div class="task-detail">Mode-specific RAG prompt · Claude Sonnet → grounded answer</div>
+        </div>
+        <span class="tbadge">step 3/3</span>
+      </div>
+    </div>
+
+    <!-- Right column -->
+    <div class="col">
+      <div class="node" id="n-claude">
+        <div class="node-icon">🤖</div>
+        <div class="node-name">Claude Sonnet</div>
+        <div class="node-sub">claude-sonnet-4-6 · entity extraction · community summaries · routing · answers</div>
+        <div class="node-label">Claude</div>
+      </div>
+      <div class="node" id="n-gte">
+        <div class="node-icon">🧠</div>
+        <div class="node-name">gte-small</div>
+        <div class="node-sub">384D embeddings · baked into task image · chunk vectors + query vectors</div>
+        <div class="node-label">Embedding</div>
+      </div>
+      <div class="node" id="n-neo4j">
+        <div class="node-icon">🕸️</div>
+        <div class="node-name">Neo4j AuraDB</div>
+        <div class="node-sub">Knowledge graph · Document / Chunk / Entity / Community nodes · HNSW vector index · Louvain communities</div>
+        <div class="node-label">Graph DB</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="nav-row">
+  <button class="btn btn-s" id="btn-prev" onclick="prev()">← Prev</button>
+  <div class="dots" id="dots"></div>
+  <button class="btn btn-p" id="btn-next" onclick="next()">Next →</button>
+  <span class="step-ct" id="s-ct">1 / 11</span>
+</div>
+
+<div class="step-panel" id="step-panel">
+  <div class="step-top">
+    <span class="step-num" id="s-num">Step 1</span>
+    <span class="step-ttl" id="s-ttl"></span>
+  </div>
+  <div class="step-body">
+    <div class="step-left">
+      <div class="panel-label">Description</div>
+      <div class="step-desc" id="s-desc"></div>
+      <div class="panel-label">Active Components</div>
+      <div class="comp-tags" id="s-tags"></div>
+    </div>
+    <div class="step-right">
+      <div class="panel-label">Code</div>
+      <pre class="step-code" id="s-code"></pre>
+    </div>
+  </div>
+</div>
+
+<p class="hint">← → arrow keys to navigate between steps</p>
+
+<script>
+const ARROWS = [
+  { id:'user-gradio',      from:'n-user',       fS:'bottom', to:'n-gradio',      tS:'top'  },
+  { id:'gradio-ingest',    from:'n-gradio',      fS:'right',  to:'n-ingest-pipe', tS:'left' },
+  { id:'gradio-query',     from:'n-gradio',      fS:'right',  to:'n-query-pipe',  tS:'left' },
+  { id:'ingest-process',   from:'n-ingest-pipe', fS:'bottom', to:'n-process-pdf', tS:'top'  },
+  { id:'process-claude',   from:'n-process-pdf', fS:'right',  to:'n-claude',      tS:'left', fOff:-6, tOff:-16 },
+  { id:'process-load',     from:'n-process-pdf', fS:'bottom', to:'n-load-graph',  tS:'top'  },
+  { id:'load-gte',         from:'n-load-graph',  fS:'right',  to:'n-gte',         tS:'left', fOff:-6, tOff:-10 },
+  { id:'load-neo4j',       from:'n-load-graph',  fS:'right',  to:'n-neo4j',       tS:'left', fOff:6,  tOff:-16 },
+  { id:'vecidx-neo4j',     from:'n-vec-index',   fS:'right',  to:'n-neo4j',       tS:'left', fOff:0,  tOff:-8  },
+  { id:'resolve-neo4j',    from:'n-resolve',     fS:'right',  to:'n-neo4j',       tS:'left', fOff:0,  tOff:0   },
+  { id:'detect-neo4j',     from:'n-detect',      fS:'right',  to:'n-neo4j',       tS:'left', fOff:0,  tOff:8   },
+  { id:'summarize-claude', from:'n-summarize',   fS:'right',  to:'n-claude',      tS:'left', fOff:-6, tOff:16  },
+  { id:'summarize-neo4j',  from:'n-summarize',   fS:'right',  to:'n-neo4j',       tS:'left', fOff:6,  tOff:16  },
+  { id:'query-route',      from:'n-query-pipe',  fS:'bottom', to:'n-route',       tS:'top'  },
+  { id:'route-claude',     from:'n-route',       fS:'right',  to:'n-claude',      tS:'left', fOff:-6, tOff:6   },
+  { id:'route-retrieve',   from:'n-route',       fS:'bottom', to:'n-retrieve',    tS:'top'  },
+  { id:'retrieve-gte',     from:'n-retrieve',    fS:'right',  to:'n-gte',         tS:'left', fOff:-6, tOff:10  },
+  { id:'retrieve-neo4j',   from:'n-retrieve',    fS:'right',  to:'n-neo4j',       tS:'left', fOff:6,  tOff:10  },
+  { id:'generate-claude',  from:'n-generate',    fS:'right',  to:'n-claude',      tS:'left' },
+  { id:'answer-gradio',    from:'n-claude',      fS:'top',    to:'n-gradio',      tS:'top',  bend:'arc' },
+];
+
+const FLOWS = {
+  ingest: [
+    {
+      nodes:['n-user'], arrows:[],
+      ttl:'User uploads PDFs',
+      desc:'In the Ingest Documents tab, the user selects the Everstorm Outfitters policy PDFs. Files are base64-encoded before dispatch — no file handles cross Union task boundaries.',
+      tags:['user','Gradio Ingest tab'],
+      code:`<span class="cm"># app.py — Ingest Documents tab</span>
+file_upload = gr.File(
+    file_types=[<span class="str">".pdf"</span>],
+    file_count=<span class="str">"multiple"</span>,
+    label=<span class="str">"Upload PDFs"</span>,
+)
+<span class="cm"># Each file → base64-encoded bytes
+# No file handles cross Union task boundaries</span>`,
+    },
+    {
+      nodes:['n-user','n-gradio'], arrows:['user-gradio'],
+      ttl:'Gradio encodes PDFs and dispatches to Union',
+      desc:'app.py reads each uploaded file, base64-encodes the bytes, then calls flyte.run(ingest_pipeline) with all filenames and encoded content. run.wait() blocks until the full pipeline finishes.',
+      tags:['gradio','flyte.run()','base64'],
+      code:`<span class="cm"># app.py — run_ingest()</span>
+filenames, pdf_bytes_b64 = [], []
+<span class="kw">for</span> path <span class="kw">in</span> uploaded_files:
+    filenames.append(Path(path).name)
+    pdf_bytes_b64.append(
+        base64.b64encode(
+            Path(path).read_bytes()
+        ).decode()
+    )
+
+run = flyte.run(
+    ingest_pipeline,
+    filenames=filenames,
+    pdf_bytes_b64=pdf_bytes_b64,
+)
+run.wait()`,
+    },
+    {
+      nodes:['n-union','n-ingest-pipe'], arrows:['gradio-ingest'],
+      ttl:'ingest_pipeline fans out — one task per PDF',
+      desc:'The orchestrator uses asyncio.gather() to dispatch one process_pdf sub-task per PDF simultaneously. All 15 PDFs run in parallel on separate Union task pods. Each pod handles its own PDF end-to-end: parse → chunk → entity extract.',
+      tags:['ingest_pipeline','asyncio.gather()','Union','×15 parallel'],
+      code:`<span class="cm"># ingest/pipeline.py — ingest_pipeline</span>
+per_pdf_results = <span class="kw">await</span> asyncio.gather(*[
+    process_pdf(
+        source_doc=name,
+        pdf_bytes_b64=enc,
+    )
+    <span class="kw">for</span> name, enc <span class="kw">in</span> zip(filenames, pdf_bytes_b64)
+])
+<span class="cm"># → 15 tasks running in parallel on Union
+# Each returns list[str] of extraction JSON</span>`,
+    },
+    {
+      nodes:['n-process-pdf'], arrows:['ingest-process'],
+      ttl:'process_pdf — parse and chunk the PDF (×15 parallel)',
+      desc:'Each process_pdf task decodes its base64 PDF, extracts full text with PyMuPDF, then splits into overlapping chunks using RecursiveCharacterTextSplitter. The splitter respects paragraph → sentence → word boundaries. One Claude entity-extraction call follows per chunk.',
+      tags:['process_pdf','PyMuPDF','RecursiveCharacterTextSplitter','parse_and_chunk'],
+      code:`<span class="cm"># ingest/chunking.py — parse_and_chunk</span>
+raw = base64.b64decode(pdf_bytes_b64)
+<span class="kw">with</span> fitz.open(stream=raw, filetype=<span class="str">"pdf"</span>) <span class="kw">as</span> doc:
+    full_text = <span class="str">"\n"</span>.join(
+        page.get_text() <span class="kw">for</span> page <span class="kw">in</span> doc
+    )
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=CHUNK_SIZE,
+    chunk_overlap=CHUNK_OVERLAP,
+    separators=[<span class="str">"\n\n"</span>, <span class="str">"\n"</span>, <span class="str">". "</span>, <span class="str">" "</span>, <span class="str">""</span>],
+)
+chunks = splitter.split_text(full_text)`,
+    },
+    {
+      nodes:['n-process-pdf','n-claude'], arrows:['ingest-process','process-claude'],
+      ttl:'process_pdf — extract entities and relationships via Claude tool use',
+      desc:'For each chunk, Claude is called with a structured tool schema defining the Everstorm ontology — entity types (Product, Policy, Service, …) and relationship types (GOVERNS, INCLUDES, REQUIRES, …). Forcing tool_choice ensures structured JSON output every time, not free-form text. This is how raw text becomes a typed knowledge graph.',
+      tags:['extract_entities','Claude tool use','entities','relationships','ontology'],
+      code:`<span class="cm"># ingest/extraction.py — extract_entities</span>
+response = client.messages.create(
+    model=CLAUDE_MODEL,
+    max_tokens=2048,
+    system=_SYSTEM_PROMPT,
+    tools=[_EXTRACT_TOOL],
+    tool_choice={
+        <span class="str">"type"</span>: <span class="str">"tool"</span>,
+        <span class="str">"name"</span>: <span class="str">"extract_graph"</span>,
+    },
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: chunk_text}],
+)
+tool_block = next(
+    b <span class="kw">for</span> b <span class="kw">in</span> response.content
+    <span class="kw">if</span> b.type == <span class="str">"tool_use"</span>
+)
+<span class="cm"># → {"entities": [...], "relationships": [...]}</span>`,
+    },
+    {
+      nodes:['n-load-graph','n-gte','n-neo4j'], arrows:['process-load','load-gte','load-neo4j'],
+      ttl:'load_graph — embed chunks and write the knowledge graph to Neo4j',
+      desc:'All extraction results are merged into Neo4j in a single task. gte-small encodes each chunk\'s text into a 384D vector stored on the Chunk node. The full graph schema written:\n\n  Document -[:HAS_CHUNK]→ Chunk -[:MENTIONS]→ Entity\n  Entity -[:RELATED {type, description}]→ Entity\n\nMERGE queries are idempotent — safe to re-run without duplicates.',
+      tags:['load_graph','gte-small','Neo4j','MERGE','Document','Chunk','Entity','RELATED'],
+      code:`<span class="cm"># ingest/graph_loader.py — load_graph</span>
+model = SentenceTransformer(EMBED_MODEL)
+<span class="kw">for</span> raw <span class="kw">in</span> extraction_results:
+    result = json.loads(raw)
+    <span class="cm"># Write Document + Chunk nodes</span>
+    session.run(_MERGE_CHUNK_Q, ...)
+    <span class="cm"># Compute + store 384D embedding on Chunk</span>
+    embedding = model.encode(chunk_text).tolist()
+    session.run(_SET_EMBEDDING_Q, ...)
+    <span class="cm"># Write Entity nodes + MENTIONS edges</span>
+    <span class="kw">for</span> ent <span class="kw">in</span> result[<span class="str">"entities"</span>]:
+        session.run(_MERGE_ENTITY_Q, ...)
+        session.run(_MERGE_MENTIONS_Q, ...)
+    <span class="cm"># Write RELATED edges between entities</span>
+    <span class="kw">for</span> rel <span class="kw">in</span> result[<span class="str">"relationships"</span>]:
+        session.run(_MERGE_RELATIONSHIP_Q, ...)`,
+    },
+    {
+      nodes:['n-vec-index','n-neo4j'], arrows:['vecidx-neo4j'],
+      ttl:'create_vector_index — HNSW index on Chunk.embedding',
+      desc:'Neo4j\'s built-in vector index uses HNSW (Hierarchical Navigable Small World) — the same algorithm used by pgvector and most dedicated vector databases. Upper graph layers navigate coarsely; lower layers refine locally.\n\nThe key difference from a standalone vector DB: the HNSW index lives inside the same graph that holds Entity and Community nodes. One query can combine vector similarity with graph traversal — no cross-service hop needed.',
+      tags:['create_vector_index','HNSW','Neo4j vector index','cosine','IF NOT EXISTS'],
+      code:`<span class="cm"># ingest/graph_loader.py — create_vector_index</span>
+cypher = (
+    <span class="str">f"CREATE VECTOR INDEX \`{VECTOR_INDEX_NAME}\` IF NOT EXISTS "</span>
+    <span class="str">f"FOR (c:Chunk) ON (c.embedding) "</span>
+    <span class="str">f"OPTIONS {{indexConfig: {{"</span>
+    <span class="str">f"  \`vector.dimensions\`: {EMBED_DIM},"</span>
+    <span class="str">f"  \`vector.similarity_function\`: 'cosine'"</span>
+    <span class="str">f"}}}}"</span>
+)
+session.run(cypher)
+<span class="cm"># HNSW index lives inside Neo4j —
+# same DB as Entity and Community nodes</span>`,
+    },
+    {
+      nodes:['n-resolve','n-neo4j'], arrows:['resolve-neo4j'],
+      ttl:'resolve_entities — merge near-duplicate entity nodes',
+      desc:'Claude sometimes extracts the same concept under slightly different names ("Return Policy" vs "Returns Policy"). resolve_entities loads all Entity names, embeds them with gte-small, and merges any pair whose cosine similarity exceeds ENTITY_MERGE_THRESHOLD.\n\nFor each merge: MENTIONS and RELATED edges are redirected to the kept node, then the duplicate is DETACH DELETEd. The graph stays consistent with no orphan edges.',
+      tags:['resolve_entities','cosine similarity','entity deduplication','gte-small','DETACH DELETE'],
+      code:`<span class="cm"># ingest/enrichment.py — resolve_entities</span>
+names = [r[<span class="str">"name"</span>] <span class="kw">for</span> r <span class="kw">in</span> session.run(
+    <span class="str">"MATCH (e:Entity) RETURN e.name AS name"</span>
+).data()]
+embeddings = model.encode(names)
+
+<span class="kw">for</span> a, b <span class="kw">in</span> combinations(names, 2):
+    <span class="kw">if</span> _cosine_sim(name_to_vec[a], name_to_vec[b]) >= THRESHOLD:
+        <span class="cm"># Redirect MENTIONS + RELATED edges to keep node</span>
+        session.run(redirect_mentions_q, ...)
+        session.run(redirect_related_q, ...)
+        <span class="cm"># Delete duplicate entity</span>
+        session.run(
+            <span class="str">"MATCH (e:Entity {name: $drop}) DETACH DELETE e"</span>,
+            drop=b,
+        )`,
+    },
+    {
+      nodes:['n-detect','n-neo4j'], arrows:['detect-neo4j'],
+      ttl:'detect_communities — Louvain algorithm over the entity graph',
+      desc:'All Entity nodes and RELATED edges are loaded into a NetworkX in-memory graph. The Louvain algorithm partitions entities into communities — groups that are more densely connected internally than to the rest of the graph.\n\nThe resulting community_id is written back to each Entity node in Neo4j. This entire step runs in Python — no separate graph analytics engine needed.',
+      tags:['detect_communities','Louvain','NetworkX','python-louvain','community_id'],
+      code:`<span class="cm"># ingest/enrichment.py — detect_communities</span>
+G = nx.Graph()
+G.add_nodes_from(r[<span class="str">"name"</span>] <span class="kw">for</span> r <span class="kw">in</span> entity_rows)
+G.add_edges_from(
+    (r[<span class="str">"source"</span>], r[<span class="str">"target"</span>]) <span class="kw">for</span> r <span class="kw">in</span> rel_rows
+)
+
+partition = louvain_community.best_partition(
+    G, resolution=LOUVAIN_RESOLUTION
+)
+<span class="cm"># Write community_id back to each Entity in Neo4j</span>
+<span class="kw">for</span> entity_name, cid <span class="kw">in</span> partition.items():
+    session.run(
+        <span class="str">"MATCH (e:Entity {name: $n}) SET e.community_id = $c"</span>,
+        n=entity_name, c=cid,
+    )`,
+    },
+    {
+      nodes:['n-summarize','n-claude','n-neo4j'], arrows:['summarize-claude','summarize-neo4j'],
+      ttl:'summarize_communities — Claude generates cluster summaries stored in Neo4j',
+      desc:'For each community, all member entities and their RELATED edges are assembled into a prompt. Claude writes a 2-3 sentence summary describing what the cluster is about.\n\nA Community node is MERGED into Neo4j with the summary, and each Entity gets a BELONGS_TO edge. These pre-computed summaries are what make broad "overview" questions fast at query time — no per-query LLM call needed for community context.',
+      tags:['summarize_communities','Claude Sonnet','Community node','BELONGS_TO','pre-computed'],
+      code:`<span class="cm"># ingest/enrichment.py — summarize_communities</span>
+<span class="kw">for</span> cid, entities <span class="kw">in</span> community_entities.items():
+    prompt = (
+        <span class="str">f"Entities:\n{entity_lines}\n\n"</span>
+        <span class="str">f"Relationships:\n{rel_lines}"</span>
+    )
+    response = client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=512, ...
+    )
+    summary_text = response.content[0].text.strip()
+    <span class="cm"># Store Community node with summary text</span>
+    session.run(
+        <span class="str">"MERGE (c:Community {id: $cid}) SET c.summary = $s"</span>,
+        cid=cid, s=summary_text,
+    )
+    <span class="cm"># Link each Entity → Community</span>
+    session.run(<span class="str">"MERGE (e)-[:BELONGS_TO]->(c)"</span>, ...)`,
+    },
+    {
+      nodes:['n-gradio','n-user'], arrows:[],
+      ttl:'Ingest complete — knowledge graph ready',
+      desc:'Neo4j now holds the full Everstorm knowledge graph: Document → Chunk → Entity structure, 384D HNSW embeddings on every Chunk, de-duplicated Entity nodes, Louvain community IDs, and pre-generated Community summaries.\n\nSwitch to the Chat tab. The query pipeline can now answer via three different retrieval strategies — chosen automatically per question.',
+      tags:['knowledge graph','Neo4j AuraDB','ready'],
+      code:`<span class="cm"># Graph schema now in Neo4j:
+#
+#   (Document)-[:HAS_CHUNK]→(Chunk)
+#   (Chunk)-[:MENTIONS]→(Entity)
+#   (Entity)-[:RELATED]→(Entity)
+#   (Entity)-[:BELONGS_TO]→(Community)
+#
+# Each Chunk has a 384D HNSW-indexed embedding.
+# Each Entity has a community_id.
+# Each Community has a Claude-written summary.
+#
+# Three retrieval strategies now available:
+#   hybrid | entity | community</span>`,
+    },
+  ],
+
+  query: [
+    {
+      nodes:['n-user'], arrows:[],
+      ttl:'User asks a question',
+      desc:'A customer types a natural-language question into the Gradio chat interface. The routing, retrieval, and generation steps all run as separate Union tasks — each appears as a distinct node in the Union console execution graph.',
+      tags:['user','Gradio Chat tab'],
+      code:`<span class="cm"># Chat tab — question input</span>
+query_input = gr.Textbox(
+    placeholder=<span class="str">"Ask anything about Everstorm..."</span>,
+    label=<span class="str">"Question"</span>,
+    submit_btn=True,
+)
+<span class="cm"># Answer includes:
+#   answer, sources, retrieval_mode, entities_used</span>`,
+    },
+    {
+      nodes:['n-user','n-gradio'], arrows:['user-gradio'],
+      ttl:'Gradio dispatches the query to Union',
+      desc:'app.py calls flyte.run(query_pipeline) which submits a new execution to the Union cluster and returns immediately with a run handle. run.wait() blocks until the cluster finishes. The answer, retrieval mode, and sources are read from run.outputs().o0.',
+      tags:['gradio','flyte.run()','run.wait()'],
+      code:`<span class="cm"># app.py — chat()</span>
+run = flyte.run(
+    query_pipeline,
+    question=question,
+)
+run.wait()
+result = json.loads(run.outputs().o0)
+
+answer  = result[<span class="str">"answer"</span>]
+mode    = result[<span class="str">"retrieval_mode"</span>]
+sources = result.get(<span class="str">"sources"</span>, [])`,
+    },
+    {
+      nodes:['n-union','n-query-pipe'], arrows:['gradio-query'],
+      ttl:'query_pipeline — orchestrate route → retrieve → generate',
+      desc:'The Union cluster picks up the execution and schedules query_pipeline. It awaits three tasks in sequence: route_query classifies the question, then exactly one retrieval task runs, then generate builds the final answer. All three appear as separate visible nodes in the Union console.',
+      tags:['query_pipeline','Union cluster','sequential tasks'],
+      code:`<span class="cm"># query/pipeline.py — query_pipeline</span>
+<span class="kw">async def</span> <span class="fn">query_pipeline</span>(question: str) -> str:
+    route = json.loads(<span class="kw">await</span> route_query(question=question))
+    mode           = route[<span class="str">"mode"</span>]
+    routing_reason = route.get(<span class="str">"reasoning"</span>, <span class="str">""</span>)
+
+    <span class="kw">if</span> mode == <span class="str">"entity"</span>:
+        context = <span class="kw">await</span> entity_retrieve(question=question)
+    <span class="kw">elif</span> mode == <span class="str">"community"</span>:
+        context = <span class="kw">await</span> community_retrieve(question=question)
+    <span class="kw">else</span>:
+        context = <span class="kw">await</span> hybrid_retrieve(question=question)
+
+    result = json.loads(<span class="kw">await</span> generate(
+        question=question, context_json=context
+    ))
+    result[<span class="str">"routing_reason"</span>] = routing_reason
+    <span class="kw">return</span> json.dumps(result)`,
+    },
+    {
+      nodes:['n-route','n-claude'], arrows:['query-route','route-claude'],
+      ttl:'route_query — Claude classifies the question into a retrieval mode',
+      desc:'A lightweight Claude call uses tool use to force a structured classification. Three modes are defined:\n\n  hybrid    — specific facts, definitions, numbers, rules\n  entity    — named things, relationships, multi-hop connections\n  community — broad themes, program overviews, "what does X offer"\n\nExamples seen in testing:\n  "What are the point thresholds?" → hybrid\n  "What is the loyalty program?" → community\n  "How do loyalty points relate to returns?" → entity',
+      tags:['route_query','Claude tool use','classify_query','hybrid','entity','community'],
+      code:`<span class="cm"># query/routing.py — route_query</span>
+response = client.messages.create(
+    model=CLAUDE_MODEL,
+    max_tokens=256,
+    system=_SYSTEM_PROMPT,
+    tools=[_ROUTE_TOOL],
+    tool_choice={
+        <span class="str">"type"</span>: <span class="str">"tool"</span>,
+        <span class="str">"name"</span>: <span class="str">"classify_query"</span>,
+    },
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: question}],
+)
+tool_block = next(
+    b <span class="kw">for</span> b <span class="kw">in</span> response.content
+    <span class="kw">if</span> b.type == <span class="str">"tool_use"</span>
+)
+<span class="kw">return</span> json.dumps({
+    <span class="str">"mode"</span>:      tool_block.input[<span class="str">"mode"</span>],
+    <span class="str">"reasoning"</span>: tool_block.input.get(<span class="str">"reasoning"</span>, <span class="str">""</span>),
+})
+<span class="cm"># reasoning shown in the UI's retrieval panel</span>`,
+    },
+    {
+      nodes:['n-retrieve','n-gte','n-neo4j'], arrows:['route-retrieve','retrieve-gte','retrieve-neo4j'],
+      ttl:'Retrieval — one of three graph strategies based on the route',
+      desc:`Three retrieval tasks — only one runs per query:
+
+hybrid — embed question with gte-small → HNSW vector search over Chunk nodes → follow MENTIONS edges to nearby Entity nodes. Best for specific facts buried in document text.
+
+entity — Claude extracts entity names from the question → Neo4j pattern match on Entity nodes → traverse RELATED edges to build a neighborhood subgraph. Best for relationship questions.
+
+community — embed question with gte-small → cosine similarity to all Community summaries → return the best-matching community summary + member entities. Best for broad overviews.`,
+      tags:['hybrid_retrieve','entity_retrieve','community_retrieve','HNSW','graph traversal'],
+      code:`<span class="cm"># hybrid: vector search + MENTIONS traversal</span>
+chunk_rows = session.run(
+    <span class="str">f"CALL db.index.vector.queryNodes('{INDEX}', $top_k, $emb)"</span>
+    <span class="str">" YIELD node AS chunk, score"</span>
+    <span class="str">" WHERE score >= $threshold"</span>,
+    top_k=3, embedding=query_vec, threshold=0.75,
+).data()
+<span class="cm"># TOP_K=3 + score>=0.75 filters noise chunks</span>
+entity_rows = session.run(
+    <span class="str">"MATCH (c:Chunk)-[:MENTIONS]->(e:Entity)"</span>
+    <span class="str">"WHERE c.id IN $ids ..."</span>
+).data()
+
+<span class="cm"># community: match question → best summary</span>
+summary_vecs = model.encode(summaries)
+scores = [
+    _cosine_sim(query_vec, sv)
+    <span class="kw">for</span> sv <span class="kw">in</span> summary_vecs
+]
+best = community_rows[int(np.argmax(scores))]`,
+    },
+    {
+      nodes:['n-generate','n-claude'], arrows:['generate-claude'],
+      ttl:'generate — Claude builds a grounded answer from retrieved context',
+      desc:'generate assembles a mode-specific RAG prompt from the retrieval result and calls Claude. Each mode shapes the prompt differently:\n\n  hybrid   — chunk text + source doc names + related entity descriptions\n  entity   — entity descriptions + connected-to neighbor list from the graph\n  community — pre-computed community summary + member concept names\n\nThe system prompt instructs Claude to stay grounded and admit uncertainty rather than guess.',
+      tags:['generate','Claude Sonnet','RAG prompt','mode-specific','grounded answer'],
+      code:`<span class="cm"># query/generation.py — generate</span>
+context = json.loads(context_json)
+mode = context.get(<span class="str">"mode"</span>, <span class="str">"hybrid"</span>)
+
+<span class="cm"># Build mode-specific prompt</span>
+builder = _PROMPT_BUILDERS[mode]
+prompt  = builder(question, context)
+
+response = client.messages.create(
+    model=CLAUDE_MODEL,
+    max_tokens=1024,
+    system=_SYSTEM_PROMPT,
+    messages=[{<span class="str">"role"</span>: <span class="str">"user"</span>, <span class="str">"content"</span>: prompt}],
+)
+<span class="kw">return</span> json.dumps({
+    <span class="str">"answer"</span>:         response.content[0].text.strip(),
+    <span class="str">"retrieval_mode"</span>: mode,
+    <span class="str">"sources"</span>:        sources,
+    <span class="str">"entities_used"</span>:  entities_used,
+})`,
+    },
+    {
+      nodes:['n-gradio','n-user'], arrows:['answer-gradio'],
+      ttl:'Answer returned to the user',
+      desc:'The answer, source documents, retrieval mode, entities used, and routing reasoning travel back through run.outputs().o0. The UI shows the answer in the chatbot and populates the Last Query Retrieval sidebar panel with the mode badge, Claude\'s routing reasoning, pipeline path (with graph edge types), and source/entity counts.',
+      tags:['gradio','chatbot','retrieval_mode','sources','entities_used','routing_reason'],
+      code:`<span class="cm"># app.py — chat() final steps</span>
+result         = json.loads(run.outputs().o0)
+answer         = result[<span class="str">"answer"</span>]
+mode           = result.get(<span class="str">"retrieval_mode"</span>, <span class="str">"hybrid"</span>)
+sources        = result.get(<span class="str">"sources"</span>, [])
+entities       = result.get(<span class="str">"entities_used"</span>, [])
+routing_reason = result.get(<span class="str">"routing_reason"</span>, <span class="str">""</span>)
+
+history.append({
+    <span class="str">"role"</span>: <span class="str">"assistant"</span>,
+    <span class="str">"content"</span>: <span class="str">f"{answer}\n\n{badge}{sources}{entities}"</span>,
+})
+<span class="cm"># Sidebar panel: mode + reasoning + pipeline path</span>`,
+    },
+  ],
+};
+
+let flow = 'ingest', step = 0;
+
+function rect(id) {
+  const el  = document.getElementById(id);
+  const svg = document.getElementById('diagram-outer');
+  const er  = el.getBoundingClientRect();
+  const sr  = svg.getBoundingClientRect();
+  return {
+    l: er.left - sr.left, t: er.top - sr.top,
+    r: er.right - sr.left, b: er.bottom - sr.top,
+    cx: er.left - sr.left + er.width/2,
+    cy: er.top  - sr.top  + er.height/2,
+    w: er.width, h: er.height,
+  };
+}
+
+function edge(r, side, off=0) {
+  if (side==='top')    return { x: r.cx+off, y: r.t };
+  if (side==='bottom') return { x: r.cx+off, y: r.b };
+  if (side==='left')   return { x: r.l, y: r.cy+off };
+  if (side==='right')  return { x: r.r, y: r.cy+off };
+}
+
+function buildPath(def) {
+  const fr = rect(def.from), tr = rect(def.to);
+  const p1 = edge(fr, def.fS, def.fOff||0);
+  const p2 = edge(tr, def.tS, def.tOff||0);
+  let c1, c2;
+
+  if (def.bend === 'arc') {
+    const top = Math.min(p1.y, p2.y) - 60;
+    c1 = { x: p1.x, y: top };
+    c2 = { x: p2.x, y: top };
+  } else {
+    const dx = Math.max(Math.abs(p2.x - p1.x) * 0.5, 40);
+    const dy = Math.max(Math.abs(p2.y - p1.y) * 0.5, 40);
+    if      (def.fS==='right')  c1 = { x: p1.x+dx, y: p1.y };
+    else if (def.fS==='left')   c1 = { x: p1.x-dx, y: p1.y };
+    else if (def.fS==='bottom') c1 = { x: p1.x,    y: p1.y+dy };
+    else                        c1 = { x: p1.x,    y: p1.y-dy };
+    if      (def.tS==='left')   c2 = { x: p2.x-dx, y: p2.y };
+    else if (def.tS==='right')  c2 = { x: p2.x+dx, y: p2.y };
+    else if (def.tS==='top')    c2 = { x: p2.x,    y: p2.y-dy };
+    else                        c2 = { x: p2.x,    y: p2.y+dy };
+  }
+  return `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
+}
+
+function isVisible(id) {
+  const el = document.getElementById(id);
+  return el ? window.getComputedStyle(el).display !== 'none' : false;
+}
+
+function drawArrows() {
+  const svg = document.getElementById('svg-arrows');
+  [...svg.querySelectorAll('.arrow-path')].forEach(p => p.remove());
+  ARROWS.forEach(def => {
+    if (!isVisible(def.from) || !isVisible(def.to)) return;
+    try {
+      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('id', 'a-' + def.id);
+      path.setAttribute('d', buildPath(def));
+      path.setAttribute('class', 'arrow-path');
+      svg.appendChild(path);
+    } catch(e) {}
+  });
+  const outer = document.getElementById('diagram-outer');
+  svg.setAttribute('width',  outer.offsetWidth);
+  svg.setAttribute('height', outer.offsetHeight);
+}
+
+const ALL_NODES = [
+  'n-user','n-gradio','n-union','n-claude','n-gte','n-neo4j',
+  'n-ingest-pipe','n-process-pdf','n-load-graph','n-vec-index',
+  'n-resolve','n-detect','n-summarize',
+  'n-query-pipe','n-route','n-retrieve','n-generate',
+];
+
+const CLUSTER_TASKS = new Set([
+  'n-ingest-pipe','n-process-pdf','n-load-graph','n-vec-index',
+  'n-resolve','n-detect','n-summarize',
+  'n-query-pipe','n-route','n-retrieve','n-generate',
+]);
+
+function render() {
+  const steps = FLOWS[flow];
+  const s = steps[step];
+  const total = steps.length;
+
+  ALL_NODES.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+  document.querySelectorAll('.arrow-path').forEach(p => p.classList.remove('lit'));
+
+  s.nodes.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
+    if (CLUSTER_TASKS.has(id))
+      document.getElementById('n-union').classList.add('active');
+  });
+
+  s.arrows.forEach(aid => {
+    const el = document.getElementById('a-'+aid);
+    if (el) el.classList.add('lit');
+  });
+
+  document.getElementById('s-num').textContent  = `Step ${step+1}`;
+  document.getElementById('s-ttl').textContent  = s.ttl;
+  document.getElementById('s-desc').textContent = s.desc;
+  document.getElementById('s-code').innerHTML   = s.code;
+
+  const tagsEl = document.getElementById('s-tags');
+  tagsEl.innerHTML = s.tags.map(t=>`<span class="comp-tag">${t}</span>`).join('');
+
+  document.getElementById('s-ct').textContent = `${step+1} / ${total}`;
+  document.getElementById('btn-prev').disabled = step===0;
+  document.getElementById('btn-next').disabled = step===total-1;
+  document.getElementById('btn-next').textContent = step===total-1 ? '✓ Done' : 'Next →';
+
+  const dotsEl = document.getElementById('dots');
+  dotsEl.innerHTML = '';
+  for (let i=0; i<total; i++) {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i===step ? ' cur' : i<step ? ' past' : '');
+    d.title = FLOWS[flow][i].ttl;
+    d.onclick = () => { step=i; render(); };
+    dotsEl.appendChild(d);
+  }
+}
+
+function next() { if (step < FLOWS[flow].length-1) { step++; render(); } }
+function prev() { if (step > 0) { step--; render(); } }
+
+function setFlow(f) {
+  flow=f; step=0;
+  document.getElementById('tab-ingest').classList.toggle('active', f==='ingest');
+  document.getElementById('tab-query').classList.toggle('active',  f==='query');
+  const showIngest = f === 'ingest';
+  document.querySelectorAll('.ingest-only').forEach(el => el.style.display = showIngest ? '' : 'none');
+  document.querySelectorAll('.query-only').forEach(el  => el.style.display = showIngest ? 'none' : '');
+  render();
+  requestAnimationFrame(drawArrows);
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key==='ArrowRight'||e.key==='ArrowDown') next();
+  if (e.key==='ArrowLeft' ||e.key==='ArrowUp')   prev();
+});
+
+window.addEventListener('load', () => {
+  setFlow('ingest');
+  requestAnimationFrame(() => { drawArrows(); render(); });
+});
+window.addEventListener('resize', () => { drawArrows(); });
+</script>
+</body>
+</html>
