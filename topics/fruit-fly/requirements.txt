@@ -1,0 +1,26 @@
+# Local/devbox deps. The Flyte task images build their own list from config.FLY_SPEC;
+# keep the two in sync when you change one.
+#
+# flygym 2.1.0 IS NeuroMechFly v2 (the March 2026 rewrite). Pinned exactly: v2 is not
+# API-compatible with v1, and the walking controllers this demo drives live in
+# `flygym_demo.complex_terrain`, an examples package with no stability promise.
+flygym[warp]==2.1.0
+mujoco==3.9.0
+# Brian2 2.10.1 is the first release shipping cp312 aarch64 wheels; earlier versions
+# build from source on this box.
+brian2==2.10.1
+pandas
+pyarrow
+numpy
+scipy
+Pillow
+matplotlib
+# PyAV encodes the clips. aarch64 wheels exist; same choice as videogen and rl-mujoco.
+av
+imageio
+flyte==2.2.1
+# 0.11 breaks flyte 2.2.1 runs ('Headers' not callable).
+connectrpc==0.10.*
+gradio==5.42.0
+kubernetes
+python-dotenv
