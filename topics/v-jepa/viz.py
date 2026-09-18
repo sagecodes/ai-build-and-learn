@@ -929,3 +929,222 @@ def pearson(x: list[float], y: list[float]) -> float:
     if len(a) < 2 or a.std() == 0 or b.std() == 0:
         return float("nan")
     return float(np.corrcoef(a, b)[0, 1])
+
+
+# ── imagine: the dream next to reality ──────────────────────────────────────────
+
+
+def _err_colour(cm: float) -> tuple[int, int, int]:
+    return _GREEN if cm < 7 else (_AMBER if cm < 14 else _RED)
+
+
+def imagine_video(plays: list, bank_big: np.ndarray, hold: int = 3) -> np.ndarray:
+    """Pretrained dream | adapted dream | reality, one choreography after another.
+
+    `plays` is a list of (truth, pretrained Imagined, adapted Imagined). Both dream
+    panels are real bank photos (nearest to the imagined latent), labelled as such on
+    every frame, with the imagined-vs-real gripper distance under them.
+    """
+    h = plays[0][0].big.shape[1]
+    sep = np.full((h, 6, 3), 40, np.uint8)
+    out = []
+    for truth, pre, post in plays:
+        H = len(truth.actions)
+        for t in range(H + 1):
+            real = truth.big[t]
+            tiles = []
+            for name, im in (("pretrained", pre), ("adapted", post)):
+                if t == 0:
+                    tile = annotate(real, [(f"{name} imagines", _AMBER), ("from this frame only", _GREY)])
+                else:
+                    e = float(im.pos_err[t - 1])
+                    tile = annotate(
+                        _resize_nn(bank_big[im.idx[t - 1]], h),
+                        [(f"{name} imagines", _AMBER),
+                         (f"move {t}/{H}  nearest real photo", _GREY),
+                         (f"hand off by {e:4.1f} cm", _err_colour(e))],
+                    )
+                tiles.append(tile)
+            tiles.append(annotate(real, [("reality - simulator", _AMBER),
+                                         (f"play: {truth.play}  move {t}/{H}", _GREY)]))
+            frame = np.concatenate([tiles[0], sep, tiles[1], sep, tiles[2]], axis=1)
+            reps = hold if t in (0, H) else 1
+            out += [frame] * reps
+    return np.stack(out)
+
+
+def imagine_error_chart(rows: dict[str, list[np.ndarray]], title: str) -> str:
+    """Imagined-vs-real gripper distance by step, averaged over the choreographies."""
+    fig, ax = _axes(title, "moves imagined ahead (open loop)", "imagined hand vs real hand (cm)")
+    styles = {
+        "pretrained": dict(color="#e17055", lw=2.0, marker="o", ms=3),
+        "adapted": dict(color="#00b894", lw=2.2, marker="o", ms=3),
+        "imagine nothing moves": dict(color="#74b9ff", lw=1.4, ls="--"),
+        "decode floor (true future)": dict(color="#888", lw=1.3, ls=":"),
+    }
+    for name, curves in rows.items():
+        n = max(len(c) for c in curves)
+        m = np.full((len(curves), n), np.nan)
+        for i, c in enumerate(curves):
+            m[i, : len(c)] = c
+        ax.plot(np.arange(1, n + 1), np.nanmean(m, 0), label=name, **styles.get(name, {}))
+    ax.legend(fontsize=8, facecolor="#1a1a2e", edgecolor="#333", labelcolor="#ccc")
+    return _fig_html(fig)
+
+
+def imagine_paths_chart(plays: list, bank_pos: np.ndarray) -> str:
+    """Where each checkpoint thinks the hand went, in each choreography's own plane."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, len(plays), figsize=(3.4 * len(plays), 3.2), facecolor="#0f0f23")
+    axes = np.atleast_1d(axes)
+    for ax, (truth, pre, post) in zip(axes, plays):
+        ax.set_facecolor("#1a1a2e")
+        ax.tick_params(colors="#888", labelsize=7)
+        for s in ax.spines.values():
+            s.set_color("#333")
+        ax.grid(alpha=0.15, color="#888")
+        p0 = truth.pos[:1]
+        # View each choreography in the plane it actually moves in: a square traced flat
+        # on the table is a line from the front and a square from above.
+        i, j = sorted(np.argsort(np.ptp(truth.pos, axis=0))[-2:])
+        ax.plot(truth.pos[:, i] * 100, truth.pos[:, j] * 100, color="#f5f5f5", lw=2.4, label="reality")
+        for name, im, col in (("pretrained", pre, "#e17055"), ("adapted", post, "#00b894")):
+            q = np.concatenate([p0, bank_pos[im.idx]])
+            ax.plot(q[:, i] * 100, q[:, j] * 100, color=col, lw=1.6, marker="o", ms=2.5,
+                    alpha=0.9, label=f"{name} imagines")
+        ax.scatter([p0[0, i] * 100], [p0[0, j] * 100], s=40, color="#fdcb6e", zorder=5, label="start")
+        ax.set_title(truth.play, color="#fdcb6e", fontsize=10)
+        axis = ["x, depth (cm)", "y, across (cm)", "z, height (cm)"]
+        ax.set_xlabel(axis[i], color="#ccc", fontsize=8)
+        ax.set_ylabel(axis[j], color="#ccc", fontsize=8)
+        ax.set_aspect("equal", adjustable="datalim")
+    axes[0].legend(fontsize=7, facecolor="#1a1a2e", edgecolor="#333", labelcolor="#ccc")
+    fig.tight_layout()
+    return _fig_html(fig, width=900)
+
+
+# ── walk: the G1 humanoid ───────────────────────────────────────────────────────
+
+
+def _stack_col(top: np.ndarray, bottom: np.ndarray, h: int) -> np.ndarray:
+    half = h // 2
+    a, b = _resize_nn(top, half), _resize_nn(bottom, h - half)
+    wd = max(a.shape[1], b.shape[1])
+    pad = lambda x: np.pad(x, ((0, 0), (0, wd - x.shape[1]), (0, 0)))
+    return np.concatenate([pad(a), pad(b)], axis=0)
+
+
+def walk_video(segments: list, hold: int = 2) -> np.ndarray:
+    """People's chase view | arena map | (what the model sees over the goal photo).
+
+    `segments` is a list of (title, episode, goal_frame). Every frame says which panel
+    is the model's actual input, because the big chase view is not it.
+    """
+    out = []
+    for title, ep, goal in segments:
+        for t in range(len(ep.chase)):
+            frame = walk_frame(title, ep, goal, t)
+            out += [frame] * (hold + 2 if t in (0, len(ep.chase) - 1) else 1)
+    return np.stack(out)
+
+
+def walk_frame(title: str, ep, goal: np.ndarray, t: int = -1) -> np.ndarray:
+    """One frame of walk_video: chase view | map | (model sees over goal photo)."""
+    t = t % len(ep.chase)
+    h = ep.chase[0].shape[0]
+    sep = np.full((h, 6, 3), 40, np.uint8)
+    g = annotate(_resize_nn(goal, h // 2), [("goal photo", _AMBER)], scale=1)
+    d = ep.dist[t]
+    col = _GREEN if d < 0.5 else (_AMBER if d < ep.dist[0] else _RED)
+    left = annotate(ep.chase[t], [(title, _AMBER), (f"decision {t}/{len(ep.chase) - 1}", _GREY),
+                                  (f"{d:4.2f} m from the pad", col)])
+    mid = annotate(ep.maps[t], [("arena map - path so far", _GREY)])
+    seen = annotate(_resize_nn(ep.seen[t], h // 2), [("model sees", _AMBER)], scale=1)
+    return np.concatenate([left, sep, mid, sep, _stack_col(seen, g, h)], axis=1)
+
+
+def jpeg_html(frame: np.ndarray, caption: str = "", max_width: int = 1100, quality: int = 72) -> str:
+    """One frame as an inline JPEG. For live reports, repainted every decision, so
+    JPEG rather than PNG: a 1.2k-wide composite is ~60 KB instead of ~600 KB."""
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.fromarray(np.asarray(frame, dtype=np.uint8)).save(buf, "JPEG", quality=quality)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    cap = (f'<p style="color:#888;font-family:monospace;font-size:12px;margin:6px 0 0;">{caption}</p>'
+           if caption else "")
+    return (
+        f'<div style="background:#0f0f23;padding:12px;border-radius:8px;">'
+        f'<img src="data:image/jpeg;base64,{b64}" style="max-width:{max_width}px;width:100%;'
+        f'border:2px solid #333;border-radius:4px;display:block;"/>{cap}</div>'
+    )
+
+
+def thumb_b64(frame: np.ndarray, height: int = 110) -> str:
+    """A small JPEG thumbnail, base64, for a growing filmstrip of finished episodes."""
+    from PIL import Image
+
+    img = Image.fromarray(np.asarray(frame, dtype=np.uint8))
+    img.thumbnail((height * 4, height))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=65)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def coverage_chart(pos: np.ndarray, pads: dict) -> str:
+    """Where random play has taken the robot so far, with the pads it will later be asked to reach."""
+    fig, ax = _axes("Random play: where the G1 has been", "x (m)", "y (m)", size=(4.6, 4.2))
+    if len(pos):
+        ax.scatter(pos[:, 0], pos[:, 1], s=6, alpha=0.5, color="#74b9ff", label="visited")
+        ax.plot(pos[-24:, 0], pos[-24:, 1], lw=1.2, color="#fdcb6e", label="latest episode")
+    for xy, rgb in pads.values():
+        ax.scatter([xy[0]], [xy[1]], s=160, marker="s", color=rgb, edgecolors="#ccc", zorder=5)
+    ax.set_aspect("equal")
+    ax.legend(fontsize=8, facecolor="#1a1a2e", edgecolor="#333", labelcolor="#ccc")
+    return _fig_html(fig, width=440)
+
+
+def walk_dream_video(truth, pre, post, bank_show: np.ndarray, hold: int = 3) -> np.ndarray:
+    """Pretrained dream | adapted dream | reality, for a whole walk, plus the map."""
+    h = truth.chase.shape[1]
+    sep = np.full((h, 6, 3), 40, np.uint8)
+    out = []
+    H = len(truth.moves)
+    for t in range(H + 1):
+        tiles = []
+        for name, dr in (("pretrained", pre), ("adapted", post)):
+            if t == 0:
+                tiles.append(annotate(truth.chase[0],
+                                      [(f"{name} imagines", _AMBER), ("from this frame only", _GREY)]))
+            else:
+                e = float(dr.err[t - 1])
+                tiles.append(annotate(_resize_nn(bank_show[dr.idx[t - 1]], h),
+                                      [(f"{name} imagines", _AMBER), (f"move {t}/{H} nearest real view", _GREY),
+                                       (f"robot off by {e:4.2f} m", _GREEN if e < 0.6 else (_AMBER if e < 1.2 else _RED))]))
+        tiles.append(annotate(truth.chase[t], [("reality - simulator", _AMBER), (f"move {t}/{H}", _GREY)]))
+        tiles.append(annotate(truth.maps[t], [("arena map", _GREY)]))
+        frame = np.concatenate([tiles[0], sep, tiles[1], sep, tiles[2], sep, tiles[3]], axis=1)
+        out += [frame] * (hold if t in (0, H) else 1)
+    return np.stack(out)
+
+
+def walk_progress_chart(eps: dict, title: str) -> str:
+    """Distance to the pad by decision, one line per policy, averaged over pads."""
+    fig, ax = _axes(title, "decision (0.6 s each)", "distance to the pad (m)")
+    colors = {"oracle": "#74b9ff", "random": "#e17055", "lookahead": "#a29bfe",
+              "jepa-pretrained": "#fdcb6e", "jepa-adapted": "#00b894"}
+    for name, runs in eps.items():
+        n = max(len(e.dist) for e in runs)
+        m = np.full((len(runs), n), np.nan)
+        for i, e in enumerate(runs):
+            m[i, : len(e.dist)] = e.dist
+            m[i, len(e.dist):] = e.dist[-1]   # a planner that stopped stays where it stopped
+        ax.plot(np.arange(n), np.nanmean(m, 0), lw=2.2 if name == "jepa-adapted" else 1.5,
+                color=colors.get(name, "#aaa"), label=name, marker="o", ms=2.5)
+    ax.axhline(0.5, ls=":", lw=1.2, color="#888", label="on the pad")
+    ax.legend(fontsize=8, facecolor="#1a1a2e", edgecolor="#333", labelcolor="#ccc")
+    return _fig_html(fig)

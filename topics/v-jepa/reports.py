@@ -70,6 +70,21 @@ def progress_html(stage: str, detail: str, rows: list[tuple[str, str]]) -> str:
     return f"<h2>{_TITLE}</h2>" + _panel(stage, _table(rows) + note(detail))
 
 
+def filmstrip(title: str, cells: list[tuple[str, str]]) -> str:
+    """A scrolling row of (caption, jpeg-base64) thumbnails: every finished episode so
+    far, so a live report shows whether things are getting better, not only the latest."""
+    if not cells:
+        return ""
+    inner = "".join(
+        f'<div style="text-align:center;margin-right:8px;flex:0 0 auto;">'
+        f'<img src="data:image/jpeg;base64,{b64}" style="height:110px;border:1px solid #333;'
+        f'border-radius:3px;display:block;"/>'
+        f'<span style="color:{_MUTED};font-size:11px;">{html.escape(cap)}</span></div>'
+        for cap, b64 in cells
+    )
+    return _panel(title, f'<div style="display:flex;overflow-x:auto;padding-bottom:6px;">{inner}</div>')
+
+
 def side_by_side(cells: list[tuple[str, str]], basis: int = 380) -> str:
     """Lay blocks out in a responsive row.
 
@@ -567,4 +582,41 @@ COLLAPSE_EXPLAINER = (
     "one frame and DIRECTION OF MOTION is not in any single frame and can only come "
     "from the video. The untrained row is there so that none of the others can take "
     "credit for what the architecture gives away for free."
+)
+
+
+IMAGINE_EXPLAINER = (
+    "No reward function appears anywhere in this report. The robot is given a "
+    "choreography as a list of hand movements, and the world model imagines the whole "
+    "move from the FIRST camera frame only: encode that frame, then repeatedly ask the "
+    "predictor 'if I do this next move, what will the scene look like', feeding its own "
+    "answer back in. It never looks at the simulator again. Then the simulator actually "
+    "does the moves, and the two movies play side by side. "
+    "V-JEPA 2 has no decoder, so the imagination panels are NOT generated images. Each "
+    "imagined embedding is matched against a few hundred real photos of the arm at "
+    "positions spread across the workspace, none taken from the move being dreamed, and "
+    "the panel shows the closest one. That photo's gripper position is where the model "
+    "thinks the hand went, which is what 'hand off by N cm' measures. "
+    "Two lines keep that number honest. 'Imagine nothing moves' is the score for "
+    "ignoring the actions entirely; a dream above it is not using them. 'Decode floor' "
+    "is the true future pushed through the same photo lookup, i.e. the best any dream "
+    "could score with a bank this coarse. "
+    "The adaptation between the two runs is itself reward-free: the arm flails at random "
+    "for a few seconds, and the predictor is fine-tuned to predict its own next frame."
+)
+
+
+WALK_EXPLAINER = (
+    "Two brains, trained two different ways. The LEGS are a reinforcement-learning "
+    "policy: it was rewarded for tracking a joystick command and nothing else, and it "
+    "is the only part of this demo that ever saw a reward. The PLANNER is V-JEPA 2-AC, "
+    "a world model pretrained on real videos of a robot ARM, which has never seen legs. "
+    "It is given one goal: a photograph of the robot standing on a coloured pad. "
+    "It learns what walking does the way a child might: the robot wanders at random "
+    "for a few minutes, and the world model is fine-tuned to predict the next view "
+    "after each move. No goal, no reward, no labels. Then, at every decision, it "
+    "imagines walking each way for a few moves, pictures where it would end up, and "
+    "takes a step along the path whose imagined ending looks most like the photo. "
+    "The map and the big chase camera are for you. The model sees only the small view "
+    "from a camera high above the robot, marked as such."
 )

@@ -389,6 +389,120 @@ planning *worse*. A correlation over 27 candidate actions at a single state is c
 move by accident; the quantity anyone actually cares about is whether the arm reaches
 the block. Measure that one.
 
+### Watching it dream: imagination vs reality
+
+```bash
+flyte run pipeline.py imagine     # ~20 min: bank, dream, adapt, dream again, plan
+```
+
+The numbers above are about what the arm does. `imagine` shows what the model *thinks*.
+The robot gets three choreographies as lists of hand movements (reach the red block
+from above, sweep up and over, trace a square), and the world model dreams each one
+open loop from the first camera frame alone: encode it, then repeatedly predict "after
+this move the scene looks like...", feeding its own prediction back in. It never looks
+at the simulator again. Then the simulator does the same moves, and the report plays
+**pretrained dream | adapted dream | reality** side by side. There is no reward
+anywhere, and the adaptation between the two dreams is reward-free as well: random
+flailing plus "predict your own next frame".
+
+Each imagined embedding is shown as the nearest of 343 real photos of the arm spread
+across the workspace (none from the move being dreamed), and that photo's gripper
+position gives "where the model thinks the hand went" in centimetres.
+
+Run `r22lpglp94r59m4snz6j`, 53 imagined moves across the three choreographies:
+
+| | imagined hand vs real hand |
+|---|---|
+| pretrained | **30.3 cm** |
+| imagine nothing moves (ignore the actions) | 16.7 cm |
+| **adapted** (240 random transitions, 4.2 min) | **10.3 cm** |
+| decode floor (the TRUE future through the same photo lookup) | 8.3 cm |
+
+The pretrained dream is not frozen, it is actively *wrong*: worse than imagining that
+nothing moves. The adapted dream sits two centimetres above the best any dream could
+score with a lookup this coarse, and holds there for 24 moves open loop. Greedy
+planning in the same run: -120% before, +76% after.
+
+The table in the report also has the full-history rollout (predictor fed its whole
+imagined past, upstream's `dream`): 24.4 cm pretrained, 14.4 cm adapted. Worse for the
+adapted model because adaptation only ever trained one frame of context, which is why
+the video uses the one-frame rollout.
+
+## A humanoid walks to a photograph
+
+```bash
+flyte run pipeline.py walk        # ~50 min
+```
+
+The Franka moves a few centimetres. `walk` puts the same world model in charge of a
+Unitree G1 humanoid. The **planner** is V-JEPA 2-AC, pretrained on real videos of a robot
+arm, which has never seen legs. Its action slot is reused for "walk this far this way":
+`adapt` adds no parameters, it only teaches the existing action embedding what a move
+means on this body.
+
+**The legs are a callback.** They are the exact G1 we taught to walk earlier in this
+repo, in [`topics/rl-mujoco`](../rl-mujoco/README.md): MJX + Brax PPO, 300M steps on rough
+terrain, Flyte run `rlswb4sgxg6j2vwfr9gr` in the `physical-ai` project. Nothing is
+retrained or copied. `walker.G1_CHECKPOINT` points at that run's `g1_checkpoint.pkl` in
+the devbox blob store and the task downloads it as a Flyte `File`. That policy is the
+only part of this demo ever trained with a reward, and it is why the robot never falls:
+V-JEPA does not balance anything, it only picks where to go.
+
+```
+V-JEPA 2-AC      ->  "walk 40 cm that way"      one decision every 0.6 s, from a photo
+walker.py        ->  joystick command, heading held
+PPO (rl-mujoco)  ->  29 joint targets at 50 Hz  trained once, with a reward
+MuJoCo           ->  physics
+```
+
+The low level learns to walk once, with a reward. Everything above it plans toward a
+photograph with no reward at all. That split is the hierarchical-planning argument for
+world models in miniature.
+
+The report is live while it runs: the latest random-play episode and a coverage map
+during collection, the current frame at every decision, a clip of each finished
+episode, and the distance chart filling in policy by policy.
+
+1. The G1 wanders at random: 720 moves, no goal, no reward, zero falls.
+2. The predictor is fine-tuned to predict the next view after each move (4.4 min).
+3. It is shown a photo of the robot standing on a coloured pad. Each decision it imagines
+   walking each of 8 directions for 4 moves, takes the first step of the path whose
+   imagined ending looks most like the photo, and looks again.
+
+Run `rrxvpj7glkqbqpqkn7sp`, 4 pads x 2 starts:
+
+| policy | reached the pad | final distance |
+|---|---|---|
+| random walking | 0/8 | 2.57 m |
+| V-JEPA pretrained | 0/8 | 2.24 m |
+| **V-JEPA adapted** | **8/8** | **0.19 m** |
+| lookahead (same reward, simulator as dynamics) | 3/4 | 0.30 m |
+| oracle (told the coordinates) | 8/8 | 0.08 m |
+
+Then a tour: four pads in a row, each given only as a photo, the planner deciding for
+itself when it has arrived. 4/4.
+
+**Three design decisions that were measured, not guessed.** Robot teleported over a
+13x13 grid, each view scored against a goal photo:
+
+- The model's camera follows the robot from **13 m up**. A low chase camera loses the pads
+  as soon as they leave the frame (rank correlation with distance 0.32 vs 0.80).
+- Floor studs are **scattered at random**. A regular grid looks identical every 0.75 m.
+- Energy is **centred cosine**, not raw L1 (0.85 vs 0.80), as `energy` predicted.
+
+**Here V-JEPA beats raw pixels, which it never did on the Franka.** Pixel L1 over the same
+views correlates -0.09 to 0.37 with distance. A camera that moves with the robot shifts
+the whole image, which destroys pixel matching and not the learned features.
+
+**One-move lookahead fails even with perfect dynamics.** From 13 m up, a 0.45 m move
+shifts the view by less than one 16 px patch; the lowest-energy single move got closer
+only 28% of the time. Looking 4 moves ahead gets it right 83% of the time.
+
+**What does not work:** dreaming a whole 10-move walk open loop. The adapted dream is
+0.92 m off on average, barely better than imagining the robot never moves (1.00 m); the
+lookup floor is 0.41 m. Four moves ahead is enough to plan with; ten is not. That is
+the argument for re-planning every step.
+
 ## What is actually inside a token? The picture is not
 
 ```bash

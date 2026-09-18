@@ -10,6 +10,9 @@
     flyte run pipeline.py plan --seeds 3 --steps 14
     flyte run pipeline.py dream                    # open-loop latent rollout, decoded by retrieval
     flyte run pipeline.py adapt                    # fine-tune the predictor on sim, re-plan
+    flyte run pipeline.py imagine                  # dream a whole choreography, then run it
+    flyte run pipeline.py walk                     # steer a G1 humanoid to a goal photo
+    flyte run pipeline.py selfwalk                 # V-JEPA as the ONLY reward: a G1 learns to walk
     flyte run pipeline.py readout                  # is the picture inside the token? (no)
     flyte run pipeline.py push                     # show it a photo of the finished task
 
@@ -61,6 +64,10 @@ import decode
 import energy as ebm
 import jepa
 import adapt as adapt_module
+import imagine as imagination
+import walk as walking
+import walker
+from selfwalk_flow import selfwalk, selfwalk_label  # noqa: F401 - `flyte run pipeline.py selfwalk`
 import layers
 import occlude as occlusion
 import plan as planning
@@ -945,6 +952,485 @@ def _render_adapt_report(before_eps, after_eps, before_scores, after_scores,
     flyte.report.replace(reports.final_html(
         "adapt - the dynamics half is the cheap half to repair", rows, body,
         reports.ADAPT_EXPLAINER))
+    flyte.report.flush()
+
+
+@ac_env.task(report=True)
+async def imagine(
+    plays: str = "reach,sweep,square",
+    bank: int = 343,
+    episodes: int = 20,
+    train_steps: int = 400,
+    eval_seeds: int = 3,
+    seed: int = 1,
+    render: int = 384,
+) -> dict:
+    """Imagination vs reality, before and after reward-free adaptation.
+
+    For each choreography the world model dreams the whole move open loop from the
+    first frame, the simulator then executes it, and the report plays both side by
+    side. Then the predictor is adapted on random play (no reward, no labels) and the
+    same dreams are re-imagined, and the same closed-loop greedy planning re-run.
+    """
+    import numpy as np
+    import torch
+
+    names = [p.strip() for p in plays.split(",") if p.strip()]
+    _paint("loading V-JEPA 2-AC", "then photographing the workspace for the lookup bank",
+           [("choreographies", ", ".join(names)), ("bank frames", str(bank))])
+    wm = ac.ActionWorldModel()
+    if wm.missing or wm.unexpected:
+        raise RuntimeError(f"AC checkpoint loaded partially: {wm.missing[:4]} {wm.unexpected[:4]}")
+
+    # ── the lookup bank, and the real choreographies ────────────────────────────
+    env, goal_frame, goal_pos, _ = sim.reach_task(seed=seed, render_size=ac.CROP)
+    t0 = time.time()
+    bank_obs, bank_big, bank_pos = planning.frame_bank(env, n=bank, seed=seed, render_size=render)
+    bank_z = torch.cat([wm.encode(bank_obs[i : i + 8]).view(-1, ac.TOKENS_PER_FRAME, wm.dim)
+                        for i in range(0, len(bank_obs), 8)])
+    del bank_obs
+    log.info("bank: %d frames in %.0fs", len(bank_z), time.time() - t0)
+
+    truths, refs = [], []
+    for name in names:
+        env.reset()
+        acts = imagination.waypoint_actions(env.ee_pos, imagination.waypoints(name, goal_pos))
+        truths.append(imagination.act_out(wm, env, name, acts, render))
+        refs.append(imagination.references(wm, truths[-1], bank_z, bank_pos))
+        log.info("play %s: %d moves, real path %.0f cm", name, len(acts),
+                 100 * float(np.linalg.norm(np.diff(truths[-1].pos, axis=0), axis=1).sum()))
+    env.close()
+
+    def _closed_loop(tag):
+        eps, scores = {}, []
+        for sd in range(eval_seeds):
+            e, gf, gp, _ = sim.reach_task(seed=sd, render_size=ac.CROP)
+            _paint(f"{tag}: planning in imagination, scene {sd + 1}/{eval_seeds}",
+                   "greedy: dream all 27 candidate moves, take the one whose dream looks "
+                   "most like the goal photo", [])
+            ep = planning.run_episode(wm, e, gf, gp, policy="greedy", steps=10,
+                                      cem=ac.CEMConfig(maxnorm=imagination.MAXNORM),
+                                      render_size=render, seed=sd)
+            eps[sd] = (ep, gf)
+            scores.append(ep.closed)
+            e.close()
+        return eps, scores
+
+    # ── pretrained ──────────────────────────────────────────────────────────────
+    _paint("pretrained: dreaming", "open loop, from the first frame only", [])
+    pre = [imagination.imagine(wm, t, bank_z, bank_pos) for t in truths]
+    pre_eps, pre_scores = _closed_loop("pretrained")
+    for t, im in zip(truths, pre):
+        log.info("pretrained %s: hand off by %.1f cm (standstill %.1f)", t.play,
+                 im.pos_err.mean(), refs[truths.index(t)]["standstill"].mean())
+
+    # ── adapt, reward-free ──────────────────────────────────────────────────────
+    def _collect_tick(ep_i, ep_n, n_trans, secs):
+        _paint(f"random play: {n_trans} transitions", "the arm flails; no goal, no reward",
+               [("episodes", f"{ep_i}/{ep_n}"), ("elapsed", f"{secs:.0f}s")])
+
+    Z, A, P, Zn = adapt_module.collect_transitions(wm, episodes=episodes, steps=12, seed=1,
+                                                   on_progress=_collect_tick)
+    n = len(Z)
+    ntr = int(n * 0.85)
+    tr_idx, va_idx = np.arange(ntr), np.arange(ntr, n)
+    still = adapt_module.standstill_baseline(Z, Zn, va_idx, wm.device)
+    before_l1 = adapt_module.evaluate(wm, Z, A, P, Zn, va_idx)
+
+    def _train_tick(s, tot, trl, v):
+        _paint(f"adapting the predictor: step {s}/{tot}",
+               "objective: predict your own next frame. Encoder frozen.",
+               [("train L1", f"{trl:.4f}"), ("val L1", f"{v:.4f}"), ("predict no change", f"{still:.4f}")])
+
+    t0 = time.time()
+    history = adapt_module.finetune(wm, Z, A, P, Zn, tr_idx, va_idx, steps=train_steps,
+                                    on_step=_train_tick)
+    train_s = time.time() - t0
+    after_l1 = adapt_module.evaluate(wm, Z, A, P, Zn, va_idx)
+    del Z, Zn
+    log.info("adapted: val L1 %.4f -> %.4f (standstill %.4f) in %.0fs",
+             before_l1, after_l1, still, train_s)
+
+    # ── adapted ─────────────────────────────────────────────────────────────────
+    _paint("adapted: dreaming", "same choreographies, same first frames", [])
+    post = [imagination.imagine(wm, t, bank_z, bank_pos) for t in truths]
+    post_eps, post_scores = _closed_loop("adapted")
+
+    summary = {
+        "plays": names,
+        "bank": int(len(bank_z)),
+        "transitions": n,
+        "train_seconds": round(train_s, 1),
+        "val_l1": [round(before_l1, 4), round(after_l1, 4)],
+        "standstill_l1": round(still, 4),
+        "hand_err_cm_pretrained": round(float(np.mean(np.concatenate([i.pos_err for i in pre]))), 2),
+        "hand_err_cm_adapted": round(float(np.mean(np.concatenate([i.pos_err for i in post]))), 2),
+        "hand_err_cm_history_pretrained": round(float(np.mean(np.concatenate([i.hist_pos_err for i in pre]))), 2),
+        "hand_err_cm_history_adapted": round(float(np.mean(np.concatenate([i.hist_pos_err for i in post]))), 2),
+        "hand_err_cm_standstill": round(float(np.mean(np.concatenate([r["standstill"] for r in refs]))), 2),
+        "hand_err_cm_floor": round(float(np.mean(np.concatenate([r["floor"] for r in refs]))), 2),
+        "greedy_pretrained": round(float(np.mean(pre_scores)), 4),
+        "greedy_adapted": round(float(np.mean(post_scores)), 4),
+    }
+    log.info("imagine summary: %s", summary)
+    _render_imagine_report(truths, pre, post, refs, bank_big, bank_pos, pre_eps, post_eps,
+                           pre_scores, post_scores, history, still, before_l1, summary)
+    _free()
+    return summary
+
+
+def _render_imagine_report(truths, pre, post, refs, bank_big, bank_pos, pre_eps, post_eps,
+                           pre_scores, post_scores, history, still, before_l1, s) -> None:
+    import numpy as np
+
+    plays = list(zip(truths, pre, post))
+    good = s["hand_err_cm_adapted"] < s["hand_err_cm_standstill"]
+    body = reports.verdict(
+        f"<b>Before adaptation the model imagines the hand {s['hand_err_cm_pretrained']:.1f} cm "
+        f"from where it really goes; after {s['train_seconds'] / 60:.1f} minutes of reward-free "
+        f"adaptation, {s['hand_err_cm_adapted']:.1f} cm.</b> Imagining that nothing moves scores "
+        f"{s['hand_err_cm_standstill']:.1f} cm, and a perfect dream through this photo lookup "
+        f"would score {s['hand_err_cm_floor']:.1f} cm. Planning in imagination toward a goal "
+        f"photo: {s['greedy_pretrained']:+.0%} of the gap closed before, "
+        f"{s['greedy_adapted']:+.0%} after.",
+        good=good,
+    )
+
+    body += reports.heading("Imagination vs reality")
+    mp4 = viz.encode_mp4(viz.imagine_video(plays, bank_big), fps=3)
+    log.info("imagine video: %s", viz.probe(mp4))
+    body += viz.video_html(mp4, "LEFT and MIDDLE: what each checkpoint imagines, open loop from "
+                                "the first frame, shown as the nearest of "
+                                f"{len(bank_big)} real photos (not a generated image). "
+                                "RIGHT: the simulator doing the same moves.", max_width=1160)
+
+    body += reports.heading("Where it thinks the hand went")
+    body += viz.imagine_paths_chart(plays, bank_pos)
+    body += viz.imagine_error_chart({
+        "pretrained": [i.pos_err for i in pre],
+        "adapted": [i.pos_err for i in post],
+        "imagine nothing moves": [r["standstill"] for r in refs],
+        "decode floor (true future)": [r["floor"] for r in refs],
+    }, "How far off the imagined hand is, move by move")
+    body += reports.note(
+        "Top: the real path in white and the imagined path of each checkpoint, seen from "
+        "the front. Bottom: the gap in centimetres, averaged over the choreographies. The "
+        "blue dashed line is what you score by ignoring the actions; the grey dotted line "
+        "is the best a perfect dream could score with this photo lookup."
+    )
+
+    body += reports.heading("Planning in imagination")
+    sd = sorted(post_eps)[0]
+    (ep_pre, gf), (ep_post, _) = pre_eps[sd], post_eps[sd]
+    cmp = viz.compare_video({"pretrained": ep_pre, "adapted": ep_post}, gf)
+    body += viz.video_html(viz.encode_mp4(cmp, fps=3),
+                           "Closed loop. Each step the model dreams all 27 candidate moves and "
+                           "takes the one whose dream looks most like the goal photo (right).",
+                           max_width=1160)
+    body += reports.side_by_side([
+        ("Gap closed per scene", viz.bar_chart(
+            "Greedy planning in imagination",
+            [f"scene {k}" for k in sorted(pre_eps)],
+            {"pretrained": list(pre_scores), "adapted": list(post_scores)},
+            "fraction of the gap closed", floor=0.0, floor_label="no progress")),
+        ("The adaptation", viz.adapt_chart(history, still, before_l1)),
+    ])
+
+    rows_t = [[t.play, str(len(t.actions)),
+               f"{a.pos_err.mean():.1f}", f"{b.pos_err.mean():.1f}",
+               f"{a.hist_pos_err.mean():.1f}", f"{b.hist_pos_err.mean():.1f}",
+               f"{r['standstill'].mean():.1f}", f"{r['floor'].mean():.1f}"]
+              for (t, a, b), r in zip(plays, refs)]
+    body += reports.heading("Every choreography")
+    body += reports.data_table(
+        ["play", "moves", "pretrained cm", "adapted cm", "pretrained (history) cm",
+         "adapted (history) cm", "nothing moves cm", "floor cm"], rows_t)
+    body += reports.note(
+        "The video and chart use the one-frame-context rollout. The 'history' columns feed "
+        "the predictor its whole imagined past instead, which is how upstream's dream "
+        "works; adaptation only ever trained the one-frame case."
+    )
+
+    rows = [
+        ("checkpoint", "V-JEPA 2-AC ViT-g, DROID-trained, then adapted on random sim play"),
+        ("adaptation", f"{s['transitions']} random transitions, {s['train_seconds'] / 60:.1f} min, "
+                       f"predictor only, no reward"),
+        ("val L1", f"{s['val_l1'][0]:.4f} -> {s['val_l1'][1]:.4f} (predict no change {s['standstill_l1']:.4f})"),
+        ("photo lookup bank", f"{s['bank']} real renders across the workspace"),
+    ]
+    flyte.report.replace(reports.final_html(
+        "imagine - the world model dreams the move, then the simulator does it", rows, body,
+        reports.IMAGINE_EXPLAINER))
+    flyte.report.flush()
+
+
+@ac_env.task(report=True)
+async def walk(
+    episodes: int = 30,
+    steps_per_episode: int = 24,
+    train_steps: int = 400,
+    horizon: int = 4,
+    decisions: int = 16,
+    starts: int = 2,
+    lookahead_starts: int = 1,
+    g1_checkpoint: str = walker.G1_CHECKPOINT,
+    render: int = 384,
+) -> dict:
+    """A Unitree G1 humanoid walks to a goal photograph, planned by V-JEPA 2-AC.
+
+    The legs are an RL policy (topics/rl-mujoco). The world model only decides where
+    to walk, from a photo, with no reward: after a few minutes of random wandering it
+    is adapted to this body, then asked to reach coloured pads it is only ever shown
+    as pictures, and finally to tour all four in a row.
+    """
+    import numpy as np
+    from flyte.io import File
+
+    pads = list(walker.PADS)
+    _paint("loading", "V-JEPA 2-AC on the GPU, the G1 walking policy on the CPU",
+           [("pads", ", ".join(pads)), ("planning horizon", f"{horizon} moves")])
+    wm = ac.ActionWorldModel()
+    if wm.missing or wm.unexpected:
+        raise RuntimeError(f"AC checkpoint loaded partially: {wm.missing[:4]} {wm.unexpected[:4]}")
+    ck = await File.from_existing_remote(g1_checkpoint).download()
+    w = walker.G1Walker(ck)
+
+    goals = {p: walking.goal_photo(w, p) for p in pads}
+
+    # ── live report: watch it happen, not only the final write-up ───────────────
+    # `now` is repainted every decision, `clip` is the last finished episode, `chart`
+    # and `strip` accumulate. Only one mp4 is ever embedded, so the report stays small.
+    live = {"now": "", "clip": "", "chart": "", "strip": []}
+    finished: dict[str, list] = {}
+
+    def _show(stage, detail, rows):
+        try:
+            extra = live["now"] + live["clip"] + live["chart"] + reports.filmstrip(
+                "Finished episodes (policy, pad, final distance)", live["strip"])
+            flyte.report.replace(reports.progress_html(stage, detail, rows) + extra, do_flush=True)
+        except Exception as exc:  # noqa: BLE001 - a paint must never kill an hour of run
+            log.warning("live report paint failed: %s", exc)
+
+    def _scoreboard():
+        return [(k, f"{sum(e.reached for e in v)}/{len(v)} reached, "
+                    f"mean final {np.mean([e.dist[-1] for e in v]):.2f} m") for k, v in finished.items()]
+
+    def _live_frame(title, ep, pad):
+        try:
+            live["now"] = viz.jpeg_html(viz.walk_frame(title, ep, goals[pad], -1),
+                                        "right now: chase camera | arena map | what the model sees over the goal photo")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("live frame failed: %s", exc)
+
+    def _finish(title, ep, pad, policy=None):
+        try:
+            if policy is not None:
+                finished.setdefault(policy, []).append(ep)
+                live["chart"] = viz.walk_progress_chart(finished, "Distance to the pad so far, by policy")
+            clip = viz.encode_mp4(viz.walk_video([(title, ep, goals[pad])]), fps=4)
+            live["clip"] = viz.video_html(clip, f"last finished: {title}, {ep.dist[0]:.2f} -> "
+                                                f"{ep.dist[-1]:.2f} m{' (fell)' if w.fell else ''}",
+                                          max_width=1100)
+            live["strip"].append((f"{title} {ep.dist[-1]:.2f}m", viz.thumb_b64(viz.walk_frame(title, ep, goals[pad], -1))))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("live clip failed: %s", exc)
+
+    # ── random play: the only data the world model ever gets about this body ────
+    def _collect_tick(ep_i, ep_n, n, falls, secs, ep_frames, pos):
+        try:
+            if len(ep_frames):
+                shown = [viz.annotate(f, [("random play - no goal, no reward", viz._AMBER),
+                                          (f"episode {ep_i}/{ep_n}, move {t + 1}", viz._GREY)])
+                         for t, f in enumerate(ep_frames)]
+                live["clip"] = viz.video_html(viz.encode_mp4(np.stack(shown), fps=4),
+                                              f"latest random episode ({ep_i}/{ep_n})")
+            live["chart"] = viz.coverage_chart(pos, walker.PADS)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("live collect paint failed: %s", exc)
+        _show(f"random play: {n} transitions", "no goal, no reward; the G1 wanders",
+              [("episodes", f"{ep_i}/{ep_n}"), ("falls", str(falls)), ("elapsed", f"{secs:.0f}s")])
+
+    play = walking.collect(wm, w, episodes=episodes, steps=steps_per_episode, seed=0,
+                           render=render, on_progress=_collect_tick)
+    log.info("collected %d transitions, %d falls, %.0fs", len(play.A), play.falls, play.seconds)
+    bank_z = walking.encode(wm, play.bank_frames)
+    live["clip"] = live["chart"] = ""
+
+    tour = ["red", "blue", "yellow", "green"]
+
+    def _dream_tour():
+        w.reset(seed=77)
+        moves = walking.tour_moves(w.pos, tour[:2], max_moves=18)
+        return walking.act_out(wm, w, moves, render=render)
+
+    truth = _dream_tour()
+    refs = walking.dream_references(wm, truth, bank_z, play.bank_pos)
+
+    def _evaluate(policy, n_starts):
+        out = []
+        for pad in pads:
+            for s0 in range(n_starts):
+                w.reset(seed=100 + s0)
+
+                title = f"{policy} -> {pad} #{s0}"
+
+                def _tick(ep, t, total, _p=policy, _pad=pad, _title=title):
+                    _live_frame(_title, ep, _pad)
+                    _show(f"{_p}: walking to the {_pad} pad, decision {t + 1}/{total}",
+                          "each decision imagines every direction a few moves ahead",
+                          [("distance", f"{ep.dist[-1]:.2f} m")] + _scoreboard())
+
+                ep = walking.run_walk(wm, w, pad, goals[pad], policy, steps=decisions,
+                                      horizon=horizon, seed=s0, render=render, on_step=_tick)
+                log.info("%s -> %s start %d: %.2f -> %.2f m%s", policy, pad, s0, ep.dist[0],
+                         ep.dist[-1], " (fell)" if w.fell else "")
+                _finish(title, ep, pad, policy)
+                out.append(ep)
+        return out
+
+    results = {}
+    results["jepa-pretrained"] = _evaluate("jepa-pretrained", starts)
+    pre_dream = walking.dream(wm, truth, bank_z, play.bank_pos)
+
+    # ── adapt: reward-free ───────────────────────────────────────────────────────
+    n = len(play.Z)
+    perm = np.random.default_rng(0).permutation(n)
+    tr, va = perm[: int(n * 0.85)], perm[int(n * 0.85):]
+    still = adapt_module.standstill_baseline(play.Z, play.Zn, va, wm.device)
+    before_l1 = adapt_module.evaluate(wm, play.Z, play.A, play.P, play.Zn, va)
+
+    live["now"] = ""
+    train_hist = []
+
+    def _train_tick(s_, tot, trl, v):
+        train_hist.append((s_, trl, v))
+        try:
+            live["now"] = viz.adapt_chart(train_hist, still, before_l1)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("live adapt chart failed: %s", exc)
+        _show(f"adapting the predictor: step {s_}/{tot}",
+              "objective: predict the next view after a move. Encoder frozen, no reward.",
+              [("train L1", f"{trl:.4f}"), ("val L1", f"{v:.4f}"), ("predict no change", f"{still:.4f}")]
+              + _scoreboard())
+
+    t0 = time.time()
+    history = adapt_module.finetune(wm, play.Z, play.A, play.P, play.Zn, tr, va,
+                                    steps=train_steps, on_step=_train_tick)
+    train_s = time.time() - t0
+    after_l1 = adapt_module.evaluate(wm, play.Z, play.A, play.P, play.Zn, va)
+    log.info("adapted: val L1 %.4f -> %.4f (standstill %.4f) in %.0fs", before_l1, after_l1, still, train_s)
+
+    post_dream = walking.dream(wm, truth, bank_z, play.bank_pos)
+    results["jepa-adapted"] = _evaluate("jepa-adapted", starts)
+    results["oracle"] = _evaluate("oracle", starts)
+    results["random"] = _evaluate("random", starts)
+    results["lookahead"] = _evaluate("lookahead", lookahead_starts)
+
+    # ── the hero: tour all four pads, each given only as a photo ─────────────────
+    w.reset(seed=100)
+    tour_eps = []
+    for pad in tour:
+        title = f"tour -> {pad}"
+
+        def _tour_tick(ep, t, total, _pad=pad, _title=title):
+            _live_frame(_title, ep, _pad)
+            _show(f"tour: heading for the {_pad} pad, decision {t + 1}/{total}",
+                  "goal given as a photo; the planner decides when it has arrived",
+                  [("distance", f"{ep.dist[-1]:.2f} m")] + _scoreboard())
+
+        tour_eps.append(walking.run_walk(wm, w, pad, goals[pad], "jepa-adapted", steps=decisions,
+                                         horizon=horizon, seed=0, render=render, on_step=_tour_tick))
+        _finish(title, tour_eps[-1], pad)
+        log.info("tour %s: %.2f m at the end%s", pad, tour_eps[-1].dist[-1], " (fell)" if w.fell else "")
+        if w.fell:
+            break
+    w.close()
+
+    def _score(eps):
+        return {"reached": int(sum(e.reached for e in eps)), "episodes": len(eps),
+                "gap_closed": round(float(np.mean([e.closed for e in eps])), 3),
+                "final_m": round(float(np.mean([e.dist[-1] for e in eps])), 2)}
+
+    summary = {
+        "transitions": n, "falls": play.falls, "train_seconds": round(train_s, 1),
+        "val_l1": [round(before_l1, 4), round(after_l1, 4)], "standstill_l1": round(still, 4),
+        "policies": {k: _score(v) for k, v in results.items()},
+        "tour": [{"pad": e.pad, "final_m": round(e.dist[-1], 2), "reached": e.reached} for e in tour_eps],
+        "dream_err_m": {"pretrained": round(float(pre_dream.err.mean()), 2),
+                        "adapted": round(float(post_dream.err.mean()), 2),
+                        "standstill": round(float(refs["standstill"].mean()), 2),
+                        "floor": round(float(refs["floor"].mean()), 2)},
+    }
+    log.info("walk summary: %s", summary)
+    _render_walk_report(summary, results, tour_eps, goals, truth, pre_dream, post_dream,
+                        play, history, still, before_l1, horizon)
+    _free()
+    return summary
+
+
+def _render_walk_report(s, results, tour_eps, goals, truth, pre_dream, post_dream, play,
+                        history, still, before_l1, horizon) -> None:
+    p = s["policies"]
+    ja, jp_, orc, rnd = p["jepa-adapted"], p["jepa-pretrained"], p["oracle"], p["random"]
+    toured = sum(t["reached"] for t in s["tour"])
+    body = reports.verdict(
+        f"<b>After {s['train_seconds'] / 60:.1f} minutes of reward-free adaptation on "
+        f"{s['transitions']} random moves, the world model walked the G1 onto the pad in "
+        f"{ja['reached']} of {ja['episodes']} tries</b> (pretrained: {jp_['reached']}/{jp_['episodes']}, "
+        f"random walking: {rnd['reached']}/{rnd['episodes']}, walking straight at the known "
+        f"coordinates: {orc['reached']}/{orc['episodes']}). On the tour it reached "
+        f"{toured} of {len(s['tour'])} pads in a row, each shown to it only as a photo.",
+        good=ja["reached"] > rnd["reached"],
+    )
+
+    body += reports.heading("The tour: four pads, four photos, no reward")
+    segs = [(f"to the {e.pad} pad", e, goals[e.pad]) for e in tour_eps]
+    mp4 = viz.encode_mp4(viz.walk_video(segs), fps=4)
+    log.info("tour video: %s", viz.probe(mp4))
+    body += viz.video_html(mp4, "LEFT: a chase camera for you. MIDDLE: the arena from above, with "
+                                "the path so far. RIGHT: what the model actually sees (a camera "
+                                "13 m up) over the goal photo it is walking toward.", max_width=1200)
+
+    body += reports.heading("Every policy, every pad")
+    body += viz.walk_progress_chart(results, "Distance to the pad, averaged over pads and starts")
+    rows = [[k, f"{v['reached']}/{v['episodes']}", f"{v['gap_closed']:+.0%}", f"{v['final_m']:.2f}"]
+            for k, v in p.items()]
+    body += reports.data_table(["policy", "reached the pad", "gap closed", "final distance (m)"], rows)
+    body += reports.note(
+        f"All policies choose among the same moves. jepa-* imagine each direction {horizon} "
+        "moves ahead and take the first move of the ray that ends looking most like the goal "
+        "photo. lookahead runs the same search with the simulator instead of imagination "
+        "(perfect dynamics, same V-JEPA reward). oracle is told the pad's coordinates."
+    )
+
+    body += reports.heading("Side by side: pretrained vs adapted, same pad, same start")
+    pre_ep, post_ep = results["jepa-pretrained"][0], results["jepa-adapted"][0]
+    mp4b = viz.encode_mp4(viz.walk_video([("pretrained", pre_ep, goals[pre_ep.pad]),
+                                          ("adapted", post_ep, goals[post_ep.pad])]), fps=4)
+    body += viz.video_html(mp4b, "The same planner and the same goal photo. Only the predictor "
+                                 "differs: out of the box, then after random play.", max_width=1200)
+
+    body += reports.heading("Imagination vs reality")
+    mp4c = viz.encode_mp4(viz.walk_dream_video(truth, pre_dream, post_dream, play.bank_show), fps=3)
+    body += viz.video_html(mp4c, "A whole walk imagined from its first frame, shown as the nearest "
+                                 f"of {len(play.bank_show)} real moments from random play (not a "
+                                 "generated image), next to what really happened.", max_width=1200)
+    d = s["dream_err_m"]
+    body += reports.note(
+        f"Imagined robot vs real robot, averaged over the walk: pretrained {d['pretrained']:.2f} m, "
+        f"adapted {d['adapted']:.2f} m. Imagining it never moves scores {d['standstill']:.2f} m, and "
+        f"the true future through the same lookup scores {d['floor']:.2f} m."
+    )
+    body += viz.adapt_chart(history, still, before_l1)
+
+    rows = [
+        ("legs", "PPO policy, 300M steps (topics/rl-mujoco); the only part trained with a reward"),
+        ("planner", f"V-JEPA 2-AC, rays {horizon} moves ahead, centred-cosine energy to a goal photo"),
+        ("adaptation", f"{s['transitions']} random moves, {s['train_seconds'] / 60:.1f} min, predictor only"),
+        ("val L1", f"{s['val_l1'][0]:.4f} -> {s['val_l1'][1]:.4f} (predict no change {s['standstill_l1']:.4f})"),
+    ]
+    flyte.report.replace(reports.final_html(
+        "walk - a world model steers a humanoid to a photograph", rows, body, reports.WALK_EXPLAINER))
     flyte.report.flush()
 
 

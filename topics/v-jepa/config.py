@@ -24,6 +24,8 @@ and it builds in minutes.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import flyte
 
 PLATFORM = ("linux/arm64",)
@@ -85,7 +87,16 @@ VJEPA_SPEC = (
     "einops",
     "scipy",
     # The MuJoCo Franka that the world model plans in.
-    "mujoco",
+    # Pinned to what walk.py was verified against: the G1 stack was built on 3.11 in
+    # topics/rl-mujoco, and 3.13 was checked to load and walk the same checkpoint.
+    "mujoco==3.13.0",
+    # The G1 humanoid (walker.py). jax is CPU-only on purpose: the GPU belongs to
+    # V-JEPA, and a CPU jax wheel brings no CUDA libs to fight torch's. 0.9.2 because
+    # brax 0.14.2 still calls jax.device_put_replicated, removed in 0.10.
+    "jax==0.9.2",
+    "mujoco-mjx==3.13.0",
+    "brax",
+    "playground",
     # Not a flyte dependency, and config.py is imported inside the pod too, so it
     # has to be in the image as well as the host venv (see the pod template below).
     "kubernetes",
@@ -119,6 +130,25 @@ _GL_APT = (
     "libglx-mesa0", "libosmesa6", "libglib2.0-0",
 )
 
+# ── GPU rendering in pods ───────────────────────────────────────────────────────
+#
+# Pods get the NVIDIA compute driver only, so MuJoCo's EGL falls back to Mesa's software
+# rasteriser: 3.4 fps against 580 on the GPU (measured, 256x256 G1). `./nvgfx.sh` stages
+# the NVIDIA EGL libraries into nvgfx/ (gitignored) and this layers them into an image.
+# Skipped when nvgfx/ is absent, which includes inside every pod: images are resolved
+# from the launch-time image cache there, never rebuilt, so the spec can differ.
+NVGFX = Path(__file__).resolve().parent / "nvgfx"
+
+
+def _with_nvgfx(img: flyte.Image) -> flyte.Image:
+    if not (NVGFX / "driver-version.txt").exists():
+        return img
+    return img.with_source_folder(NVGFX, "/opt/nvgfx").with_commands([
+        "echo /opt/nvgfx > /etc/ld.so.conf.d/00-nvgfx.conf && ldconfig",
+        "mkdir -p /usr/share/glvnd/egl_vendor.d && cp /opt/nvgfx/10_nvidia.json /usr/share/glvnd/egl_vendor.d/",
+    ])
+
+
 image = (
     flyte.Image.from_debian_base(name="vjepa2", registry=REGISTRY, platform=PLATFORM)
     .with_apt_packages("git", "ffmpeg", *_GL_APT)
@@ -132,9 +162,14 @@ image = (
             f"git -C {VJEPA2_SRC} checkout --quiet {VJEPA2_SHA}",
             f"git clone --depth 1 --filter=blob:none --sparse {MENAGERIE_REPO} {MENAGERIE}",
             f"git -C {MENAGERIE} sparse-checkout set franka_emika_panda",
+            # Playground reads the G1 XMLs from inside its OWN package directory and
+            # otherwise re-clones menagerie in every pod (topics/rl-mujoco/config.py).
+            "python -c 'from mujoco_playground._src import mjx_env; "
+            "mjx_env.ensure_menagerie_exists()'",
         ]
     )
 )
+image = _with_nvgfx(image)
 
 
 # ── DGX Spark tuning ────────────────────────────────────────────────────────────
@@ -173,7 +208,7 @@ _ENV_VARS = {
     "PYOPENGL_PLATFORM": "egl",
 }
 
-_GPU_ENV_VARS = {**_ENV_VARS, **_SPARK_ENV}
+_GPU_ENV_VARS = {**_ENV_VARS, **_SPARK_ENV, "JAX_PLATFORMS": "cpu"}
 
 
 # ── The 11.7 GB checkpoint ──────────────────────────────────────────────────────
@@ -247,13 +282,62 @@ gpu_env = flyte.TaskEnvironment(
     env_vars=_GPU_ENV_VARS,
 )
 
+# ── MJX on the GPU (selfwalk_train.py) ──────────────────────────────────────────
+#
+# `selfwalk` trains a G1 policy from scratch with Brax PPO, which needs jax ON THE GPU
+# (the vjepa image's jax is CPU-only so it cannot fight torch). This is topics/rl-mujoco's
+# image recipe, verified there at 200M+ steps, plus this repo's flyte/connectrpc pins.
+# No torch in it: the trainer never touches V-JEPA, it reads a distilled reward net.
+MJX_SPEC = (
+    "jax[cuda13]==0.9.2",     # cuda13 for this driver; 0.9.x because brax 0.14.2 needs device_put_replicated
+    "mujoco==3.13.0",
+    "mujoco-mjx==3.13.0",
+    "brax",
+    "playground",
+    "numpy",
+    "pillow",
+    "matplotlib",
+    "av",
+    "flyte==2.2.1",
+    "connectrpc==0.10.*",
+    "kubernetes",
+)
+
+mjx_image = (
+    flyte.Image.from_debian_base(name="vjepa-mjx", registry=REGISTRY, platform=PLATFORM)
+    .with_apt_packages("git", "ffmpeg", *_GL_APT)
+    .with_pip_packages(*MJX_SPEC)
+    .with_commands([
+        "python -c 'from mujoco_playground._src import mjx_env; "
+        "mjx_env.ensure_menagerie_exists()'",
+    ])
+)
+mjx_image = _with_nvgfx(mjx_image)
+
+# Same numbers as rl-mujoco's g1-train env: PREALLOCATE=false is mandatory on the
+# unified pool, and 96Gi is what 4096-8192 envs were verified at.
+mjx_env = flyte.TaskEnvironment(
+    name="vjepa-mjx",
+    image=mjx_image,
+    resources=flyte.Resources(cpu="8", memory="96Gi", gpu=1, disk="50Gi"),
+    env_vars={
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.80",
+        "CUDA_CACHE_MAXSIZE": "4294967296",
+        "CUDA_MODULE_LOADING": "EAGER",
+        "MUJOCO_GL": "egl",
+        "PYOPENGL_PLATFORM": "egl",
+        "MPLCONFIGDIR": "/tmp/mpl",
+    },
+)
+
 orch_env = flyte.TaskEnvironment(
     name="vjepa-orch",
     image=image,
     resources=flyte.Resources(cpu="2", memory="4Gi", disk="20Gi"),
     secrets=[HF_SECRET],
     env_vars=_ENV_VARS,
-    depends_on=[gpu_env],
+    depends_on=[gpu_env, mjx_env],
 )
 
 

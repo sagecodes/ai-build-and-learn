@@ -3,3 +3,5 @@ __pycache__/
 out/
 *.mp4
 *.png
+.vendor/
+nvgfx/
