@@ -78,15 +78,62 @@ VJEPA_SPEC = (
     "flyte==2.2.1",
     # 0.11 breaks flyte 2.2.1 runs ('Headers' not callable).
     "connectrpc==0.10.*",
+    # ── the V-JEPA 2-AC half (ac.py, sim.py, plan.py) ──────────────────────────
+    # timm and einops are what upstream's `src/models` import; there is no xformers
+    # dependency despite the `vit_giant_xformers` arch name.
+    "timm",
+    "einops",
+    "scipy",
+    # The MuJoCo Franka that the world model plans in.
+    "mujoco",
+    # Not a flyte dependency, and config.py is imported inside the pod too, so it
+    # has to be in the image as well as the host venv (see the pod template below).
+    "kubernetes",
+)
+
+# ── V-JEPA 2-AC source, pinned ──────────────────────────────────────────────────
+#
+# Cloned rather than pip-installed, because `pip install git+...vjepa2` installs
+# nothing importable: its setup.py declares no `packages=` and no `py_modules=`, so
+# pip reports success and `import src` still fails. Pinned to a commit because main
+# ships a committed bug -- `VJEPA_BASE_URL = "http://localhost:8300"` in
+# src/hub/backbones.py -- and we would rather find out about the next one at build
+# time than mid-run. ac.py never calls the hub entrypoint anyway; it imports
+# `src.models.*` and loads the checkpoint itself.
+VJEPA2_REPO = "https://github.com/facebookresearch/vjepa2"
+VJEPA2_SHA = "204698b45b3712590f06245fbfba32d3be539812"
+VJEPA2_SRC = "/opt/vjepa2"
+
+# Only the Panda is needed; menagerie in full is a few hundred MB of robots we will
+# never load, so sparse-checkout one directory.
+MENAGERIE_REPO = "https://github.com/google-deepmind/mujoco_menagerie"
+MENAGERIE = "/opt/menagerie"
+
+# MuJoCo's renderer dlopens libEGL at runtime, so the GL stack is apt packages and
+# not pip. Same list as topics/rl-mujoco and topics/fruit-fly: the devbox sets
+# NVIDIA_DRIVER_CAPABILITIES=compute,utility and injects no graphics driver, so EGL
+# resolves to Mesa's software device. libosmesa6 is the fallback if a future devbox
+# image drops the Mesa EGL platform (MUJOCO_GL=osmesa).
+_GL_APT = (
+    "libegl1", "libegl-mesa0", "libgl1", "libgl1-mesa-dri",
+    "libglx-mesa0", "libosmesa6", "libglib2.0-0",
 )
 
 image = (
     flyte.Image.from_debian_base(name="vjepa2", registry=REGISTRY, platform=PLATFORM)
-    .with_apt_packages("git", "ffmpeg")
+    .with_apt_packages("git", "ffmpeg", *_GL_APT)
     # torch on its OWN layer and from the cu130 index, before anything else can
     # resolve a plain-PyPI torch over the top of it.
     .with_pip_packages("torch", "torchvision", index_url=TORCH_INDEX)
     .with_pip_packages(*VJEPA_SPEC)
+    .with_commands(
+        [
+            f"git clone --filter=blob:none {VJEPA2_REPO} {VJEPA2_SRC}",
+            f"git -C {VJEPA2_SRC} checkout --quiet {VJEPA2_SHA}",
+            f"git clone --depth 1 --filter=blob:none --sparse {MENAGERIE_REPO} {MENAGERIE}",
+            f"git -C {MENAGERIE} sparse-checkout set franka_emika_panda",
+        ]
+    )
 )
 
 
@@ -116,9 +163,69 @@ _ENV_VARS = {
     "HF_HUB_DOWNLOAD_TIMEOUT": "60",
     # Matplotlib writes a font cache on first import and $HOME is not writable in the pod.
     "MPLCONFIGDIR": "/tmp/mpl",
+    # Where ac.py and sim.py find the cloned sources.
+    "VJEPA2_SRC": VJEPA2_SRC,
+    "MENAGERIE": MENAGERIE,
+    # Headless MuJoCo. Read before `import mujoco`, which is why sim.py sets these
+    # defaults too: a task that imports mujoco through some other path first would
+    # otherwise get the default backend and fail with no display.
+    "MUJOCO_GL": "egl",
+    "PYOPENGL_PLATFORM": "egl",
 }
 
 _GPU_ENV_VARS = {**_ENV_VARS, **_SPARK_ENV}
+
+
+# ── The 11.7 GB checkpoint ──────────────────────────────────────────────────────
+#
+# V-JEPA 2-AC is not on the Hub in any form the torch code can load: the only
+# distribution is a direct URL from the vjepa2 README. Downloading it per pod would
+# dominate the run (the planning itself is a couple of minutes), so it is staged
+# into the devbox once and hostPath-mounted, exactly as topics/cosmos does for
+# Cosmos3-Nano. `./setup.sh --stage` does the staging; ac.py falls back to
+# downloading if the mount is empty, so a fresh cluster still works, slowly.
+#
+# THE TRAP: k3s runs INSIDE the `flyte-devbox` container, so a pod's hostPath
+# resolves against that container's filesystem and NOT the real host. Staging to
+# ~/models on the host mounts an empty directory and every task silently
+# re-downloads. /var/lib/kubelet is a docker volume, so it also survives
+# `flyte stop devbox`.
+AC_STAGE_HOST = "/var/lib/kubelet/hf-cache/vjepa2"
+AC_MOUNT = "/mnt/hf/vjepa2"
+
+try:
+    from kubernetes.client import (
+        V1Container,
+        V1HostPathVolumeSource,
+        V1PodSpec,
+        V1Volume,
+        V1VolumeMount,
+    )
+
+    # No resources here on purpose: the SDK MERGES the TaskEnvironment's
+    # Resources(...) into the template's primary container, task keys winning, so
+    # gpu=1 keeps working. Setting them here instead would silently drop the GPU.
+    _ac_pod = flyte.PodTemplate(
+        primary_container_name="primary",  # must be exactly "primary"
+        pod_spec=V1PodSpec(
+            containers=[
+                V1Container(
+                    name="primary",
+                    volume_mounts=[V1VolumeMount(name="ac-cache", mount_path=AC_MOUNT)],
+                )
+            ],
+            volumes=[
+                V1Volume(
+                    name="ac-cache",
+                    host_path=V1HostPathVolumeSource(
+                        path=AC_STAGE_HOST, type="DirectoryOrCreate"
+                    ),
+                )
+            ],
+        ),
+    )
+except ImportError:  # kubernetes missing on the host venv; the pods still have it
+    _ac_pod = None
 
 
 # ── Environments ────────────────────────────────────────────────────────────────
@@ -147,4 +254,21 @@ orch_env = flyte.TaskEnvironment(
     secrets=[HF_SECRET],
     env_vars=_ENV_VARS,
     depends_on=[gpu_env],
+)
+
+
+# The action-conditioned tasks (`dream`, `plan`) get their own environment: the AC
+# checkpoint mount, more memory for the frame bank, and the same single GPU.
+#
+# ViT-g encoder + AC predictor is 1.3B parameters and ~6.7 GiB resident at a CEM
+# batch of 125. memory=48Gi is for the host side -- an 11.7 GB checkpoint is read
+# into CPU RAM before any of it reaches the device, and the frame bank holds a few
+# hundred renders at two resolutions.
+ac_env = flyte.TaskEnvironment(
+    name="vjepa-ac",
+    image=image,
+    resources=flyte.Resources(cpu="8", memory="48Gi", gpu=1, disk="80Gi"),
+    secrets=[HF_SECRET],
+    env_vars=_GPU_ENV_VARS,
+    **({"pod_template": _ac_pod} if _ac_pod is not None else {}),
 )
