@@ -31,6 +31,11 @@ V-JEPA 2-AC, the action-conditioned world model (separate, needs the 11.7 GB che
   ├── dream   (GPU)   open-loop latent rollout, made watchable by retrieval
   └── adapt   (GPU)   fine-tune the predictor on 480 sim transitions, then re-plan
 
+The G1 humanoid: three ways to put V-JEPA in charge of a body
+  ├── walk     (GPU)        V-JEPA plans WHERE to go; rl-mujoco's PPO policy moves the legs
+  ├── selfwalk (GPU + MJX)  no borrowed legs: V-JEPA's opinion is the ONLY reward a fresh policy gets
+  └── selfwalk --reward pixel   the control: the same pipeline, rewarded by raw pixel match
+
 readout (GPU)   is the picture inside the token? Fit a linear map and find out
 push    (GPU)   show it a photo of the finished job and let it work out the rest
 
@@ -56,6 +61,11 @@ The mechanism tasks: how it works, rather than how well
 .venv/bin/flyte run pipeline.py ladder      # ~3 min, all 24 layers
 .venv/bin/flyte run pipeline.py collapse    # ~25 min, six models trained from scratch
 .venv/bin/flyte run pipeline.py mechanism   # all four in sequence
+
+./nvgfx.sh                                  # once: GPU rendering for MuJoCo in pods (see selfwalk)
+.venv/bin/flyte run pipeline.py walk        # ~50 min, V-JEPA steers the G1 to coloured pads
+.venv/bin/flyte run pipeline.py selfwalk    # ~75 min, 4 rounds x 50M PPO steps
+.venv/bin/flyte run pipeline.py selfwalk --rounds 6 --reward pixel   # the control
 ```
 
 Runs to the `world-models` Flyte project, alongside [topics/cosmos](../cosmos) and [topics/dreamerv3](../dreamerv3). The three are the same question asked three ways: Cosmos predicts the future in pixels, Dreamer learns a latent world model of one environment from its own experience, V-JEPA 2 predicts representations learned self-supervised from internet video.
@@ -502,6 +512,139 @@ only 28% of the time. Looking 4 moves ahead gets it right 83% of the time.
 0.92 m off on average, barely better than imagining the robot never moves (1.00 m); the
 lookup floor is 0.41 m. Four moves ahead is enough to plan with; ten is not. That is
 the argument for re-planning every step.
+
+## Can V-JEPA teach the legs? `selfwalk`
+
+```bash
+./nvgfx.sh                                                 # once, see "Rendering" below
+flyte run pipeline.py selfwalk                             # ~75 min
+flyte run pipeline.py selfwalk --rounds 6 --reward pixel   # the control
+```
+
+`walk` borrowed its legs. `selfwalk` takes them away: a brand new G1 policy starts from
+nothing, and the **only** reward it ever gets is V-JEPA's opinion of how much its movement
+looks like walking. No hand-written gait reward, no velocity target, no foot-clearance
+term. The rl-mujoco walker is still in the story, but only as a **video**: the student
+never sees its joint angles or its actions, only V-JEPA's embedding of clips of it.
+
+### How a video becomes a reward
+
+1. **Film nine behaviours.** The rl-mujoco G1 walks, walks slowly, marches in place,
+   walks backward, strafes, turns and stumbles; a random policy flails and a frozen
+   one falls. Each clip is 16 frames over 0.62 s, from the side, with a camera that
+   stays put for the length of the clip, so walking forward means the robot crosses
+   the frame and marching in place means it does not.
+2. **Score every clip with V-JEPA.** Token-wise centred cosine against a bank of 48
+   walking clips, max over the bank (a gait has a phase; a left step should not be
+   punished for not being a right one). Token-wise, not mean-pooled, because `collapse`
+   measured that mean pooling throws motion away.
+3. **Distil.** PPO for a humanoid needs ~10^8 steps and rendering plus encoding a clip
+   costs milliseconds, so a small MLP learns to predict V-JEPA's score from the robot's
+   state over the same 0.62 s window. PPO then trains against the MLP inside MJX at
+   ~57k steps/s.
+4. **Relabel.** After each 50M-step round, the student's own clips go back to the REAL
+   V-JEPA, get added to the data, and the MLP is refitted. The gap between what the
+   MLP promised and what V-JEPA actually gave is reported every round. That gap is
+   what reward hacking looks like.
+
+V-JEPA's scores for the nine behaviours (host check, 24 clips each; higher = more like
+the reference walk):
+
+| behaviour | V-JEPA score | raw pixel match (the control) |
+|---|---|---|
+| **walk** (the target) | **0.466** | **-0.028** |
+| stumble forward | 0.395 | -0.046 |
+| walk slowly | 0.387 | -0.040 |
+| strafe | 0.319 | -0.054 |
+| flail (random actions) | 0.315 | -0.054 |
+| turn | 0.311 | -0.051 |
+| freeze (and fall) | 0.311 | -0.056 |
+| march in place | 0.290 | -0.054 |
+| walk backward | 0.266 | -0.063 |
+
+Walking wins clearly: its bottom 10% of clips beats almost everything else. Two
+honest caveats straight away. V-JEPA does **not** separate falling from marching in
+place (the env's own "episode ends when you fall" rule has to do that). And raw pixels
+**also** rank walking first, which is exactly why the pixel control run exists.
+
+### What happened (run `rk668h4sfvnvqvv6grnf`, 4 rounds x 50M steps)
+
+**It cheated first.** In a 5M-step smoke run the student learned to lunge forward and
+fall: forward motion on the way down was enough for the MLP (it promised 0.66), while
+the real V-JEPA gave it 0.20. Same thing for the first 30M steps of the full run:
+episodes of ~60 steps out of 1000.
+
+**Then it stood up.** Around 30M steps it switched to staying upright, and by 50M it
+survived 938 of 1000 steps and covered 6.2 m per episode: a crouched, arms-out shuffle
+that drifts as it goes. Mobile, not a gait.
+
+What the REAL V-JEPA thought of the student after each round (reference points:
+march in place 0.29, walk 0.47):
+
+| round | env steps | V-JEPA median (student) | MLP promised | V-JEPA gave | MLP vs V-JEPA r |
+|---|---|---|---|---|---|
+| 1 | 50M | 0.333 | 0.94 | 0.37 | 0.35 |
+| 2 | 100M | 0.317 | 0.90 | 0.30 | 0.10 |
+| 3 | 150M | 0.359 | 0.94 | 0.47 | 0.60 |
+| 4 | 200M | 0.348 | 0.90 | 0.43 | 0.54 |
+
+So: it learned something real (from falling over to upright and moving, and V-JEPA
+rates it above marching in place), but it never got close to walking, and the MLP
+still over-promises by ~0.47 after four rounds, even as it tracks V-JEPA better.
+
+**Not yet checked, and it matters:** from round 2 on the student covers 1.1-1.5 m per
+0.62 s window, about twice the teacher's walking speed. That is either a genuinely
+fast shuffle or a physics exploit (Playground's G1 only has collision on its feet and
+runs 3 solver iterations for speed; sliding would look like this). Watch the round
+clips before believing any of the above is walking.
+
+**What is not learned from V-JEPA, said out loud:** episode termination on a fall is
+the env's rule, and the policy observes Playground's gait clock (a sin/cos phase), as
+the teacher did. Both are inputs or physics, not reward, but both help.
+
+### The control: pixels instead of V-JEPA (run `rqhnr52t8f9446rtlgkv`)
+
+Identical pipeline, but the reward is the raw pixel match in the table above. The real
+V-JEPA still judges that student every round, so the two runs land on one scale. If
+the pixel student ends up just as walk-like to V-JEPA, V-JEPA was not what taught it.
+This is the same trap the Franka `lookahead` control fell into (V-JEPA, pixels and a
+random ViT all scored +90.4%), and the reason `walk`'s camera had to be chosen by
+measurement. Results pending; a 6-round V-JEPA run (`rxtzw7sfzll5mxbswpv5`) is going
+alongside it.
+
+### Rendering: the fix that made this possible
+
+Pods get the NVIDIA **compute** driver only, so MuJoCo's EGL does not fail, it quietly
+falls back to Mesa's software rasteriser. Same G1 clip at 256x256: **3.4 fps** in a pod
+against **580 fps** on the host GPU. The first labelling run would have taken hours.
+`./nvgfx.sh` copies the NVIDIA EGL libraries (107 MB) into `nvgfx/` (gitignored) and
+`config.py` layers them into both images; every task logs
+`MuJoCo renders on: NVIDIA GB10` to prove it. The same fix speeds up `walk`, whose
+10-minute random-play phase was mostly software rendering.
+
+One more: MuJoCo-Warp 3.13 prints "solver iterations limit reached" from inside the
+CUDA kernels, per env, per step. That flood cut PPO from ~57k to ~8k steps/s and pushed
+the early log lines out of `kubectl logs`. `selfwalk.make_student_env` switches it off.
+
+## Three ways to put V-JEPA in charge of a robot, and why they differ
+
+| | `walk` | `selfwalk` | `selfwalk --reward pixel` |
+|---|---|---|---|
+| **V-JEPA's job** | the planner: picks where to go | the reward: judges how the body moves | none (it only grades the result) |
+| **the legs** | rl-mujoco's PPO, trained once with a hand-written reward | a fresh policy, learned from V-JEPA alone | a fresh policy, learned from pixels |
+| **what the goal is** | a photo of the robot on a coloured pad | a video of the robot walking | the same video |
+| **decision rate** | every 0.6 s | 50 Hz, every joint | 50 Hz, every joint |
+| **what it tests** | can a world model plan with a body it has never seen? | can a world model's features stand in for a reward function? | is it V-JEPA, or would any image match do? |
+| **result** | 8/8 pads after 4 min of reward-free adaptation (0/8 pretrained) | falls, then stands and shuffles; not a gait yet | pending |
+
+They are different questions about the same model. `walk` is the hierarchical-planning
+argument for world models: learn the low level once with a reward, then plan
+everything above it toward a picture, and it works well. `selfwalk` is the harder,
+older dream of replacing reward engineering with "show it what success looks like",
+and it shows both why that is attractive (it did learn to stand and move with no
+gait reward at all) and why it is hard (the policy optimises whatever the reward
+model over-rates, first a lunge, maybe now a slide). The pixel control is what keeps
+either result honest.
 
 ## What is actually inside a token? The picture is not
 

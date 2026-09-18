@@ -95,6 +95,7 @@ async def selfwalk_label(
     student_windows: int = 800,
     fit: bool = True,
     repo: str = VITL,
+    reward: str = "vjepa",
 ) -> File:
     """Round 0: score the nine reference behaviours. Round r: score the student.
 
@@ -105,7 +106,7 @@ async def selfwalk_label(
 
     t0 = time.time()
     guard = jepa.guard_memory()
-    rows = [("round", str(round_i)), ("GPU", guard)]
+    rows = [("round", str(round_i)), ("reward source", reward), ("GPU", guard)]
     _paint(f"selfwalk label, round {round_i}", "loading the G1 and V-JEPA", rows)
 
     env = sw.load_env("jax")
@@ -142,12 +143,15 @@ async def selfwalk_label(
         bank_q, _ = sw.windows(tb, stride=9, first=40, limit=48, seed=99)
         bank_clips = np.stack([cam.clip(c) for c in bank_q])
         scorer.set_bank(bank_clips)
-        raw, pix = _render_score(cam, scorer, clip_q, bank_clips, on_chunk)
+        vj, pix = _render_score(cam, scorer, clip_q, bank_clips, on_chunk)
+        # `reward="pixel"` is the control: the same pipeline, rewarded by raw pixel match.
+        raw = pix if reward == "pixel" else vj
         lo, hi = float(np.percentile(raw, 10)), float(np.median(raw[src == sw.TARGET]))
         data = {"raw4": raw4, "raw": raw, "src": src, "weight": np.ones(len(raw), np.float32)}
         state = {"norm": (lo, hi), "bank_q": bank_q, "reference_mp4": reference_mp4, "rounds": [],
                  "by_source": {k: float(np.median(raw[src == k])) for k in sw.SOURCES},
-                 "pixel_by_source": {k: float(np.median(pix[src == k])) for k in sw.SOURCES}}
+                 "pixel_by_source": {k: float(np.median(pix[src == k])) for k in sw.SOURCES},
+                 "vjepa_by_source": {k: float(np.median(vj[src == k])) for k in sw.SOURCES}}
         examples = [np.flatnonzero(src == k)[len(np.flatnonzero(src == k)) // 2] for k in sw.SOURCES]
         example_clips = np.stack([cam.clip(clip_q[i]) for i in examples])
         example_caps = [[(k, viz._AMBER), (f"V-JEPA {raw[i]:.3f}", viz._GREY)]
@@ -164,7 +168,8 @@ async def selfwalk_label(
         bank_clips = np.stack([cam.clip(c) for c in state["bank_q"]])
         scorer.set_bank(bank_clips)
         ci, r4 = sw.windows(stu["rollouts"], stride=6, limit=student_windows, seed=round_i)
-        raw, pix = _render_score(cam, scorer, ci, bank_clips, on_chunk)
+        vj, pix = _render_score(cam, scorer, ci, bank_clips, on_chunk)
+        raw = pix if reward == "pixel" else vj
         y_true = sw.normalise(raw, lo, hi)
         feats = sw.window_features(r4)
         y_net = sw.rewnet_apply(old["rewnet"], feats)
@@ -173,7 +178,8 @@ async def selfwalk_label(
                    "vjepa_median": float(np.median(raw)), "vjepa_p90": float(np.percentile(raw, 90)),
                    "reward_true": float(y_true.mean()), "reward_net": float(y_net.mean()),
                    "gap": float((y_net - y_true).mean()), "fwd_per_window_m": float(np.median(fwd)),
-                   "net_r": float(np.corrcoef(y_net, y_true)[0, 1]) if len(raw) > 2 else float("nan")}
+                   "net_r": float(np.corrcoef(y_net, y_true)[0, 1]) if len(raw) > 2 else float("nan"),
+                   "vjepa_true_median": float(np.median(vj)), "reward_source": reward}
         log.info("student round %d: %s", round_i, summary)
         data = {"raw4": np.concatenate([data["raw4"], r4]), "raw": np.concatenate([data["raw"], raw]),
                 "src": np.concatenate([data["src"], np.array([f"student-r{round_i}"] * len(raw))]),
@@ -210,7 +216,7 @@ async def selfwalk_label(
                          + ", ".join(f"{k} {pix[k]:.3f}" for k in names))
     students = [r for r in state["rounds"] if r["round"] > 0]
     if students:
-        body += viz.curve_chart("The student, judged by the REAL V-JEPA", "round", "median V-JEPA score",
+        body += viz.curve_chart(f"The student, judged by the real {reward} score", "round", "median score",
                                 {"student": [(r["round"], r["vjepa_median"]) for r in students]},
                                 hlines={"walk (the target)": state["by_source"][sw.TARGET],
                                         "march in place": state["by_source"]["march"],
@@ -242,13 +248,14 @@ async def selfwalk(
     num_envs: int = 4096,
     windows_per_source: int = 300,
     student_windows: int = 800,
+    reward: str = "vjepa",
 ) -> dict:
     """Teach a G1 to walk with V-JEPA as the only reward. See selfwalk.py."""
     table: list[dict] = []
     clips: list[tuple[str, str]] = []
 
     def paint(stage: str, lab_state: dict | None = None) -> None:
-        rows = [("stage", stage), ("rounds", f"{len(table)}/{rounds}"),
+        rows = [("stage", stage), ("reward source", reward), ("rounds", f"{len(table)}/{rounds}"),
                 ("steps per round", f"{steps_per_round:,}")]
         body = ""
         if table:
@@ -258,7 +265,7 @@ async def selfwalk(
                 [[str(r["round"]), f"{r['steps']:,}", f"{r['reward']:.2f}", f"{r['fwd_m']:.2f}",
                   f"{r['ep_len']:.0f}", f"{r['vjepa']:.3f}", f"{r['gap']:+.3f}"] for r in table])
         if lab_state and table:
-            bs = lab_state["by_source"]
+            bs = lab_state.get("vjepa_by_source", lab_state["by_source"])
             body += viz.curve_chart("Does the student look like walking to V-JEPA?", "round", "median V-JEPA score",
                                     {"student": [(r["round"], r["vjepa"]) for r in table]},
                                     hlines={"walk (the target)": bs[sw.TARGET], "march in place": bs["march"],
@@ -268,7 +275,7 @@ async def selfwalk(
         _paint("selfwalk: a G1 learns to walk from V-JEPA alone", stage, rows, body)
 
     paint("round 0: filming the reference behaviours and asking V-JEPA about them")
-    lab = await selfwalk_label(round_i=0, windows_per_source=windows_per_source)
+    lab = await selfwalk_label(round_i=0, windows_per_source=windows_per_source, reward=reward)
     ck = None
     for r in range(rounds):
         paint(f"round {r + 1}/{rounds}: PPO (open train_student's report to watch it live)")
@@ -276,7 +283,7 @@ async def selfwalk(
                                  num_envs=num_envs)
         paint(f"round {r + 1}/{rounds}: V-JEPA judges what the student does")
         lab = await selfwalk_label(round_i=r + 1, prev=lab, student=ck, student_windows=student_windows,
-                                   fit=r < rounds - 1)
+                                   fit=r < rounds - 1, reward=reward)
         with open(await ck.download(), "rb") as f:
             stu = pickle.load(f)
         with open(await lab.download(), "rb") as f:
@@ -285,7 +292,7 @@ async def selfwalk(
         s = labd["summary"]
         table.append({"round": r + 1, "steps": int(stu["total_steps"]), "reward": h.get("reward", 0.0),
                       "fwd_m": h.get("fwd_m", 0.0), "ep_len": h.get("ep_len", 0.0),
-                      "vjepa": s["vjepa_median"], "gap": s["gap"]})
+                      "vjepa": s["vjepa_true_median"], "gap": s["gap"]})
         if stu.get("final_mp4"):
             fin = stu["final"]
             clips.append((f"after round {r + 1} ({stu['total_steps'] / 1e6:.0f}M steps)",
