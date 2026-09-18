@@ -8,5 +8,18 @@ pillow
 huggingface_hub
 av
 matplotlib
+# ── V-JEPA 2-AC (ac.py, sim.py, plan.py) ──────────────────────────────────────
+# timm and einops are what upstream's src/models import. There is no xformers
+# dependency, despite the `vit_giant_xformers` arch name.
+timm
+einops
+scipy
+mujoco==3.13.0
+# G1 humanoid (walker.py): CPU jax, see config.py
+jax==0.9.2
+mujoco-mjx==3.13.0
+brax
+playground
+kubernetes
 flyte==2.2.1
 connectrpc==0.10.*

@@ -39,15 +39,20 @@ def pool(seq: torch.Tensor) -> torch.Tensor:
 def linear_probe(
     X: torch.Tensor, y: torch.Tensor, train: torch.Tensor,
     steps: int = 600, lr: float = 1e-2, weight_decay: float = 1e-3, seed: int = 0,
+    test: torch.Tensor | None = None,
 ) -> tuple[float, torch.Tensor]:
     """Train a linear classifier on the training split, score the rest.
 
     Features are standardised using TRAIN statistics only. Using all of them would leak
     the val split into the preprocessing, which is a small effect at this size but
     exactly the kind of thing that makes a benchmark number quietly wrong.
+
+    `test` overrides "everything not in `train`", which a low-shot sweep needs: fitting
+    on 25 of 1000 available labels must not silently move the other 975 into the test
+    set, or accuracies at different fit sizes are measured on different problems.
     """
     torch.manual_seed(seed)
-    test = ~train
+    test = ~train if test is None else test
     mu, sd = X[train].mean(0), X[train].std(0) + 1e-6
     Z = ((X - mu) / sd).float()
 
