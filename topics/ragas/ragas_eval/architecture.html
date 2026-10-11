@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ragas Eval — Architecture</title>
+<style>
+:root {
+  --bg:           #0a0c10;  --surface:      #111418;  --card:         #161b22;
+  --border:       #21262d;  --border2:      #30363d;
+  --text:         #e6edf3;  --muted:        #7d8590;  --muted2:       #484f58;
+  --accent:       #388bfd;
+  --hi:           #e3a008;  --hi-glow:      rgba(227,160,8,0.22);  --hi-text: #fbbf24;
+  --code-bg:      #0d1117;  --code-fg:      #79c0ff;
+  --warn:         #f85149;  --warn-glow:    rgba(248,81,73,0.18);
+  --pal:          #3fb950;  --pal-glow:     rgba(63,185,80,0.18);
+  --desktop:      #58a6ff;  --desktop-glow: rgba(88,166,255,0.25);
+  --web-c:        #3ecfcf;  --web-glow:     rgba(62,207,207,0.25);
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:24px 20px 40px;}
+.header{text-align:center;margin-bottom:20px;}
+.header h1{font-size:1.4em;font-weight:700;letter-spacing:-.02em;}
+.header .sub{color:var(--muted);font-size:.8em;margin-top:4px;}
+.header .badge{display:inline-block;margin-left:10px;background:var(--border2);color:var(--muted);font-size:.68em;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:3px 10px;border-radius:4px;vertical-align:middle;}
+.tabs-row{display:flex;align-items:center;max-width:1160px;margin:0 auto 18px;}
+.tabs-side{flex:0 0 auto;}
+.tabs{flex:1;display:flex;justify-content:center;gap:8px;flex-wrap:wrap;}
+.tab{padding:7px 18px;border-radius:6px;border:1px solid var(--border2);background:var(--card);color:var(--muted);font-size:.83em;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:6px;}
+.tab.active{background:var(--hi);color:#000;border-color:var(--hi);}
+.tab.active.pal-tab{background:var(--pal);border-color:var(--pal);}
+.tab:hover:not(.active){background:var(--surface);color:var(--text);}
+.diagram-outer{max-width:1160px;margin:0 auto 18px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px 20px 110px;position:relative;overflow:visible;}
+.diagram-grid{display:grid;grid-template-columns:155px 600px 225px;gap:40px;position:relative;z-index:1;justify-content:center;align-items:center;}
+#svg-arrows{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:0;}
+.arrow-path{fill:none;stroke:var(--border2);stroke-width:1.05;transition:stroke .35s,stroke-width .35s,opacity .35s;opacity:.45;marker-end:url(#arr-dim);}
+.arrow-path.lit{stroke:var(--hi);stroke-width:1.75;opacity:1;marker-end:url(#arr-lit);}
+.arrow-path.lit-pal{stroke:var(--pal);stroke-width:1.75;opacity:1;marker-end:url(#arr-pal);}
+.arrow-path.lit-warn{stroke:var(--warn);stroke-width:1.75;opacity:1;marker-end:url(#arr-warn);}
+.arrow-path.lit-desktop{stroke:var(--desktop);stroke-width:1.75;opacity:1;marker-end:url(#arr-desktop);}
+.col{display:flex;flex-direction:column;gap:28px;justify-content:center;padding:8px 0;}
+.node{background:var(--card);border:1.5px solid var(--border2);border-radius:9px;padding:12px 13px;transition:border-color .35s,box-shadow .35s,background .35s;}
+.node.active{border-color:var(--hi);box-shadow:0 0 16px var(--hi-glow);background:#19160a;}
+.node.active.pal-node{border-color:var(--pal);box-shadow:0 0 16px var(--pal-glow);background:#0d1a10;}
+.node.pal-node{border-color:var(--pal);background:#0d1a10;}
+.node-icon{font-size:1.3em;margin-bottom:5px;}
+.node-name{font-weight:700;font-size:.82em;margin-bottom:3px;}
+.node-sub{color:var(--muted);font-size:.7em;line-height:1.4;}
+.node-label{font-size:.6em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-top:7px;}
+.cluster{border:1.5px dashed var(--border2);border-radius:10px;padding:13px;transition:border-color .35s;}
+.cluster.active{border-color:var(--accent);}
+.cluster-hdr{font-size:.65em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:6px;}
+.section-label{font-size:.6em;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted2);margin:8px 0 5px 2px;}
+.cluster-div{border-top:1px solid var(--border);margin:10px 0;}
+.task{display:flex;align-items:center;gap:9px;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 9px;margin-bottom:8px;transition:border-color .35s,background .35s,box-shadow .35s;}
+.task:last-child{margin-bottom:0;}
+.task.active{border-color:var(--hi);background:#130e00;box-shadow:0 0 10px var(--hi-glow);}
+.task.active.pal-task{border-color:var(--pal);background:#091410;box-shadow:0 0 10px var(--pal-glow);}
+.task.amber-task{border:1px solid var(--hi);background:#110d00;}
+.task.amber-task.active{box-shadow:0 0 10px var(--hi-glow);}
+.task.amber-task .task-feature{color:var(--hi);font-size:.66em;}
+.task.pal-task .task-feature{color:var(--pal);font-size:.66em;}
+.task.pal-task{border:1px solid var(--pal);background:#091410;}
+.task-ico{font-size:.95em;flex-shrink:0;}
+.task-body{flex:1;min-width:0;}
+.task-name{font-weight:700;font-size:.77em;}
+.task-detail{color:var(--muted);font-size:.67em;margin-top:2px;line-height:1.3;}
+.tbadge{flex-shrink:0;background:var(--border);color:var(--muted);font-size:.6em;font-weight:700;padding:2px 7px;border-radius:8px;transition:background .35s,color .35s;white-space:nowrap;}
+.task.active .tbadge{background:var(--hi);color:#000;}
+.task.active.pal-task .tbadge{background:var(--pal);color:#000;}
+.tbadge.warn{background:#3a1010;color:var(--warn);}
+.tbadge.pal{background:#0d2218;color:var(--pal);}
+.providers-cluster{border:1.5px dashed var(--pal);border-radius:10px;padding:11px;transition:border-color .35s;}
+.providers-cluster.active{border-color:var(--pal);box-shadow:0 0 14px var(--pal-glow);}
+.providers-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;}
+.pnode{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px;text-align:center;transition:border-color .35s,background .35s;}
+.pnode.active{border-color:var(--hi);background:#130e00;}
+.pnode.active.pal-p{border-color:var(--pal);background:#091410;}
+.pnode-ico{font-size:1.1em;margin-bottom:3px;}
+.pnode-name{font-weight:700;font-size:.68em;}
+.pnode-sub{color:var(--muted);font-size:.6em;margin-top:2px;line-height:1.3;}
+.nav-row{display:flex;justify-content:center;align-items:center;gap:12px;max-width:1160px;margin:0 auto 16px;}
+.nav-row .btn{padding:6px 16px;font-size:.78em;}
+.dots{display:flex;gap:6px;align-items:center;}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--border2);cursor:pointer;transition:background .3s,transform .3s;}
+.dot.cur{background:var(--hi);transform:scale(1.4);}
+.dot.past{background:var(--accent);}
+.step-panel{max-width:1160px;margin:0 auto 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.step-top{display:flex;align-items:center;gap:10px;padding:14px 18px 12px;border-bottom:1px solid var(--border);}
+.step-num{background:var(--hi);color:#000;font-size:.72em;font-weight:800;padding:3px 11px;border-radius:11px;flex-shrink:0;}
+.step-num.pal{background:var(--pal);}
+.step-ttl{font-weight:700;font-size:1em;color:var(--hi-text);}
+.step-body{display:grid;grid-template-columns:1fr 1fr;gap:0;}
+.step-left{padding:14px 18px;border-right:1px solid var(--border);}
+.step-right{padding:14px 18px;background:var(--code-bg);}
+.panel-label{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted2);margin-bottom:7px;}
+.step-desc{color:var(--muted);font-size:.83em;line-height:1.65;margin-bottom:14px;white-space:pre-line;}
+.comp-tags{display:flex;flex-wrap:wrap;gap:5px;}
+.comp-tag{background:var(--border);color:var(--text);font-size:.72em;font-weight:600;padding:3px 9px;border-radius:5px;font-family:'SFMono-Regular',Consolas,monospace;}
+.step-code{font-family:'SFMono-Regular',Consolas,monospace;font-size:.75em;color:var(--code-fg);line-height:1.65;white-space:pre;overflow-x:auto;min-height:80px;}
+.step-code .kw{color:#ff7b72;}.step-code .fn{color:#d2a8ff;}.step-code .str{color:#a5d6ff;}.step-code .cm{color:#8b949e;font-style:italic;}.step-code .pal{color:#3fb950;}.step-code .warn{color:#f85149;}
+.btn{padding:9px 26px;border-radius:7px;border:none;font-weight:700;font-size:.85em;cursor:pointer;transition:background .2s;}
+.btn-p{background:var(--hi);color:#000;}
+.btn-p:hover:not(:disabled){background:#c88a00;}
+.btn-s{background:var(--card);color:var(--text);border:1px solid var(--border2);}
+.btn-s:hover:not(:disabled){background:var(--border);}
+.btn:disabled{opacity:.28;cursor:not-allowed;}
+.step-ct{color:var(--muted);font-size:.83em;font-weight:600;min-width:56px;text-align:center;}
+.hint{text-align:center;color:var(--muted2);font-size:.72em;margin-top:12px;}
+.user-cluster{background:var(--card);border:1.5px solid var(--border2);border-radius:9px;padding:13px 11px;transition:border-color .35s,box-shadow .35s;}
+.user-cluster.active{border-color:var(--hi);box-shadow:0 0 14px var(--hi-glow);}
+.user-cluster-hdr{font-size:.62em;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:5px;}
+.user-flow{display:flex;align-items:flex-start;gap:7px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:9px 8px;margin-bottom:7px;transition:border-color .35s,background .35s,box-shadow .35s;}
+.user-flow:last-child{margin-bottom:0;}
+.user-flow.active{border-color:var(--hi);background:#130e00;box-shadow:0 0 8px var(--hi-glow);}
+#n-surface-a{border-color:rgba(88,166,255,.4);}
+#n-surface-a .uf-name{color:var(--desktop);}
+#n-surface-a.active{border-color:var(--desktop);background:rgba(88,166,255,.07);box-shadow:0 0 8px var(--desktop-glow);}
+.uf-ico{font-size:1em;flex-shrink:0;margin-top:1px;}
+.uf-body{flex:1;min-width:0;}
+.uf-name{font-weight:700;font-size:.76em;}
+.uf-sub{color:var(--muted);font-size:.63em;margin-top:2px;line-height:1.3;}
+.task-feature{font-size:.63em;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--text);margin-bottom:2px;}
+.task-name{color:#fff;}
+.solves-tag{font-size:.6em;font-weight:700;color:var(--pal);background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.3);border-radius:4px;padding:2px 8px;margin-top:5px;display:inline-block;}
+.nt-btn{display:inline-flex;align-items:center;gap:8px;padding:5px 14px 5px 10px;border-radius:20px;border:1px solid var(--border2);background:var(--card);color:var(--text);font-size:.78em;font-weight:600;cursor:pointer;transition:all .2s;user-select:none;}
+.nt-btn:hover{background:var(--border);}
+.nt-pill{display:inline-flex;width:30px;height:17px;border-radius:9px;background:var(--hi);position:relative;transition:background .25s;flex-shrink:0;}
+.nt-pill::after{content:'';position:absolute;top:2.5px;left:2.5px;width:12px;height:12px;border-radius:50%;background:#000;transition:transform .25s;}
+body.nontechnical .nt-pill{background:var(--border2);}
+body.nontechnical .nt-pill::after{transform:translateX(13px);}
+.nt-label-txt{min-width:16px;transition:color .2s;}
+body.nontechnical .nt-label-txt{color:var(--muted);}
+body.nontechnical .task-name,body.nontechnical .task-detail{display:none;}
+body.nontechnical .node-sub,body.nontechnical .node-label{display:none;}
+body.nontechnical .solves-tag{display:none;}
+.nt-only{display:none;}
+body.nontechnical .nt-only{display:block;}
+body.nontechnical #s-code{display:none;}
+body.nontechnical .code-label{display:none !important;}
+body.nontechnical .nt-code-label{display:block !important;}
+.nt-code-label{display:none;}
+#s-nt{display:none;color:var(--muted);font-size:.83em;line-height:1.65;min-height:80px;padding-top:2px;white-space:pre-line;}
+body.nontechnical #s-nt{display:block;}
+body.nontechnical .step-right{background:var(--surface);}
+.task-nt{color:var(--muted);font-size:.67em;margin-top:2px;line-height:1.4;}
+</style>
+</head>
+<body class="nontechnical">
+
+<div class="header">
+  <h1>Ragas RAG Evaluation <span class="badge">Architecture</span></h1>
+  <div class="sub">Automated scoring of three RAG backends using four Ragas metrics · Ragas 0.4.3 · Gradio · Anthropic · HuggingFace</div>
+</div>
+
+<div class="tabs-row">
+  <div class="tabs-side tabs-left">
+    <button class="nt-btn" onclick="toggleTech()">
+      <span class="nt-pill"></span>
+      Technical <span class="nt-label-txt" id="nt-label">OFF</span>
+    </button>
+  </div>
+  <div class="tabs">
+    <button class="tab active"  id="tab-overview" onclick="setFlow('overview')">📊 Overview</button>
+    <button class="tab pal-tab" id="tab-batch"    onclick="setFlow('batch')">⚡ Batch Eval</button>
+    <button class="tab"         id="tab-single"   onclick="setFlow('single')">🔍 Single Eval</button>
+  </div>
+  <div class="tabs-side tabs-right"></div>
+</div>
+
+<div class="diagram-outer" id="diagram-outer">
+  <svg id="svg-arrows">
+    <defs>
+      <marker id="arr-dim"     markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#30363d"/></marker>
+      <marker id="arr-lit"     markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#e3a008"/></marker>
+      <marker id="arr-pal"     markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#3fb950"/></marker>
+      <marker id="arr-warn"    markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#f85149"/></marker>
+      <marker id="arr-desktop" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#58a6ff"/></marker>
+    </defs>
+  </svg>
+
+  <div class="diagram-grid" id="diagram-grid">
+
+    <!-- LEFT: User / Gradio UI -->
+    <div class="col">
+      <div class="user-cluster" id="n-user-cluster">
+        <div class="user-cluster-hdr">👤 User</div>
+        <div class="user-flow" id="n-surface-a">
+          <div class="uf-ico">🌐</div>
+          <div class="uf-body">
+            <div class="uf-name">Gradio Web UI</div>
+            <div class="uf-sub">Browser · port 7861 · Batch Eval + Single Question tabs</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CENTER: Eval Engine -->
+    <div class="cluster" id="n-engine">
+      <div class="cluster-hdr">⚙️ Ragas Eval Engine</div>
+
+      <!-- OVERVIEW TAB -->
+      <div class="overview-show">
+        <div class="section-label">UI LAYER</div>
+        <div class="task amber-task" id="n-handlers">
+          <div class="task-ico">🎛</div>
+          <div class="task-body">
+            <div class="task-feature">UI Handler</div>
+            <div class="task-name">app/handlers.py · app/ui.py</div>
+            <div class="task-detail">gradio · generator functions · asyncio.run() blocks per call · track_tqdm=True forwards progress</div>
+            <div class="task-nt nt-only">The interface layer handles button clicks and streams results back to the browser. Each evaluation runs as a background process — the button changes label to show it's working.</div>
+          </div>
+          <span class="tbadge warn">sync wrap</span>
+        </div>
+
+        <div class="cluster-div"></div>
+        <div class="section-label">EVAL LAYER</div>
+
+        <div class="task pal-task" id="n-runner">
+          <div class="task-ico">⚡</div>
+          <div class="task-body">
+            <div class="task-feature">Eval Runner</div>
+            <div class="task-name">eval/runner.py</div>
+            <div class="task-detail">asyncio · 3 backends concurrent per question · NaN on per-backend error · partial write after each question</div>
+            <div class="solves-tag">✓ One failure never cancels others</div>
+            <div class="task-nt nt-only">The core evaluation engine sends each question to all three knowledge systems at once, scores each answer independently, and saves progress after every question so a crash doesn't lose work.</div>
+          </div>
+          <span class="tbadge pal">async</span>
+        </div>
+
+        <div class="task" id="n-backends">
+          <div class="task-ico">🔀</div>
+          <div class="task-body">
+            <div class="task-feature">Backend Registry</div>
+            <div class="task-name">eval/backends.py</div>
+            <div class="task-detail">Vector RAG · Graph RAG · Cognee · each: async (question) → (context_str, summary)</div>
+            <div class="task-nt nt-only">This component knows about all three AI knowledge systems. It sends the same question to each and returns the context each one found, ready for scoring.</div>
+          </div>
+          <span class="tbadge">3 backends</span>
+        </div>
+
+        <div class="task" id="n-testset">
+          <div class="task-ico">📋</div>
+          <div class="task-body">
+            <div class="task-feature">Testset</div>
+            <div class="task-name">eval/testset.py · data/testset.json</div>
+            <div class="task-detail">20 Q&amp;A pairs · atomic os.replace() write · schema-validated on load</div>
+            <div class="task-nt nt-only">A fixed set of 20 questions with known correct answers, generated from the Everstorm product PDFs. Every evaluation run uses the same questions, making results comparable over time.</div>
+          </div>
+          <span class="tbadge">20 pairs</span>
+        </div>
+
+        <div class="task" id="n-ragas">
+          <div class="task-ico">📐</div>
+          <div class="task-body">
+            <div class="task-feature">Ragas Scorer</div>
+            <div class="task-name">eval/metrics.py · ragas.evaluate()</div>
+            <div class="task-detail">faithfulness · answer_relevancy · context_precision · context_recall · InstructorLLM + HuggingFace embeddings</div>
+            <div class="task-nt nt-only">The scoring engine objectively measures each answer across four dimensions: whether it sticks to the source, whether it answers the question, and whether the right information was retrieved.</div>
+          </div>
+          <span class="tbadge">4 metrics</span>
+        </div>
+      </div><!-- end overview-show -->
+
+      <!-- BATCH EVAL TAB -->
+      <div class="batch-show">
+        <div class="section-label">BATCH EVALUATION FLOW</div>
+
+        <div class="task" id="n-b-load">
+          <div class="task-ico">📂</div>
+          <div class="task-body">
+            <div class="task-feature">1 · Load Testset</div>
+            <div class="task-name">load_testset() → data/testset.json</div>
+            <div class="task-detail">validates schema · raises FileNotFoundError with docker exec hint if missing</div>
+            <div class="task-nt nt-only">The first step loads 20 pre-built questions and their correct answers. If the file is missing, the evaluation stops with clear instructions for how to regenerate it.</div>
+          </div>
+          <span class="tbadge">20 Q&amp;A</span>
+        </div>
+
+        <div class="task" id="n-b-sequential">
+          <div class="task-ico">🔁</div>
+          <div class="task-body">
+            <div class="task-feature">2 · Sequential Loop</div>
+            <div class="task-name">for item in testset: … asyncio.gather()</div>
+            <div class="task-detail">questions run one at a time · atomic tmp→replace partial write after each · stale partial cleared on next run</div>
+            <div class="task-nt nt-only">Questions are processed one at a time to avoid overloading the AI APIs. After each question, partial results are saved — if the run is interrupted, the partial file records what completed.</div>
+          </div>
+          <span class="tbadge">sequential</span>
+        </div>
+
+        <div class="task pal-task" id="n-b-concurrent">
+          <div class="task-ico">⚡</div>
+          <div class="task-body">
+            <div class="task-feature">3 · Concurrent Backends</div>
+            <div class="task-name">asyncio.gather(*tasks) · _eval_one_backend × 3</div>
+            <div class="task-detail">Vector RAG · Graph RAG · Cognee fire simultaneously · NaN + error string on per-backend failure</div>
+            <div class="solves-tag">✓ Per-backend isolation: one fail ≠ all fail</div>
+            <div class="task-nt nt-only">For each question, all three knowledge systems are queried at the same time. If one fails, the others continue normally — that system simply shows a blank score instead of crashing the whole run.</div>
+          </div>
+          <span class="tbadge pal">concurrent</span>
+        </div>
+
+        <div class="task" id="n-b-score">
+          <div class="task-ico">📐</div>
+          <div class="task-body">
+            <div class="task-feature">4 · Score Each Answer</div>
+            <div class="task-name">_run_ragas() → ragas.evaluate() · asyncio.to_thread()</div>
+            <div class="task-detail">claude-haiku-4-5-20251001 judge · max_tokens 4096 · BAAI/bge-small-en-v1.5 via HuggingFace HTTP</div>
+            <div class="task-nt nt-only">Each answer is scored by Claude acting as an impartial judge. It reads both the answer and the source material to measure accuracy, relevance, and whether the right content was retrieved.</div>
+          </div>
+          <span class="tbadge">4 metrics</span>
+        </div>
+
+        <div class="task pal-task" id="n-b-aggregate">
+          <div class="task-ico">📊</div>
+          <div class="task-body">
+            <div class="task-feature">5 · Aggregate Results</div>
+            <div class="task-name">df.groupby("backend")[METRIC_NAMES].mean().round(4)</div>
+            <div class="task-detail">mean per backend · returned as DataFrame · displayed in Gradio Dataframe component</div>
+            <div class="task-nt nt-only">Once all 20 questions are evaluated, scores are averaged per system. The result is a comparison table showing which knowledge system performs best across each of the four quality dimensions.</div>
+          </div>
+          <span class="tbadge pal">mean scores</span>
+        </div>
+      </div><!-- end batch-show -->
+
+      <!-- SINGLE EVAL TAB -->
+      <div class="single-show">
+        <div class="section-label">SINGLE QUESTION FLOW</div>
+
+        <div class="task" id="n-s-handler">
+          <div class="task-ico">🎛</div>
+          <div class="task-body">
+            <div class="task-feature">1 · Event Handler</div>
+            <div class="task-name">handle_single_eval() · app/handlers.py</div>
+            <div class="task-detail">question + optional ground_truth · yields gr.update(interactive=False, value="Evaluating…") first · generator pattern</div>
+            <div class="task-nt nt-only">When a user types a question and clicks Evaluate, the button immediately disables to prevent duplicate submissions. The handler then waits for all three systems to respond before showing results.</div>
+          </div>
+          <span class="tbadge">generator</span>
+        </div>
+
+        <div class="task pal-task" id="n-s-concurrent">
+          <div class="task-ico">⚡</div>
+          <div class="task-body">
+            <div class="task-feature">2 · Concurrent Eval</div>
+            <div class="task-name">run_single_eval() · asyncio.gather × 3</div>
+            <div class="task-detail">Vector RAG · Graph RAG · Cognee all fire simultaneously · NaN on per-backend error</div>
+            <div class="task-nt nt-only">All three knowledge systems receive the question at the same moment. Total wait time equals the slowest system — not the sum of all three — because they run in parallel.</div>
+          </div>
+          <span class="tbadge pal">concurrent</span>
+        </div>
+
+        <div class="task" id="n-s-scores">
+          <div class="task-ico">📊</div>
+          <div class="task-body">
+            <div class="task-feature">3 · Per-Backend Scores</div>
+            <div class="task-name">ragas.evaluate() × 3 · displayed side-by-side in Gradio columns</div>
+            <div class="task-detail">context_summary · answer · faithfulness · answer_relevancy · context_precision · context_recall per backend</div>
+            <div class="task-nt nt-only">Each system's answer is scored and shown side-by-side in three columns, letting you directly compare what each retrieved, what it said, and how each quality dimension scored it.</div>
+          </div>
+          <span class="tbadge">side-by-side</span>
+        </div>
+      </div><!-- end single-show -->
+
+    </div><!-- end center cluster -->
+
+    <!-- RIGHT: External Services -->
+    <div class="col">
+
+      <div class="providers-cluster" id="n-providers">
+        <div class="cluster-hdr">🤖 AI Services</div>
+        <div class="providers-grid">
+          <div class="pnode pal-p" id="n-p-haiku">
+            <div class="pnode-ico">🧠</div>
+            <div class="pnode-name">Ragas Judge</div>
+            <div class="pnode-sub">claude-haiku-4-5-20251001 · 4096 max_tokens · InstructorLLM</div>
+          </div>
+          <div class="pnode pal-p" id="n-p-sonnet">
+            <div class="pnode-ico">💬</div>
+            <div class="pnode-name">RAG Answerer</div>
+            <div class="pnode-sub">claude-sonnet-4-6 · generates answers from retrieved context</div>
+          </div>
+          <div class="pnode pal-p" id="n-p-hf">
+            <div class="pnode-ico">🔢</div>
+            <div class="pnode-name">Embeddings</div>
+            <div class="pnode-sub">BAAI/bge-small-en-v1.5 · router.huggingface.co · pure HTTP urllib</div>
+          </div>
+          <div class="pnode pal-p" id="n-p-testgen">
+            <div class="pnode-ico">📝</div>
+            <div class="pnode-name">Testset Gen</div>
+            <div class="pnode-sub">claude-sonnet-4-6 · one-shot · Q&amp;A pairs from PDF chunks</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="node pal-node" id="n-rag-data">
+        <div class="node-icon">🗄️</div>
+        <div class="node-name">RAG Data Stores</div>
+        <div class="node-sub">pgvector (Supabase) · Neo4j AuraDB · Cognee LanceDB · from rag_comparison base image</div>
+        <div class="node-label pal">Data Layer</div>
+      </div>
+
+    </div><!-- end right col -->
+
+  </div><!-- end diagram-grid -->
+</div><!-- end diagram-outer -->
+
+<div class="nav-row">
+  <button class="btn btn-s" id="btn-prev" onclick="prev()">← Prev</button>
+  <div class="dots" id="dots"></div>
+  <button class="btn btn-p" id="btn-next" onclick="next()">Next →</button>
+  <span class="step-ct" id="s-ct">1 / 1</span>
+</div>
+
+<div class="step-panel" id="step-panel">
+  <div class="step-top">
+    <span class="step-num" id="s-num">Step 1</span>
+    <span class="step-ttl" id="s-ttl"></span>
+  </div>
+  <div class="step-body">
+    <div class="step-left">
+      <div class="panel-label">Description</div>
+      <div class="step-desc" id="s-desc"></div>
+      <div class="panel-label">Active Components</div>
+      <div class="comp-tags" id="s-tags"></div>
+    </div>
+    <div class="step-right">
+      <div class="panel-label code-label">Code</div>
+      <div class="panel-label nt-code-label" id="nt-panel-label">Business Impact</div>
+      <pre class="step-code" id="s-code"></pre>
+      <div id="s-nt"></div>
+    </div>
+  </div>
+</div>
+
+<p class="hint">← → arrow keys · click dots to jump · tabs switch architecture view</p>
+
+<script>
+const ARROWS = [
+  // Overview tab
+  { id:'sa-handlers',      from:'n-surface-a',    fS:'right',  to:'n-handlers',    tS:'left'  },
+  { id:'handlers-runner',  from:'n-handlers',     fS:'bottom', to:'n-runner',      tS:'top'   },
+  { id:'runner-backends',  from:'n-runner',       fS:'bottom', to:'n-backends',    tS:'top'   },
+  { id:'backends-ragdata', from:'n-backends',     fS:'right',  to:'n-rag-data',    tS:'left'  },
+  { id:'runner-providers', from:'n-runner',       fS:'right',  to:'n-providers',   tS:'left'  },
+  // Batch tab
+  { id:'sa-b-load',        from:'n-surface-a',    fS:'right',  to:'n-b-load',      tS:'left'  },
+  { id:'b-load-seq',       from:'n-b-load',       fS:'bottom', to:'n-b-sequential',tS:'top'   },
+  { id:'b-seq-conc',       from:'n-b-sequential', fS:'bottom', to:'n-b-concurrent',tS:'top'   },
+  { id:'b-conc-score',     from:'n-b-concurrent', fS:'bottom', to:'n-b-score',     tS:'top'   },
+  { id:'b-score-agg',      from:'n-b-score',      fS:'bottom', to:'n-b-aggregate', tS:'top'   },
+  { id:'b-conc-ragdata',   from:'n-b-concurrent', fS:'right',  to:'n-rag-data',    tS:'left'  },
+  { id:'b-score-providers',from:'n-b-score',      fS:'right',  to:'n-providers',   tS:'left'  },
+  // Single tab
+  { id:'sa-s-handler',     from:'n-surface-a',    fS:'right',  to:'n-s-handler',   tS:'left'  },
+  { id:'s-handler-conc',   from:'n-s-handler',    fS:'bottom', to:'n-s-concurrent',tS:'top'   },
+  { id:'s-conc-scores',    from:'n-s-concurrent', fS:'bottom', to:'n-s-scores',    tS:'top'   },
+  { id:'s-conc-ragdata',   from:'n-s-concurrent', fS:'right',  to:'n-rag-data',    tS:'left'  },
+  { id:'s-scores-providers',from:'n-s-scores',    fS:'right',  to:'n-providers',   tS:'left'  },
+];
+
+const FLOWS = {
+  overview: [
+    {
+      nodes:  ['n-surface-a', 'n-user-cluster'],
+      arrows: [],
+      ttl:    'Entry Point: Gradio Web UI',
+      desc:   'The app starts at main.py, launches a Gradio Blocks interface on 0.0.0.0:7861. Two tabs are available: Batch Evaluation (runs all 20 testset questions) and Single Question (real-time eval of one question).\n\nThe UI layer uses generator functions so the button label updates immediately when a run starts.',
+      tags:   ['main.py', 'Gradio', 'port 7861'],
+      code:   `<span class="cm"># main.py</span>
+<span class="kw">from</span> app.ui <span class="kw">import</span> <span class="fn">build_demo</span>
+
+demo = <span class="fn">build_demo</span>()
+demo.<span class="fn">launch</span>(server_name=<span class="str">"0.0.0.0"</span>, server_port=<span class="str">7861</span>)`,
+    },
+    {
+      nodes:  ['n-surface-a', 'n-handlers', 'n-user-cluster'],
+      arrows: ['sa-handlers'],
+      ttl:    'UI Handler: asyncio.run() Bridge',
+      desc:   'app/handlers.py wraps the async eval logic for Gradio. handle_batch_eval() and handle_single_eval() are generator functions that yield a locked button state first, then yield results when done.\n\nSince Gradio event handlers are synchronous, asyncio.run() is called to run the async runner. This means only one eval can run at a time per worker.',
+      tags:   ['handlers.py', 'asyncio.run()', 'generator'],
+      code:   `<span class="cm"># app/handlers.py</span>
+<span class="kw">def</span> <span class="fn">handle_batch_eval</span>(progress=gr.<span class="fn">Progress</span>(track_tqdm=<span class="kw">True</span>)):
+    <span class="kw">yield</span> gr.<span class="fn">update</span>(interactive=<span class="kw">False</span>, value=<span class="str">"Running... this takes 5-10 min"</span>), ...
+    <span class="kw">try</span>:
+        df = asyncio.<span class="fn">run</span>(<span class="fn">run_batch_eval</span>())
+        <span class="kw">yield</span> gr.<span class="fn">update</span>(interactive=<span class="kw">True</span>, value=<span class="str">"Run Batch Evaluation"</span>), df, ...`,
+    },
+    {
+      nodes:  ['n-runner', 'n-backends', 'n-ragas'],
+      arrows: ['handlers-runner', 'runner-backends', 'runner-providers'],
+      ttl:    'Eval Engine: Runner + Backends + Scorer',
+      desc:   'eval/runner.py is the core. _eval_one_backend() runs retrieve → generate → ragas.evaluate() for a single backend. It never raises — any failure returns NaN scores and an error string.\n\nragas_wrappers.py provides the LLM judge (claude-haiku via llm_factory + AsyncAnthropic) and embeddings (BAAI/bge-small-en-v1.5 via HuggingFace HTTP). top_p is removed from model_args post-creation because Anthropic rejects requests with both temperature and top_p.',
+      tags:   ['runner.py', 'backends.py', 'ragas_wrappers.py', 'llm_factory'],
+      code:   `<span class="cm"># ragas_wrappers.py</span>
+<span class="kw">def</span> <span class="fn">get_ragas_llm</span>():
+    llm = <span class="fn">llm_factory</span>(
+        model=EVAL_LLM_MODEL, provider=<span class="str">"anthropic"</span>,
+        client=<span class="fn">AsyncAnthropic</span>(api_key=ANTHROPIC_API_KEY),
+        max_tokens=<span class="str">4096</span>,
+    )
+    <span class="kw">if</span> <span class="fn">hasattr</span>(llm, <span class="str">"model_args"</span>):
+        llm.model_args.<span class="fn">pop</span>(<span class="str">"top_p"</span>, <span class="kw">None</span>)  <span class="cm"># Anthropic rejects temperature+top_p</span>
+    <span class="kw">return</span> llm`,
+    },
+    {
+      nodes:  ['n-surface-a', 'n-handlers', 'n-runner', 'n-backends',
+               'n-testset', 'n-ragas', 'n-providers', 'n-rag-data', 'n-user-cluster'],
+      arrows: ['sa-handlers', 'handlers-runner', 'runner-backends',
+               'backends-ragdata', 'runner-providers'],
+      ttl:    'Complete Architecture',
+      desc:   'Full data flow: User → Gradio UI → handlers → runner → 3 backends (Vector/Graph/Cognee) → RAG data stores → generate answer → ragas.evaluate() → Anthropic judge + HuggingFace embeddings → scores back to UI.\n\neval/backends.py uses a sys.modules config swap to prevent the ragas_eval config.py from shadowing the rag_comparison config.py when importing shared backends.',
+      tags:   ['full flow', 'config swap', 'rag_comparison', '3 backends'],
+      code:   `<span class="cm"># eval/backends.py — config isolation pattern</span>
+_our_config = sys.modules.<span class="fn">pop</span>(<span class="str">"config"</span>, <span class="kw">None</span>)
+<span class="kw">try</span>:
+    <span class="kw">from</span> backends <span class="kw">import</span> graph <span class="kw">as</span> _graph
+    <span class="kw">from</span> backends <span class="kw">import</span> vector <span class="kw">as</span> _vector
+    <span class="kw">from</span> backends <span class="kw">import</span> cognee_backend <span class="kw">as</span> _cognee
+<span class="kw">finally</span>:
+    <span class="kw">if</span> _our_config <span class="kw">is not None</span>:
+        sys.modules[<span class="str">"config"</span>] = _our_config`,
+    },
+  ],
+
+  batch: [
+    {
+      nodes:  ['n-surface-a', 'n-b-load', 'n-user-cluster'],
+      arrows: ['sa-b-load'],
+      ttl:    'Step 1: Load the Testset',
+      desc:   'run_batch_eval() begins by calling load_testset(). This reads data/testset.json and validates that every entry has both a "question" and "ground_truth" key.\n\nIf a stale results_partial.json exists from a previous interrupted run, it is detected, logged as a warning, and deleted before starting fresh.',
+      tags:   ['load_testset()', 'testset.json', 'validation'],
+      code:   `<span class="cm"># eval/testset.py</span>
+<span class="kw">def</span> <span class="fn">load_testset</span>() -> list[dict]:
+    <span class="kw">if not</span> TESTSET_PATH.<span class="fn">exists</span>():
+        <span class="kw">raise</span> <span class="fn">FileNotFoundError</span>(
+            <span class="str">f"Testset not found at {TESTSET_PATH}. "</span>
+            <span class="str">"Run generate_testset.py first:\n"</span>
+            <span class="str">"  docker exec -w /app rag-comparison-ragas python ragas_eval/generate_testset.py"</span>
+        )
+    <span class="kw">with</span> <span class="fn">open</span>(TESTSET_PATH) <span class="kw">as</span> f:
+        data = json.<span class="fn">load</span>(f)
+    <span class="kw">return</span> data`,
+    },
+    {
+      nodes:  ['n-b-load', 'n-b-sequential', 'n-b-concurrent'],
+      arrows: ['b-load-seq', 'b-seq-conc'],
+      ttl:    'Step 2: Sequential Questions, Concurrent Backends',
+      desc:   'Questions run sequentially to avoid API rate limits. For each question, all 3 backends fire concurrently via asyncio.gather().\n\nAfter each question completes, partial results are atomically written (tmp file → os.replace) so an interrupted run preserves completed work.',
+      tags:   ['sequential', 'asyncio.gather()', 'partial write'],
+      code:   `<span class="cm"># eval/runner.py — run_batch_eval()</span>
+<span class="kw">for</span> item <span class="kw">in</span> testset:
+    tasks = [
+        <span class="fn">_eval_one_backend</span>(name, fn, item)
+        <span class="kw">for</span> name, fn <span class="kw">in</span> BACKENDS.<span class="fn">items</span>()
+    ]
+    row_results = <span class="fn">list</span>(<span class="kw">await</span> asyncio.<span class="fn">gather</span>(*tasks))
+    all_results.<span class="fn">extend</span>(row_results)
+    <span class="cm"># Atomic partial write after each question</span>
+    tmp = _PARTIAL_PATH.<span class="fn">with_suffix</span>(<span class="str">".tmp"</span>)
+    tmp.<span class="fn">write_text</span>(json.<span class="fn">dumps</span>(all_results, indent=<span class="str">2</span>))
+    tmp.<span class="fn">replace</span>(_PARTIAL_PATH)`,
+    },
+    {
+      nodes:  ['n-b-concurrent', 'n-b-score', 'n-rag-data', 'n-providers'],
+      arrows: ['b-conc-score', 'b-conc-ragdata', 'b-score-providers'],
+      ttl:    'Step 3: Retrieve → Generate → Score',
+      desc:   '_eval_one_backend() runs the full pipeline for one backend + question: retrieve context from the RAG data store, generate an answer with claude-sonnet-4-6, then call ragas.evaluate() with the Haiku judge.\n\nAny exception is caught and returns NaN scores — the backend error is recorded but does not cancel sibling tasks.',
+      tags:   ['_eval_one_backend()', 'retrieve', 'generate_answer()', 'ragas.evaluate()'],
+      code:   `<span class="cm"># eval/runner.py — _eval_one_backend()</span>
+<span class="kw">try</span>:
+    context_str, summary = <span class="kw">await</span> <span class="fn">retrieve_fn</span>(question)
+    answer = <span class="kw">await</span> <span class="fn">generate_answer</span>(question, context_str)
+    dataset = Dataset.<span class="fn">from_dict</span>({
+        <span class="str">"question"</span>: [question], <span class="str">"answer"</span>: [answer],
+        <span class="str">"contexts"</span>: [[context_str]], <span class="str">"ground_truth"</span>: [ground_truth],
+    })
+    scores = <span class="kw">await</span> asyncio.<span class="fn">to_thread</span>(_run_ragas, dataset)
+<span class="kw">except</span> Exception <span class="kw">as</span> e:
+    <span class="kw">return</span> {**base, <span class="str">"error"</span>: <span class="fn">str</span>(e),
+            **{k: <span class="fn">float</span>(<span class="str">"nan"</span>) <span class="kw">for</span> k <span class="kw">in</span> METRIC_NAMES}}`,
+    },
+    {
+      nodes:  ['n-b-score', 'n-b-aggregate', 'n-surface-a', 'n-user-cluster'],
+      arrows: ['b-score-agg'],
+      ttl:    'Step 4: Aggregate and Return',
+      desc:   'After all 20 questions complete, results are aggregated into a DataFrame. groupby("backend")[METRIC_NAMES].mean().round(4) produces one row per backend with mean scores across all questions.\n\nThe partial results file is deleted on clean exit. The DataFrame is returned to the Gradio handler, which yields it to the UI table.',
+      tags:   ['groupby().mean()', 'DataFrame', 'round(4)', 'Gradio Dataframe'],
+      code:   `<span class="cm"># eval/runner.py — end of run_batch_eval()</span>
+_PARTIAL_PATH.<span class="fn">unlink</span>(missing_ok=<span class="kw">True</span>)
+
+df = pd.<span class="fn">DataFrame</span>(all_results)
+<span class="kw">return</span> df.<span class="fn">groupby</span>(<span class="str">"backend"</span>)[METRIC_NAMES].<span class="fn">mean</span>().<span class="fn">reset_index</span>().<span class="fn">round</span>(<span class="str">4</span>)`,
+    },
+  ],
+
+  single: [
+    {
+      nodes:  ['n-surface-a', 'n-s-handler', 'n-user-cluster'],
+      arrows: ['sa-s-handler'],
+      ttl:    'User Submits a Question',
+      desc:   'handle_single_eval() is a generator. The first yield immediately disables the Evaluate button and clears previous results — before any API call is made.\n\nGround truth is optional. Without it, context_recall scores as N/A since recall requires a reference answer to compare against.',
+      tags:   ['handle_single_eval()', 'generator', 'ground_truth optional'],
+      code:   `<span class="cm"># app/handlers.py</span>
+<span class="kw">def</span> <span class="fn">handle_single_eval</span>(question: str, ground_truth: str):
+    _empty = (<span class="str">""</span>, <span class="str">""</span>, <span class="str">""</span>)
+    empty_outputs = (gr.<span class="fn">update</span>(interactive=<span class="kw">False</span>, value=<span class="str">"Evaluating..."</span>),) + _empty * <span class="str">3</span>
+    <span class="kw">yield</span> empty_outputs  <span class="cm"># locks UI immediately</span>
+
+    results = asyncio.<span class="fn">run</span>(<span class="fn">run_single_eval</span>(question, ground_truth))`,
+    },
+    {
+      nodes:  ['n-s-concurrent', 'n-rag-data', 'n-providers'],
+      arrows: ['s-handler-conc', 's-conc-ragdata', 's-conc-scores'],
+      ttl:    'Three Backends Fire Concurrently',
+      desc:   'run_single_eval() creates one _eval_one_backend() task per backend and gathers them concurrently. Total latency is bounded by the slowest backend, not the sum.\n\nEach backend calls its retrieve() function → RAG data store, then generate_answer() → claude-sonnet-4-6, then ragas.evaluate() → claude-haiku + HuggingFace embeddings.',
+      tags:   ['asyncio.gather()', 'Vector RAG', 'Graph RAG', 'Cognee'],
+      code:   `<span class="cm"># eval/runner.py</span>
+<span class="kw">async def</span> <span class="fn">run_single_eval</span>(question: str, ground_truth: str = <span class="str">""</span>) -> list[dict]:
+    item = {<span class="str">"question"</span>: question, <span class="str">"ground_truth"</span>: ground_truth}
+    tasks = [
+        <span class="fn">_eval_one_backend</span>(name, fn, item)
+        <span class="kw">for</span> name, fn <span class="kw">in</span> BACKENDS.<span class="fn">items</span>()
+    ]
+    <span class="kw">return</span> <span class="fn">list</span>(<span class="kw">await</span> asyncio.<span class="fn">gather</span>(*tasks))`,
+    },
+    {
+      nodes:  ['n-s-scores', 'n-surface-a', 'n-s-concurrent', 'n-rag-data',
+               'n-providers', 'n-s-handler', 'n-user-cluster'],
+      arrows: ['sa-s-handler', 's-handler-conc', 's-conc-scores',
+               's-conc-ragdata', 's-scores-providers'],
+      ttl:    'Scores Returned Side-by-Side',
+      desc:   'Results for all three backends are formatted and yielded back to the Gradio UI in a single generator yield. Each backend column shows: retrieved context summary, generated answer, and four Ragas metric scores (or "N/A" for NaN).',
+      tags:   ['side-by-side', 'faithfulness', 'answer_relevancy', 'context_precision', 'context_recall'],
+      code:   `<span class="cm"># app/handlers.py — formatting per backend</span>
+<span class="kw">for</span> metric <span class="kw">in</span> METRIC_NAMES:
+    v = r.<span class="fn">get</span>(metric, <span class="fn">float</span>(<span class="str">"nan"</span>))
+    <span class="kw">if</span> v != v:  <span class="cm"># NaN check</span>
+        lines.<span class="fn">append</span>(<span class="str">f"**{metric}:** N/A"</span>)
+    <span class="kw">else</span>:
+        lines.<span class="fn">append</span>(<span class="str">f"**{metric}:** {v:.4f}"</span>)
+scores = <span class="str">"\n\n"</span>.<span class="fn">join</span>(lines)`,
+    },
+  ],
+};
+
+const NT_DESCS = {
+  overview: [
+    'Users access the app through a web browser. It offers two modes: a full batch evaluation that scores all 20 test questions, and a live mode for testing individual questions.',
+    'Every button click starts a background process. The button text changes to show that work is in progress, and the results appear when the evaluation finishes.',
+    'The scoring engine runs in the background, sending each question to all three knowledge systems and independently judging each answer. A failure in one system never stops the others from completing.',
+    'The complete system connects a web interface to three knowledge systems, two AI judges, and a scoring framework — all coordinated so results are comparable and reproducible.',
+  ],
+  batch: [
+    'The batch run begins by loading 20 pre-written questions with known correct answers. If the question file is missing, a clear message explains exactly how to recreate it.',
+    'Questions are processed one at a time to stay within API rate limits. All three knowledge systems are asked each question simultaneously, and progress is saved after every question so an interruption never loses completed work.',
+    'Each answer is evaluated by Claude acting as an impartial judge — checking whether the answer sticks to the source material, addresses the question, and retrieved the right information.',
+    'Once all 20 questions are scored, results are averaged per system and displayed as a comparison table. Higher scores indicate a more reliable knowledge system across all four quality dimensions.',
+  ],
+  single: [
+    'When a question is submitted, the button disables immediately to prevent accidental double submissions. The optional "ground truth" field unlocks the completeness score — without it, only three of the four metrics can be calculated.',
+    'All three knowledge systems receive the question at the same moment and work in parallel. The wait time equals the slowest system — not the total of all three — making live evaluation practical.',
+    'Results appear side-by-side in three columns, one per knowledge system. You can directly compare what each system retrieved, what answer it generated, and how the scoring judge rated each quality dimension.',
+  ],
+};
+
+const TAB_KEYS = ['overview', 'batch', 'single'];
+
+const NT_LABELS = {
+  overview: 'Business Impact',
+  batch:    'How It Works',
+  single:   'What You See',
+};
+
+const CLUSTER_TASK_IDS = new Set([
+  'n-handlers', 'n-runner', 'n-backends', 'n-testset', 'n-ragas',
+  'n-b-load', 'n-b-sequential', 'n-b-concurrent', 'n-b-score', 'n-b-aggregate',
+  'n-s-handler', 'n-s-concurrent', 'n-s-scores',
+]);
+
+const PNODE_IDS = new Set(['n-p-haiku', 'n-p-sonnet', 'n-p-hf', 'n-p-testgen']);
+const SURFACE_IDS = new Set(['n-surface-a']);
+
+const T3_ARROWS = new Set([
+  'sa-s-handler', 's-handler-conc', 's-conc-scores', 's-conc-ragdata', 's-scores-providers'
+]);
+
+let flow = TAB_KEYS[0], step = 0;
+
+function rect(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const outer = document.getElementById('diagram-outer');
+  const er = el.getBoundingClientRect();
+  const sr = outer.getBoundingClientRect();
+  return {
+    l: er.left - sr.left, t: er.top - sr.top,
+    r: er.right - sr.left, b: er.bottom - sr.top,
+    cx: er.left - sr.left + er.width / 2,
+    cy: er.top - sr.top + er.height / 2,
+    w: er.width, h: er.height,
+  };
+}
+
+function edge(r, side, off) {
+  off = off || 0;
+  if (side === 'top')    return { x: r.cx + off, y: r.t };
+  if (side === 'bottom') return { x: r.cx + off, y: r.b };
+  if (side === 'left')   return { x: r.l, y: r.cy + off };
+  if (side === 'right')  return { x: r.r, y: r.cy + off };
+}
+
+function buildPath(def) {
+  const fr = rect(def.from), tr = rect(def.to);
+  if (!fr || !tr) return null;
+  const p1 = edge(fr, def.fS, def.fOff);
+  const p2 = edge(tr, def.tS, def.tOff);
+  const dx = Math.max(Math.abs(p2.x - p1.x) * 0.5, 40);
+  const dy = Math.max(Math.abs(p2.y - p1.y) * 0.5, 40);
+  let c1, c2;
+  if      (def.fS === 'right')  c1 = { x: p1.x + dx, y: p1.y };
+  else if (def.fS === 'left')   c1 = { x: p1.x - dx, y: p1.y };
+  else if (def.fS === 'bottom') c1 = { x: p1.x, y: p1.y + dy };
+  else                          c1 = { x: p1.x, y: p1.y - dy };
+  if      (def.tS === 'left')   c2 = { x: p2.x - dx, y: p2.y };
+  else if (def.tS === 'right')  c2 = { x: p2.x + dx, y: p2.y };
+  else if (def.tS === 'top')    c2 = { x: p2.x, y: p2.y - dy };
+  else                          c2 = { x: p2.x, y: p2.y + dy };
+  return `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
+}
+
+function isVisible(id) {
+  const el = document.getElementById(id);
+  if (!el) return false;
+  return el.getBoundingClientRect().height > 0;
+}
+
+function drawArrows() {
+  const svg = document.getElementById('svg-arrows');
+  [...svg.querySelectorAll('.arrow-path')].forEach(p => p.remove());
+  const outer = document.getElementById('diagram-outer');
+  svg.setAttribute('width', outer.offsetWidth);
+  svg.setAttribute('height', outer.offsetHeight);
+  ARROWS.forEach(def => {
+    if (!isVisible(def.from) || !isVisible(def.to)) return;
+    try {
+      const d = buildPath(def);
+      if (!d) return;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('id', 'a-' + def.id);
+      path.setAttribute('d', d);
+      path.setAttribute('class', 'arrow-path');
+      svg.appendChild(path);
+    } catch(e) {}
+  });
+}
+
+function render() {
+  const steps = FLOWS[flow];
+  const s = steps[step];
+  const total = steps.length;
+  const isFirstTab  = (flow === TAB_KEYS[0]);
+  const isSecondTab = (flow === TAB_KEYS[1]);
+
+  document.querySelectorAll(
+    '.task,.user-flow,.node,.user-cluster,.cluster,.providers-cluster,.pnode'
+  ).forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.arrow-path').forEach(p =>
+    p.classList.remove('lit','lit-pal','lit-warn','lit-desktop','lit-web')
+  );
+
+  s.nodes.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
+    if (CLUSTER_TASK_IDS.has(id)) {
+      const eng = document.getElementById('n-engine');
+      if (eng) eng.classList.add('active');
+    }
+    if (PNODE_IDS.has(id)) {
+      const prov = document.getElementById('n-providers');
+      if (prov) prov.classList.add('active');
+    }
+    if (SURFACE_IDS.has(id)) {
+      const uc = document.getElementById('n-user-cluster');
+      if (uc) uc.classList.add('active');
+    }
+  });
+
+  s.arrows.forEach(aid => {
+    const el = document.getElementById('a-' + aid);
+    if (el) {
+      if      (isFirstTab)          el.classList.add('lit-warn');
+      else if (isSecondTab)         el.classList.add('lit-pal');
+      else if (T3_ARROWS.has(aid))  el.classList.add('lit-desktop');
+      else                          el.classList.add('lit');
+    }
+  });
+
+  const numEl = document.getElementById('s-num');
+  numEl.textContent = `Step ${step + 1}`;
+  numEl.className   = 'step-num' + (isSecondTab ? ' pal' : '');
+
+  document.getElementById('s-ttl').textContent  = s.ttl;
+  document.getElementById('s-desc').textContent = s.desc;
+  document.getElementById('s-code').innerHTML   = s.code;
+  document.getElementById('s-nt').textContent   = (NT_DESCS[flow] || [])[step] || '';
+  document.getElementById('nt-panel-label').textContent = NT_LABELS[flow] || 'Business Impact';
+
+  const tagsEl = document.getElementById('s-tags');
+  tagsEl.innerHTML = s.tags.map(t => `<span class="comp-tag">${t}</span>`).join('');
+
+  document.getElementById('s-ct').textContent    = `${step + 1} / ${total}`;
+  document.getElementById('btn-prev').disabled    = step === 0;
+  document.getElementById('btn-next').disabled    = step === total - 1;
+  document.getElementById('btn-next').textContent = step === total - 1 ? '✓ Done' : 'Next →';
+
+  const dotsEl = document.getElementById('dots');
+  dotsEl.innerHTML = '';
+  for (let i = 0; i < total; i++) {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i === step ? ' cur' : i < step ? ' past' : '');
+    d.title = FLOWS[flow][i].ttl;
+    d.onclick = () => { step = i; render(); };
+    dotsEl.appendChild(d);
+  }
+}
+
+function setFlow(f) {
+  flow = f; step = 0;
+
+  TAB_KEYS.forEach(t => {
+    document.getElementById('tab-' + t).classList.toggle('active', t === f);
+  });
+
+  const show = sel => document.querySelectorAll(sel).forEach(el => el.style.display = '');
+  const hide = sel => document.querySelectorAll(sel).forEach(el => el.style.display = 'none');
+
+  TAB_KEYS.forEach(t => hide('.' + t + '-show'));
+  show('.' + f + '-show');
+
+  requestAnimationFrame(() => { drawArrows(); render(); });
+}
+
+function toggleTech() {
+  const isNT = document.body.classList.toggle('nontechnical');
+  document.getElementById('nt-label').textContent = isNT ? 'OFF' : 'ON';
+  requestAnimationFrame(drawArrows);
+}
+
+function next() { if (step < FLOWS[flow].length - 1) { step++; render(); } }
+function prev() { if (step > 0) { step--; render(); } }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next();
+  if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   prev();
+});
+
+window.addEventListener('load',   () => { setFlow(TAB_KEYS[0]); });
+window.addEventListener('resize', drawArrows);
+</script>
+</body>
+</html>

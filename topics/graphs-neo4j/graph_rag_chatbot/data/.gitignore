@@ -1,0 +1,2 @@
+# Ignore generated PDFs — run generate_docs.py to recreate
+*.pdf

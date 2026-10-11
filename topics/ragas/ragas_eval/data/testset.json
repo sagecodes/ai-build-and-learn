@@ -1,0 +1,82 @@
+[
+  {
+    "question": "What closure system does the Trekking Pack 32L use for its sternum strap, and how much does it cost?",
+    "ground_truth": "The Trekking Pack 32L features a magnetic sternum strap buckle that connects with light pressure, along with a padded easy-grip hip belt that requires no precise alignment. It is priced at $215."
+  },
+  {
+    "question": "What are the two formats available for Everstorm's large-print catalog, and what are the minimum text and design specifications included in both?",
+    "ground_truth": "The large-print catalog is available as a printed copy mailed to any U.S. address or as an accessible PDF sent by email. Both formats feature 18-point minimum body text, high-contrast page design, and clearly organized product sections."
+  },
+  {
+    "question": "How long is a password reset link valid after it is issued, and what happens if it expires?",
+    "ground_truth": "A password reset link is valid for 60 minutes from the time it is issued and may only be used once. If the link expires before you use it, you can simply request a new one."
+  },
+  {
+    "question": "What specific events trigger an automatic email security alert from Everstorm Outfitters?",
+    "ground_truth": "Everstorm Outfitters automatically sends an email security alert when any of the following events occur: a first login from a new or unrecognized device, a billing address change, an account password change, or an order placed totaling more than $200."
+  },
+  {
+    "question": "What volume discount percentage applies to an order of 50\u201399 units, and what additional benefit comes with orders of 100 or more units?",
+    "ground_truth": "Orders of 50\u201399 units receive a 20% discount. Orders of 100 or more units receive a 25% discount and are assigned a dedicated account representative who provides priority support, early access to new product releases, and assistance with seasonal planning."
+  },
+  {
+    "question": "What are the per-item embroidery costs for an order with a logo that requires 10,000 stitches, and what one-time fee also applies?",
+    "ground_truth": "For a logo requiring 10,000 stitches, which falls in the 8,000\u201315,000 stitch range, the per-item embroidery cost is $12.00. Additionally, a one-time digitization and setup fee of $45 applies per logo location."
+  },
+  {
+    "question": "What is the phone number and availability for Everstorm Outfitters' corporate sales team?",
+    "ground_truth": "The corporate sales team can be reached by phone at +1 (406) 555-0211, available Monday through Friday from 08:00 to 17:00 MT."
+  },
+  {
+    "question": "How much does Summit Protect cost for electronics such as GPS devices and headlamps?",
+    "ground_truth": "Summit Protect coverage for electronics, including headlamps and GPS devices, costs a one-time fee of $25, which covers the full 3-year coverage term."
+  },
+  {
+    "question": "In what order does Everstorm Outfitters attempt to resolve approved Summit Protect claims?",
+    "ground_truth": "Everstorm Outfitters resolves approved Summit Protect claims in the following priority order: first, they attempt to repair the item at no cost; if repair is not feasible, they provide a replacement of the same item or a confirmed equivalent; and if neither repair nor replacement is available, they issue store credit equal to the original purchase price of the item."
+  },
+  {
+    "question": "How long does it take for a physical gift card to arrive after purchase, and what shipping method is used?",
+    "ground_truth": "Physical gift cards are produced and mailed within 1 business day of purchase and arrive within 3 to 5 business days via standard USPS First Class Mail."
+  },
+  {
+    "question": "How many gift cards can be combined in a single order at Everstorm Outfitters?",
+    "ground_truth": "Up to 3 gift cards may be combined in a single order at Everstorm Outfitters."
+  },
+  {
+    "question": "Which countries or regions does Everstorm Outfitters ship to using Delivered Duty Paid (DDP) terms?",
+    "ground_truth": "Everstorm Outfitters ships using Delivered Duty Paid (DDP) terms exclusively to all EU and EEA member states. Under DDP, all applicable duties and taxes are collected at checkout, meaning customers in those destinations will not owe any additional charges upon delivery."
+  },
+  {
+    "question": "What happens if a customer attempts to order a prohibited item to a restricted destination?",
+    "ground_truth": "If a customer attempts to order a prohibited item to a restricted destination, the order will be canceled and refunded in full within 5 business days. For questions about a specific product, customers can contact Everstorm Outfitters before ordering at international@everstorm.example."
+  },
+  {
+    "question": "How are return shipping costs handled for international returns to Everstorm Outfitters?",
+    "ground_truth": "Return shipping costs are the customer's responsibility, but rather than being billed separately, the actual carrier cost\u2014typically between $15 and $25 USD\u2014is deducted directly from the customer's refund."
+  },
+  {
+    "question": "How many points does a Summit Rewards member earn for referring a friend, and what conditions must the friend meet?",
+    "ground_truth": "A Summit Rewards member earns 200 points for each friend who places their first qualifying order of $25 or more using the member's personal referral link, which can be found at everstorm.example/account."
+  },
+  {
+    "question": "How long do reward coupons remain valid after they are issued?",
+    "ground_truth": "Reward coupons expire 90 days from the date of issue. They have no cash value and cannot be exchanged for store credit."
+  },
+  {
+    "question": "What is the cost of overnight shipping for Everest tier members in the Summit Rewards program?",
+    "ground_truth": "Everest tier members receive 50% off overnight shipping, paying $12.49 instead of the standard $24.99 rate. This benefit applies automatically at checkout when the member is logged into their Everstorm account."
+  },
+  {
+    "question": "What warranty claim assessment timeframe do Everest members receive compared to Base Camp and Summit members?",
+    "ground_truth": "Everest members receive priority 2\u20133 day warranty claim assessment, while both Base Camp and Summit members receive standard 5\u20137 day assessment processing."
+  },
+  {
+    "question": "How is a member's tier status determined in the Summit Rewards program?",
+    "ground_truth": "Tier status is recalculated on a rolling 12-month basis, using points earned within the past 365 days to determine a member's current standing."
+  },
+  {
+    "question": "What information must a customer include when emailing Everstorm Outfitters to request a cancellation after the 30-minute window has passed?",
+    "ground_truth": "When emailing orders@everstorm.example to request a late cancellation, customers must include their order number in the subject line, along with their full name, the email address on the account, and a brief note requesting cancellation."
+  }
+]
