@@ -345,6 +345,9 @@ class PushEpisode:
     cube_dist: list = field(default_factory=list)   # cube -> goal, metres
     arm_dist: list = field(default_factory=list)    # gripper -> cube, metres
     energy: list = field(default_factory=list)
+    planned: list = field(default_factory=list)   # the cost the planner BELIEVED it had found
+    plans: list = field(default_factory=list)     # the LATEST imagined plan, for the live view
+    plan_best: tuple = ()                         # (step, block cm moved, frames) of the best one
     seconds: float = 0.0
 
     @property
@@ -425,10 +428,20 @@ def run_push_episode(env, goal_frame, goal_cube, reward, policy: str = "search",
     return ep
 
 
-def run_push_cem(env, goal_frame, goal_cube, reward, steps: int = 22,
-                 horizon: int = 4, samples: int = 24, topk: int = 6, iters: int = 2,
-                 maxnorm: float = 0.05, render_size: int = 384, seed: int = 0,
-                 on_step=None) -> PushEpisode:
+def _segment_seq(seg: np.ndarray, horizon: int) -> np.ndarray:
+    """[segments, 3] -> [horizon, 3]: each segment held for its share of the horizon.
+
+    A free 8-step sequence is 24 dimensions, which 32 Gaussian samples cannot search.
+    Holding each direction for several steps is the prior that matters here anyway:
+    "go this way for a while, then that way" is exactly the shape of a detour.
+    """
+    return seg[(np.arange(horizon) * len(seg)) // horizon]
+
+
+def run_push_cem(env, goal_frame, goal_cube, reward, steps: int = 40,
+                 horizon: int = 8, segments: int = 2, samples: int = 32, topk: int = 8,
+                 iters: int = 3, maxnorm: float = 0.05, render_size: int = 384,
+                 seed: int = 0, on_step=None, preview: bool = False) -> PushEpisode:
     """Multi-step CEM for the push task, to test the local-minimum hypothesis.
 
     One-step descent on image similarity fails the cold-start push for a structural
@@ -441,7 +454,19 @@ def run_push_cem(env, goal_frame, goal_cube, reward, steps: int = 22,
     A horizon of several steps can pay it, because only the END of the sequence is
     scored. That makes this a clean test of the explanation: if the failure really is a
     local minimum, extending the horizon should fix it without changing the reward. If
-    the horizon does not help either, the diagnosis was wrong.
+    the horizon does not help either, the diagnosis was wrong. `horizon=1` reduces this
+    to the greedy search, so the sweep changes one thing only.
+
+    Two details that are not incidental:
+
+    - Planning rollouts use `env.step`, the SAME controller fidelity the executed step
+      uses. A cheaper rollout is tempting (it is 4x faster) but it under-delivers every
+      commanded delta, so the planner would imagine a world where the arm moves less
+      than it really does, and the bias would look like a planning failure.
+    - The executed action is the first step of the BEST sequence seen, not the first
+      step of the CEM mean. With momentum the mean is deliberately shrunk toward zero,
+      which is right for the sampling distribution and wrong for the action: it would
+      quietly scale every move down and the arm would creep.
 
     Costs `samples * horizon` simulator steps and `samples` encodes per CEM iteration,
     all of it rewound afterwards, which is affordable only because the reward is an
@@ -464,37 +489,65 @@ def run_push_cem(env, goal_frame, goal_cube, reward, steps: int = 22,
 
     for t in range(steps):
         q, v, c = env.data.qpos.copy(), env.data.qvel.copy(), env.data.ctrl.copy()
-        mean = np.zeros((horizon, 3), dtype=np.float32)
-        std = np.full((horizon, 3), maxnorm, dtype=np.float32)
+
+        def rewind():
+            env.data.qpos[:] = q
+            env.data.qvel[:] = v
+            env.data.ctrl[:] = c
+            mujoco.mj_forward(env.model, env.data)
+
+        mean = np.zeros((segments, 3), dtype=np.float32)
+        std = np.full((segments, 3), maxnorm, dtype=np.float32)
+        best_cost, best_seg = np.inf, None
 
         for _ in range(iters):
-            seqs = np.clip(
-                rng.normal(size=(samples, horizon, 3)).astype(np.float32) * std + mean,
+            segs = np.clip(
+                rng.normal(size=(samples, segments, 3)).astype(np.float32) * std + mean,
                 -maxnorm, maxnorm,
             )
             finals = []
             for s in range(samples):
-                env.data.qpos[:] = q; env.data.qvel[:] = v; env.data.ctrl[:] = c
-                mujoco.mj_forward(env.model, env.data)
-                for h in range(horizon):
-                    act = np.zeros(7, dtype=np.float32)
-                    act[:3] = seqs[s, h]
-                    env.step(act)
+                rewind()
+                for a3 in _segment_seq(segs[s], horizon):
+                    env.step(np.concatenate([a3, np.zeros(4, np.float32)]))
                 finals.append(env.render(ac.CROP))
-            env.data.qpos[:] = q; env.data.qvel[:] = v; env.data.ctrl[:] = c
-            mujoco.mj_forward(env.model, env.data)
+            rewind()
 
             costs = reward(np.stack(finals))
-            elite = seqs[np.argsort(costs)[:topk]]
+            order = np.argsort(costs)
+            if float(costs[order[0]]) < best_cost:
+                best_cost, best_seg = float(costs[order[0]]), segs[order[0]].copy()
+            elite = segs[order[:topk]]
             # Momentum keeps the distribution from collapsing onto one sequence after a
             # single lucky sample, which at these sample counts happens easily.
             mean = 0.5 * mean + 0.5 * elite.mean(0)
             std = 0.5 * std + 0.5 * (elite.std(0) + 1e-4)
 
+        # What the robot intends: the winning sequence, rolled out and filmed. This is
+        # the plan, before any of it has been committed to.
+        if preview:
+            rewind()
+            plan = []
+            for a3 in _segment_seq(best_seg, horizon):
+                env.step(np.concatenate([a3, np.zeros(4, np.float32)]))
+                plan.append(env.render(render_size))
+            # Only the latest is ever shown, and 45 steps x horizon frames at full
+            # render size is hundreds of MB held in a pod for nothing.
+            ep.plans = [np.stack(plan)]
+            rewind()
+
+        ep.planned.append(best_cost)
         act = np.zeros(7, dtype=np.float32)
-        act[:3] = np.clip(mean[0], -maxnorm, maxnorm)
+        act[:3] = np.clip(best_seg[0], -maxnorm, maxnorm)
+        before = ep.cube_dist[-1]
         env.step(act)
         record()
+        # Keep the plan that preceded the single biggest push. The live view shows
+        # whatever is current; this is the one worth keeping once the run is over,
+        # because it is the manoeuvre that actually moved the block.
+        gained = (before - ep.cube_dist[-1]) * 100
+        if preview and gained > (ep.plan_best[1] if ep.plan_best else 1e-4):
+            ep.plan_best = (t, float(gained), ep.plans[-1])
         ep.energy.append(float(reward(env.render(ac.CROP)[None])[0]))
         if on_step is not None:
             on_step(ep, t, steps)

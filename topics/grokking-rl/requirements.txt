@@ -1,0 +1,14 @@
+numpy
+matplotlib
+torch==2.14.1
+gymnasium[mujoco]==1.4.0
+# no arm64 wheel: builds from source (needs swig: apt install swig)
+box2d-py==2.3.8
+# LunarLander imports it even without rendering
+pygame==2.6.1
+mujoco==3.17.0
+# chapter 12's videos (imageio-ffmpeg has no reliable arm64 wheel)
+av==18.1.0
+flyte==2.2.1
+# 0.11 breaks flyte 2.2.1 runs ('Headers' not callable).
+connectrpc==0.10.*

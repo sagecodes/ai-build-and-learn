@@ -199,7 +199,7 @@ tracking_lin_vel  =  1.0     # exp(-error^2 / 0.25): match commanded velocity
 tracking_ang_vel  =  0.75    # match commanded yaw rate
 feet_phase        =  1.0     # follow the gait clock
 feet_air_time     =  2.0     # reward a foot spending time off the ground
-feet_clearance    =  0.0     # OFF by default: reward the swing foot lifting
+feet_clearance    =  0.0     # OFF by default: penalize a moving foot away from step height
 orientation       = -2.0     # penalize the torso tipping
 termination       = -100.0   # penalize falling, hard
 stand_still       = -1.0     # penalize shuffling when commanded zero
@@ -462,7 +462,7 @@ Each preset is a small diff on top of DeepMind's scales, not a rewrite. Only the
 | Preset | Diff | Why |
 |---|---|---|
 | `baseline` | none | The control. Whatever this scores is the number to beat |
-| `high-step` | `feet_clearance: 1.0`, `feet_air_time: 3.0` | Anti-shuffle. Playground ships `feet_clearance` at **0.0**, so it's off by default; turning it on is the most direct answer to a robot that slides its feet |
+| `high-step` | `feet_clearance: -0.5`, `feet_air_time: 3.0` | Anti-shuffle. Playground ships `feet_clearance` at **0.0**, so it's off by default; turning it on is the most direct answer to a robot that slides its feet. It is a cost, so the scale is negative (H1's value) |
 | `smooth` | `action_rate: -0.75`, `energy: -0.001`, `dof_acc: -2.5e-7` | Penalize jerk. Slower, cleaner gait |
 | `turner` | `tracking_ang_vel: 1.5`, `tracking_lin_vel: 1.25` | The 300M baseline tracks forward speed well and barely turns at all; this doubles the yaw term |
 | `no-perturb` | pushes off, sensor noise off | Learns fastest, generalizes worst. Good for a first end-to-end check |
@@ -566,11 +566,16 @@ The point to land: this is not a crash, it is a *log line*. Training runs to com
 # The tutorial's diagnosis was "it shuffles instead of stepping". Playground
 # already has the two terms that fix that, and one of them is OFF by default:
 #   feet_air_time   2.0  (on)  rewards a foot spending time in the air
-#   feet_clearance  0.0  (OFF) rewards the swing foot actually lifting
+#   feet_clearance  0.0  (OFF) penalizes a MOVING foot for being away from
+#                              max_foot_height (0.15 m): sliding along the floor
+#                              costs, swinging at step height does not
 # Turning clearance on is the single most direct answer to shuffling.
+# It is a COST, so the scale must be negative (-0.5 is Playground's H1 humanoid
+# value; Go1 and Spot use -2.0). An earlier +1.0 here REWARDED feet far from step
+# height, sliding feet included: the opposite of the preset's purpose.
 "high-step": RewardPreset(
     key="high-step",
-    scales={"feet_clearance": 1.0, "feet_air_time": 3.0},
+    scales={"feet_clearance": -0.5, "feet_air_time": 3.0},
     notes="Anti-shuffle: turn on foot clearance, push air time harder.",
 ),
 ```
