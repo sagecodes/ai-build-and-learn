@@ -123,11 +123,16 @@ PRESETS: dict[str, RewardPreset] = {
     # The tutorial's diagnosis was "it shuffles instead of stepping". Playground
     # already has the two terms that fix that, and one of them is OFF by default:
     #   feet_air_time   2.0  (on)  rewards a foot spending time in the air
-    #   feet_clearance  0.0  (OFF) rewards the swing foot actually lifting
+    #   feet_clearance  0.0  (OFF) penalizes a MOVING foot for being away from
+    #                              max_foot_height (0.15 m): sliding along the floor
+    #                              costs, swinging at step height does not
     # Turning clearance on is the single most direct answer to shuffling.
+    # It is a COST, so the scale must be negative (-0.5 is Playground's H1 humanoid
+    # value; Go1 and Spot use -2.0). An earlier +1.0 here REWARDED feet far from step
+    # height, sliding feet included: the opposite of the preset's purpose.
     "high-step": RewardPreset(
         key="high-step",
-        scales={"feet_clearance": 1.0, "feet_air_time": 3.0},
+        scales={"feet_clearance": -0.5, "feet_air_time": 3.0},
         notes="Anti-shuffle: turn on foot clearance, push air time harder.",
     ),
 

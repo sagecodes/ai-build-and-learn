@@ -38,6 +38,7 @@ The G1 humanoid: three ways to put V-JEPA in charge of a body
 
 readout (GPU)   is the picture inside the token? Fit a linear map and find out
 push    (GPU)   show it a photo of the finished job and let it work out the rest
+detour  (GPU)   the cold start nothing solves: is the horizon the problem, or the photo?
 
 The mechanism tasks: how it works, rather than how well
   ├── occlude  (GPU)  slide an occluder across a clip and RENDER the prediction
@@ -760,6 +761,130 @@ like the reference photograph. One-step descent on image similarity cannot climb
 that, no matter what space the images are compared in. It is a local minimum in the
 objective, not a failure of the features, and a longer planning horizon is the thing
 that would address it.
+
+That last sentence was a prediction, and the next section is what happened when it was
+tested. It was wrong, and being wrong turned out to be more useful than being right.
+
+## Testing that prediction: `detour`
+
+```bash
+flyte run pipeline.py detour                                   # 8 scenes, horizons 1/4/8
+flyte run pipeline.py detour --horizons 8 --samples 128        # the budget-matched control
+```
+
+The claim above is falsifiable, so `detour` tests it. It runs the same cold-start push
+and changes exactly one thing: how many steps the planner scores before it commits to a
+move. Same reward, same simulator, same 5 cm limit, same 45 executed steps, same scenes.
+`horizon 1` **is** the greedy planner, so the sweep is a paired comparison against the
+original failure rather than against a number written down elsewhere.
+
+Run `r9twvtrqx4sqpzwk6srz`, 8 scenes, V-JEPA embeddings throughout:
+
+| planner | block progress | block moved | solved | final distance to the photo |
+|---|---|---|---|---|
+| scripted oracle (told the answer) | +83% +- 8% | +11.6 cm | **8/8** | **0.220** |
+| horizon 1 (the greedy planner) | -2% +- 8% | -0.2 cm | 0/8 | 0.229 |
+| horizon 4 | -16% +- 29% | -2.1 cm | 0/8 | 0.369 |
+| horizon 8 | +4% +- 19% | +0.5 cm | 0/8 | 0.376 |
+
+Paired scene by scene, horizon 8 beats horizon 1 by **+0.65 cm with a standard error of
+1.11**, which is t = 0.59, which is nothing. No planner solved a single scene. The
+oracle solved all eight, so every scene was winnable and the failure is the planner's.
+
+**Looking further ahead did not unlock the cold start.** Horizon 4 was reliably worse
+than not looking ahead at all (four of eight scenes pushed the block more than 1 cm the
+*wrong* way), and horizon 8 recovered only to break-even.
+
+### The first clue: the objective barely separates done from untouched
+
+Read the last column instead. The oracle, which actually does the job, ends **0.220**
+from the reference photograph. The greedy planner ends **0.229** having moved the block
+0.2 cm in the wrong direction. The entire image-space difference between *task
+completed* and *block never touched* is about 4%.
+
+The objective is at least not inverted: the policy that does the task does score best,
+which rules out the more alarming possibility. But a 4% margin is very little for a
+planner to steer by, and it is the first sign that the problem is the quantity being
+optimised rather than the optimiser. Two sections down, the control run says what that
+quantity really is.
+
+### The confound, and the control that closes it
+
+Horizon 4 and 8 end *further* from the photograph than greedy does. They are not merely
+failing the task, they are optimising the stated objective **worse**, which a longer
+horizon has no business doing: a horizon-8 planner could always have chosen a
+near-constant sequence and reproduced greedy's behaviour.
+
+The obvious suspect is budget. At 32 sequences x 3 iterations, horizon 1 searches 3
+dimensions and horizon 8 searches 6 (two piecewise-constant segments), so the same
+sample count covers the longer horizon far more sparsely. Run `r5nhxw9j7b42rvsztzp7`
+quadruples it: horizon 8 at **128 sequences**, same 25% elite fraction, same 8 scenes.
+
+| horizon 8 | block moved | solved | final distance to the photo |
+|---|---|---|---|
+| 32 sequences | +0.5 cm | 0/8 | 0.376 |
+| **128 sequences** | **+1.2 cm** | 0/8 | **0.349** |
+| greedy, for reference | -0.2 cm | 0/8 | 0.229 |
+| oracle, for reference | +11.6 cm | 8/8 | 0.222 |
+
+Paired, h8 at 128 beats h8 at 32 by +0.70 cm (se 1.11, t = 0.63) and beats greedy by
++1.35 cm (se 0.95, t = 1.42). Neither is significant, and 0 of 8 scenes are solved at
+either budget. **Four times the search moved the objective from 0.376 to 0.349, nowhere
+near greedy's 0.229.** The longer horizon was not sample-starved, so the confound is
+closed and the original reading stands: lookahead is not what the cold start was missing.
+
+### What the objective is actually measuring
+
+That control exposes the mechanism, and it is worth stating plainly because it is the
+most useful thing this task produced.
+
+Horizon 8 is the planner that *does* nudge the block toward its photographed position,
+and it ends up **further** from the photograph for doing so. Greedy scores 0.229 by
+parking the arm where the arm sits in the goal image and never touching the block. The
+oracle scores 0.222 by doing the whole job. A planner that pushes the block partway,
+and leaves the arm somewhere else, scores 0.349.
+
+So image distance in this scene is dominated by **arm position, not block position**.
+The block is a small object in a large frame; the arm is a large object that moves a
+long way. A goal photograph therefore specifies "put the arm here" far more strongly
+than it specifies "put the block there", and the two happen to coincide only at the very
+end of a successful push.
+
+That reframes the cold-start failure. It is not a local minimum that a better search can
+climb out of, and the earlier prediction that a longer horizon would address it was
+wrong. It is a proxy that barely encodes the quantity being scored, and every planner
+here is faithfully optimising it. The fixes that follow from this diagnosis are
+different ones: a camera framing where the block occupies more of the image, a goal
+specification that is not a single whole-frame photograph, or a reward that looks at a
+region rather than the frame. None of them is "plan harder".
+
+Worth being clear about what is not claimed. This is 8 scenes of one push task with one
+camera, and the horizon comparison is paired but small. The strong result here is the
+negative one, which the oracle's 8/8 makes safe: the scenes are winnable, and no
+photograph-matching planner wins one.
+
+### What had to be right in the planner
+
+`run_push_cem` had been written but never executed, and three things in it would each
+have produced a confident wrong answer.
+
+- **Planning rollouts run at the same controller fidelity as the executed step.** The
+  cheap version is 4x faster and under-delivers every commanded delta, so the planner
+  would have imagined a world where the arm moves less than it really does. That bias
+  looks exactly like a planning failure.
+- **The executed action is the first step of the best sequence, not of the CEM mean.**
+  The mean is deliberately shrunk toward zero by momentum, which is correct for the
+  sampling distribution and wrong for the action: every move would have been quietly
+  scaled down and the arm would have crept.
+- **Action sequences are piecewise-constant over segments.** A free 8-step sequence is
+  24 dimensions and 32 Gaussian samples cannot search it. "Go this way for a while, then
+  that way" is the shape of a detour anyway.
+
+One reproducibility note worth recording: the same scene at the same seed gave +3.3 cm
+on the host and +5.0 cm in the pod. bf16 nondeterminism in the encoder flips an `argmin`
+early and a 45-step trajectory diverges from there. Per-scene numbers here carry real
+run-to-run noise even with the seed pinned, which is why nothing above is quoted from a
+single scene.
 
 ## The mechanism tasks: how it works, rather than how well
 

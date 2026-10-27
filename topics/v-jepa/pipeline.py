@@ -15,6 +15,7 @@
     flyte run pipeline.py selfwalk                 # V-JEPA as the ONLY reward: a G1 learns to walk
     flyte run pipeline.py readout                  # is the picture inside the token? (no)
     flyte run pipeline.py push                     # show it a photo of the finished task
+    flyte run pipeline.py detour                   # does a longer planning horizon fix the cold start?
 
 How the thing works, rather than how well (see "the mechanism tasks" at the bottom):
 
@@ -1751,6 +1752,299 @@ def _render_push_report(per_space, first, steps, cold_start) -> None:
     flyte.report.replace(reports.final_html(
         "push - a photograph of the finished job is the whole instruction", tbl, body,
         reports.PUSH_EXPLAINER))
+    flyte.report.flush()
+
+
+DETOUR_SPACES = {"jepa": "V-JEPA 2 embeddings", "pixel": "raw pixels",
+                 "random_net": "random net"}
+
+
+def _paint_more(stage: str, detail: str, rows: list[tuple[str, str]], extra: str = "") -> None:
+    flyte.report.replace(reports.progress_html(stage, detail, rows) + extra, do_flush=True)
+
+
+def _detour_plan_html(ep, goal_frame, horizon: int) -> str:
+    """The manoeuvre the planner just settled on, before any of it has been executed."""
+    import numpy as np
+
+    plan = ep.plans[-1]
+    frames = np.stack([
+        viz.annotate(f.copy(), [("THE PLAN", viz._AMBER), (f"imagined +{i + 1}", viz._GREY)])
+        for i, f in enumerate(plan)])
+    mp4 = viz.encode_mp4(np.concatenate([frames, frames[::-1]]), fps=4)
+    return reports.side_by_side([
+        ("What it intends to do next",
+         viz.video_html(mp4, f"the winning {horizon}-step manoeuvre, imagined in a copy of "
+                             "the simulator and rewound, not executed", max_width=340)),
+        ("The photograph it is matching", viz.still(goal_frame, 300, "reference")),
+    ])
+
+
+@gpu_env.task(report=True)
+async def detour(
+    seeds: int = 4,
+    steps: int = 45,
+    horizons: str = "1,4,8",
+    spaces: str = "jepa",
+    samples: int = 32,
+    iters: int = 3,
+    topk: int = 8,
+    segments: int = 2,
+    repo: str = VITL,
+    render: int = 384,
+) -> dict:
+    """The cold-start push, planned over a horizon instead of one step at a time.
+
+    `push --cold_start` is the one task here that nothing solves: from the arm's home
+    pose every learned policy leaves the block where it is, while the scripted oracle
+    still moves it 10 cm. The reason written down at the time was structural rather
+    than perceptual. To push, the gripper has to travel AROUND to the far side of the
+    block, and every step of that detour makes the camera image LESS like the reference
+    photograph. One-step descent cannot pay that cost in any representation.
+
+    That is a falsifiable claim, and this task tests it by changing exactly one thing:
+    how far ahead the planner looks before scoring. Same reward, same simulator, same
+    5 cm action limit, same number of executed steps. `horizon=1` IS the greedy search.
+    If a longer horizon fixes it, the diagnosis was right and the features were never
+    the problem. If it does not, the diagnosis was wrong and that is the finding.
+    """
+    import numpy as np
+    import torch
+    from transformers import VJEPA2Model
+
+    hs = [int(h) for h in horizons.split(",") if h.strip()]
+    sp = [s.strip() for s in spaces.split(",") if s.strip()]
+
+    _paint("loading the encoder", "then photographing the finished task",
+           [("checkpoint", repo), ("scenes", str(seeds)), ("horizons", horizons),
+            ("compared in", spaces), ("steps per episode", str(steps))])
+    log.info("guard: %s", jepa.guard_memory())
+    model, processor, params = jepa.load(repo)
+    model = model.to("cuda", torch.bfloat16).eval()
+    untrained = (VJEPA2Model(model.config).to("cuda", torch.bfloat16).eval()
+                 if "random_net" in sp else None)
+
+    def make_reward(space, goal_frame):
+        if space == "jepa":
+            return planning.EncoderReward(model, goal_frame)
+        if space == "random_net":
+            return planning.EncoderReward(untrained, goal_frame)
+        return planning.PixelReward(goal_frame)
+
+    runs: dict[str, list] = {}
+    first: dict = {}
+    show_h = max(hs)
+
+    for sd in range(seeds):
+        # The ceiling. A scripted push that is told the answer, and the only thing that
+        # says whether a scene is winnable at all from the home pose.
+        env, goal_frame, goal_cube, start_frame, cube0 = sim.push_task(
+            seed=sd, render_size=ac.CROP, start_in_contact=False)
+        ep = planning.run_push_episode(
+            env, goal_frame, goal_cube, make_reward(sp[0], goal_frame),
+            policy="oracle", steps=steps, render_size=render, seed=sd, cube0=cube0)
+        runs.setdefault("scripted oracle", []).append(ep)
+        if sd == 0:
+            first = {"goal": goal_frame, "start": start_frame, "eps": {"scripted oracle": ep}}
+        env.close()
+
+        for space in sp:
+            for h in hs:
+                label = f"{DETOUR_SPACES[space]}, horizon {h}"
+                env, goal_frame, goal_cube, start_frame, cube0 = sim.push_task(
+                    seed=sd, render_size=ac.CROP, start_in_contact=False)
+                reward = make_reward(space, goal_frame)
+
+                show = sd == 0 and space == sp[0] and h == show_h
+
+                def _tick(ep, t, total, _l=label, _s=sd, _show=show, _g=goal_frame, _h=h):
+                    rows = [("scene", f"{_s + 1} of {seeds}"), ("policy", _l),
+                            ("block to its photographed spot", f"{ep.cube_dist[-1] * 100:.1f} cm"),
+                            ("block moved so far", f"{(ep.cube_dist[0] - ep.cube_dist[-1]) * 100:+.1f} cm"),
+                            ("gripper to block", f"{ep.arm_dist[-1] * 100:.1f} cm"),
+                            ("image distance to the photo", f"{ep.energy[-1]:.4f}")]
+                    extra = _detour_plan_html(ep, _g, _h) if (_show and ep.plans) else ""
+                    _paint_more(
+                        f"scene {_s + 1}, {_l}: step {t + 1}/{total}",
+                        f"Each step it imagines {samples} complete {_h}-step manoeuvres in a "
+                        "copy of the simulator, films the END of each one, keeps the one that "
+                        "looks most like the photograph, and executes only its first move.",
+                        rows, extra)
+
+                ep = planning.run_push_cem(
+                    env, goal_frame, goal_cube, reward, steps=steps, horizon=h,
+                    segments=1 if h == 1 else min(segments, h), samples=samples,
+                    topk=topk, iters=iters, render_size=render,
+                    seed=sd, on_step=_tick, preview=show)
+                runs.setdefault(label, []).append(ep)
+                if sd == 0:
+                    first["eps"][f"horizon {h}" if len(sp) == 1 else label] = ep
+                    if show:
+                        first["plan_h"] = h
+                log.info("scene %d %s: closed=%.2f moved=%.1fcm %.0fs",
+                         sd, label, ep.closed, ep.cube_moved * 100, ep.seconds)
+                env.close()
+                del reward
+                torch.cuda.empty_cache()
+
+        _render_detour_report(runs, first, steps, samples, iters, segments)
+
+    summary = {"scenes": seeds, "steps": steps, "horizons": hs, "spaces": sp,
+               "results": {k: {"closed": float(np.mean([e.closed for e in v])),
+                               "moved_cm": float(np.mean([e.cube_moved for e in v]) * 100),
+                               "solved": int(sum(e.cube_dist[-1] < 0.05 for e in v)),
+                               "n": len(v)} for k, v in runs.items()}}
+    log.info("detour summary: %s", summary)
+    return summary
+
+
+def _render_detour_report(runs, first, steps, samples, iters, segments) -> None:
+    import numpy as np
+
+    n = len(next(iter(runs.values())))
+    rows = []
+    for label, eps in runs.items():
+        cl = [e.closed for e in eps]
+        rows.append((label, {
+            "closed": float(np.mean(cl)), "sd": float(np.std(cl)),
+            "moved_cm": float(np.mean([e.cube_moved for e in eps])) * 100,
+            "solved": int(sum(e.cube_dist[-1] < 0.05 for e in eps)), "n": len(eps),
+            "energy": float(np.mean([e.energy[-1] for e in eps])),
+        }))
+    d = dict(rows)
+    planned = [(lbl, s) for lbl, s in rows if "horizon" in lbl]
+    greedy = next((s for lbl, s in planned if lbl.endswith("horizon 1")), None)
+    best_lbl, best = max(planned, key=lambda kv: kv[1]["closed"]) if planned else (None, None)
+
+    body = ""
+    if greedy is not None and best is not None:
+        gap = best["closed"] - greedy["closed"]
+        se = float(np.sqrt(best["sd"] ** 2 / max(n, 1) + greedy["sd"] ** 2 / max(n, 1)))
+        body += reports.verdict(
+            f"<b>Looking further ahead {'is what unlocks' if gap > 2 * se else 'does not unlock'} "
+            f"the cold start.</b> One-step descent (horizon 1) closes "
+            f"{greedy['closed']:+.0%} of the block's distance and moves it "
+            f"{greedy['moved_cm']:+.1f} cm. The best horizon ({best_lbl.split(', ')[-1]}) "
+            f"closes {best['closed']:+.0%} and moves it {best['moved_cm']:+.1f} cm, a gap "
+            f"of {gap:+.0%} against a standard error of {se:.0%} over {n} scenes. "
+            f"The reward, the simulator and the action limit are identical across those "
+            f"rows: the only thing that changed is how many steps the planner scores "
+            f"before committing to one.",
+            good=gap > 2 * se)
+    if "scripted oracle" in d:
+        body += reports.note(
+            f"The ceiling for these scenes is the scripted oracle, which is told the "
+            f"block's coordinates and the target: {d['scripted oracle']['closed']:+.0%}, "
+            f"{d['scripted oracle']['moved_cm']:+.1f} cm. Any planner here is working from "
+            f"one photograph and nothing else.")
+
+    if greedy is not None and best is not None and greedy["energy"] < best["energy"]:
+        orc = d.get("scripted oracle")
+        # Which of the two stories this is depends on where the ORACLE lands. If a run
+        # that genuinely does the job scores better than the arm-posing minimum, the
+        # objective is fine and greedy merely got stuck on the way. If it does not, the
+        # photograph is satisfiable without touching the block and no amount of search
+        # fixes that. Let the numbers pick.
+        broken = orc is not None and orc["energy"] > greedy["energy"]
+        body += reports.verdict(
+            f"<b>The greedy planner wins the objective and loses the task.</b> It ends "
+            f"{greedy['energy']:.3f} from the reference photograph, against "
+            f"{best['energy']:.3f} for the horizon planner. By the only quantity either "
+            f"of them can actually measure, the greedy planner did better, and it moved "
+            f"the block {greedy['moved_cm']:+.1f} cm. "
+            + (f"The scripted oracle, which does the job, ends at {orc['energy']:.3f}: "
+               + ("worse than the arm-posing solution, so matching the photograph is "
+                  "satisfiable without touching the block at all and this is a flaw in "
+                  "the objective rather than in the search."
+                  if broken else
+                  "better than both, so the photograph does reward the real task and the "
+                  "greedy planner simply stopped at a nearer, wronger minimum.")
+               if orc is not None else ""),
+            good=False)
+
+    body += reports.heading("The task, as the robot receives it")
+    body += reports.reference_panel(
+        viz.still(first["start"], 300, "step 0: arm at home, block where it started"),
+        viz.still(first["goal"], 300, "the reference photograph: block already pushed"),
+    )
+    body += reports.note(
+        "These two images are the entire specification. The planner is given the "
+        "right-hand one and told nothing else: not where the block is, not where it "
+        "should end up, not that the scene contains a block. The arm starts at its home "
+        "pose, which is the whole difficulty: the gripper has to travel around to the "
+        "far side of the block before it can push, and every step of that journey makes "
+        "the camera image LESS like the photograph."
+    )
+
+    body += reports.heading("How it gets there")
+    mp4 = viz.encode_mp4(viz.push_video(first["eps"], first["goal"]), fps=4)
+    body += viz.video_html(mp4, "One scene. Every panel runs the same search with the "
+                                "same reward; only the planning horizon differs. The "
+                                "caption is the BLOCK's distance, not the arm's.",
+                           max_width=980)
+
+    plan_ep = next((e for e in first["eps"].values() if getattr(e, "plan_best", ())), None)
+    if plan_ep is not None:
+        step_i, gained, frames = plan_ep.plan_best
+        clip = np.stack([viz.annotate(f.copy(), [("THE PLAN", viz._AMBER),
+                                                 (f"imagined +{i + 1}", viz._GREY)])
+                         for i, f in enumerate(frames)])
+        body += reports.heading("The manoeuvre that moved the block")
+        body += viz.video_html(
+            viz.encode_mp4(np.concatenate([clip, clip[::-1]]), fps=4),
+            f"Step {step_i}: the whole sequence the planner scored best, imagined in a "
+            f"rewound copy of the simulator. Executing only its first move took "
+            f"{gained:.1f} cm off the block's distance. A one-step planner cannot see "
+            f"any of this, because it only ever scores where the arm lands next.",
+            max_width=420)
+
+    show = first["eps"].get(f"horizon {first.get('plan_h')}")
+    if show is not None and len(show.energy) > 2:
+        body += reports.heading("The detour, in one chart")
+        x = list(range(len(show.cube_dist)))
+        body += viz.twin_chart(
+            "Getting worse on purpose: image distance against real progress",
+            "planning step", x,
+            ("distance to the reference photograph", [float(e) for e in show.energy][:len(x)]),
+            ("block to its photographed spot (cm)", [c * 100 for c in show.cube_dist]))
+        body += reports.note(
+            "This is the local minimum the greedy planner cannot cross. Early on the "
+            "orange line RISES: the arm is walking around the block and the picture is "
+            "getting further from the goal the whole time. A one-step planner scores "
+            "exactly that rising quantity and so never takes the first step. Scoring "
+            "only the END of a multi-step manoeuvre is what lets it pay the cost."
+        )
+
+    body += reports.heading("Every scene")
+    body += reports.side_by_side([
+        ("Block distance over the episode",
+         viz.curve_chart("Distance from the block to where the photograph shows it",
+                         "planning step", "block to goal (cm)",
+                         {k: [(i, c * 100) for i, c in enumerate(v.cube_dist)]
+                          for k, v in first["eps"].items() if "oracle" not in k})),
+        ("Progress by planning horizon",
+         viz.bar_chart("Block progress toward the photographed position",
+                       [lbl for lbl, _ in rows],
+                       {"gap closed": [s["closed"] for _, s in rows]},
+                       "fraction of the way", floor=0.0, floor_label="no progress")),
+    ])
+    body += reports.data_table(
+        ["planner", "block progress", "block moved", "solved",
+         "final distance to the photo"],
+        [[lbl, f"{s['closed']:+.0%} +- {s['sd']:.0%}", f"{s['moved_cm']:+.1f} cm",
+          f"{s['solved']}/{s['n']}", f"{s['energy']:.3f}"] for lbl, s in rows])
+
+    tbl = [
+        ("specification", "one photograph of the finished task"),
+        ("start", "arm at home (cold start)"),
+        ("planner", f"CEM, {samples} sequences x {iters} iterations, "
+                    f"{segments} piecewise-constant segments, 5 cm per step"),
+        ("executed", f"the first move of the best sequence, {steps} times"),
+        ("scored on", "the block's distance to its photographed position"),
+        ("scenes", str(n)),
+    ]
+    flyte.report.replace(reports.final_html(
+        "detour - looking further ahead than the next step", tbl, body))
     flyte.report.flush()
 
 
